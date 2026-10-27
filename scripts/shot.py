@@ -183,6 +183,10 @@ def settle(cdp: Cdp, frames: int = 2) -> None:
 
 def shot(cdp: Cdp, spec: dict, base: str, out: Path) -> Path:
     """进入一个状态并截图，按 .stage 的实际高度裁切。"""
+    # headless Chrome 默认报 `prefers-reduced-motion: reduce`（实测 matchMedia 为 true），
+    # 不显式关掉的话，截出来的图永远没有呼吸点/电平条——「动效对不对」等于没看过。
+    cdp.call("Emulation.setEmulatedMedia",
+             features=[{"name": "prefers-reduced-motion", "value": "no-preference"}])
     cdp.call("Emulation.setDeviceMetricsOverride", width=spec.get("width", 420),
              height=spec.get("height", 900), deviceScaleFactor=2, mobile=False)
     cdp.call("Page.navigate", url=base + spec["path"])
