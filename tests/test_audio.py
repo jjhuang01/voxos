@@ -44,6 +44,27 @@ def test_pipeline_merges_unfinished_sentence(cfg, bus, make_voice, stub_embedder
     assert utterances[0].audio_ms > 2600, "应当把停顿后的后半句并入同一句"
 
 
+def test_force_end_flushes_even_when_transcript_is_empty(cfg, bus, make_voice, stub_embedder):
+    """硬上限到了必须收尾，哪怕转写是空的。
+
+    空转写曾被当成「还没说完」，于是缓冲不清；下一块音频又把整段重拼重解一次，
+    一块比一块慢——实测 12 秒后吞吐掉到 1/8、CPU 一路涨到 95%。
+    真机上的触发条件很普通：一声咳嗽、一次 VAD 假阳性。
+    """
+    short = cfg.with_overrides(**{"audio.max_utterance_ms": 1000,
+                                  "audio.min_speech_ms": 100})
+    lock = dsp.SpeakerLock(threshold=0.84, embedder=stub_embedder)
+    lock.enroll([make_voice(118, 1.0)])
+    pipeline = audio.AudioPipeline(cfg=short, stt=audio.ScriptedStt([]),
+                                   lock=lock, on_event=bus)
+
+    utterances = list(pipeline.run(audio.ArraySource(make_voice(118, 6.0))))
+
+    assert len(utterances) >= 4, f"硬上限没生效，只收尾了 {len(utterances)} 次"
+    assert all(not u.accepted for u in utterances)
+    assert all("空转写" in u.reason for u in utterances)
+
+
 def test_pipeline_halts_during_tts(cfg, bus, make_voice, stub_embedder, silence):
     gate = dsp.EchoGate(decay_ms=300, gate_dbfs=-25)
     pipeline = build_pipeline(cfg, bus, stub_embedder, ["这句不该被处理"], echo=gate)

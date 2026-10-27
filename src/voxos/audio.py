@@ -359,8 +359,8 @@ class SenseVoiceStt:
     """本地 SenseVoice（sherpa-onnx）：中英混说 + 代码术语，int8 在 CPU 上快于实时。
 
     离线模型，`final` 参数被忽略——每次调用都是对整段音频重新解码。
-    因此管道里"边听边判是否说完"的复查点会真的花 CPU（3 秒音频约 150ms），
-    这是本地离线识别的固有代价，换来的是完全不出网。
+    因此管道里"边听边判是否说完"的复查点会真的花 CPU（实测 3 秒音频 94ms，
+    约 32× 实时），这是本地离线识别的固有代价，换来的是完全不出网。
     """
 
     _TAG = re.compile(r"<\|[^|]*\|>")          # <|zh|><|NEUTRAL|><|Speech|><|withitn|>
@@ -404,9 +404,18 @@ def make_stt(cfg: Config, hotwords: list[str] | None = None) -> SttEngine:
 
 _STOP = {"__init__", "index", "main", "test", "tests", "utils", "src", "dist", "build"}
 
+# 只有这两个后端吃热词：OpenAI 兼容接口走 prompt，faster-whisper 走 initial_prompt。
+# SenseVoice 在 sherpa-onnx 里没有热词偏置接口——扫一堆文件名却喂不进去，
+# 不如不扫（`refresh_hotwords` 要 rglob 几千个文件）。
+HOTWORD_BACKENDS = ("openai", "local_whisper")
+
+
+def supports_hotwords(cfg: Config) -> bool:
+    return str(cfg.get("stt.backend", "scripted")) in HOTWORD_BACKENDS
+
 
 def refresh_hotwords(cfg: Config, workspace: str | Path | None = None, limit: int | None = None) -> list[str]:
-    """扫描工作区文件名/依赖名生成热词表，把代码术语识别率从 75% 拉到 99%。"""
+    """扫描工作区文件名/依赖名生成热词表。只对 `HOTWORD_BACKENDS` 里的后端有意义。"""
     root = Path(os.path.expanduser(str(workspace or cfg.get("workspace.default_code_dir", "~"))))
     cap = int(limit or cfg.get("audio.hotwords_max", 2000))
     words: list[str] = []
@@ -484,9 +493,7 @@ class AudioPipeline:
             self._ep.reset()
             last_partial_ms = 0.0
         if buffer:
-            final = self._finalize(buffer)
-            if final:
-                yield final
+            yield self._finalize(buffer)             # 收尾必产一段，缓冲随之清空
 
     # -- 内部 -------------------------------------------------------------
     def _preprocess(self, chunk: np.ndarray) -> np.ndarray:
@@ -499,29 +506,41 @@ class AudioPipeline:
 
     def _maybe_finalize(self, buffer: list[np.ndarray], state: str,
                         last_partial_ms: float) -> Utterance | None:
+        """候选态判断「说完了没」，答不出就返回 None 继续等；硬上限直接收尾。"""
+        if state == "force_end":
+            return self._finalize(buffer)          # 到顶了，不必再为判断多解一次
         audio = np.concatenate(buffer) if buffer else np.zeros(0, dtype=np.float32)
         audio_ms = audio.size / dsp.SR * 1000.0
-        if state == "candidate" and audio_ms - last_partial_ms < self.partial_interval_ms:
-            return None                              # 还没到复查点，省一次 STT
-        text = self.stt.transcribe(audio, final=False)   # 部分转写：只用于判断是否说完
-        if state == "candidate" and not self._ep.should_end(text):
-            return None                              # 半截话，继续等（语义尾词等待）
-        return self._finalize(buffer)                # 终稿重新解码，保证文本权威
+        if audio_ms - last_partial_ms < self.partial_interval_ms:
+            return None                            # 还没到复查点，省一次 STT
+        if not self._ep.should_end(self.stt.transcribe(audio, final=False)):
+            return None                            # 半截话，继续等（语义尾词等待）
+        return self._finalize(buffer)              # 终稿重新解码，保证文本权威
 
-    def _finalize(self, buffer: list[np.ndarray]) -> Utterance | None:
+    def _finalize(self, buffer: list[np.ndarray]) -> Utterance:
+        """收尾一段话，**永远返回一个 Utterance**——哪怕是空转写。
+
+        返回 `None` 会被 `run()` 理解成「还没说完，继续攒」，而那只在候选态成立。
+        一旦 VAD 判了硬上限或静音收尾，缓冲就必须清掉：留着它，下一块音频会把
+        整段重新拼一遍再解码一次，句子越长越慢，最后把管道拖死。
+        真机上的触发条件很普通——一声咳嗽、一次 VAD 假阳性，转写出来是空的。
+        """
         audio = np.concatenate(buffer) if buffer else np.zeros(0, dtype=np.float32)
         audio_ms = audio.size / dsp.SR * 1000.0
         if audio_ms < float(self.cfg.get("audio.min_speech_ms", 200)):
-            return None
+            return self._drop(audio_ms, 0.0, "太短，已丢弃")
         ok, score = self.lock.verify(audio)
         if not ok:
-            self.stats["rejected"] += 1
-            return Utterance("", score, audio_ms, False, reason="声纹不匹配，已丢弃")
+            return self._drop(audio_ms, score, "声纹不匹配，已丢弃")
         text = self.stt.transcribe(audio, final=True)
         if not text.strip():
-            return None
+            return self._drop(audio_ms, score, "空转写，已丢弃")
         if not self.echo.allow_text(text):
-            return Utterance(text, score, audio_ms, False, reason="回声门丢弃")
+            return self._drop(audio_ms, score, "回声门丢弃")
         self.stats["utterances"] += 1
         self.on_event("listening", "聆听中", f"{audio_ms:.0f}ms 声纹 {score:.2f}")
         return Utterance(text, score, audio_ms, True)
+
+    def _drop(self, audio_ms: float, score: float, reason: str) -> Utterance:
+        self.stats["rejected"] += 1
+        return Utterance("", score, audio_ms, False, reason=reason)

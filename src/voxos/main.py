@@ -305,9 +305,10 @@ def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
         enrolled.set()
     url = _serve(runtime, lock, enrolled)
     sounds = ui.ensure_earcons(cfg.root / ".voxos" / "sounds")
-    hotwords = audio.refresh_hotwords(cfg)
+    hotwords = audio.refresh_hotwords(cfg) if audio.supports_hotwords(cfg) else []
     _, threshold, kind = audio.make_embedder(cfg)
-    print(f"VoxOS 已启动：声纹后端={kind} 阈值={threshold} 热词={len(hotwords)} 胶囊={url}")
+    print(f"VoxOS 已启动：声纹后端={kind} 阈值={threshold} "
+          f"识别={_hotword_note(cfg, hotwords)} 胶囊={url}")
     if not lock.profiles:
         print("首次使用：在胶囊面板里点「录入声纹」（3 秒），或运行 voxos enroll --record 3")
         runtime.bus.emit("onboard", "请先录入声纹", "点胶囊 → 录入声纹")
@@ -321,7 +322,7 @@ def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
 
 def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[str, Path]) -> int:
     """主循环：只做「取一句话 → 派发 → 回报」，别的都丢给线程。"""
-    hotwords = audio.refresh_hotwords(cfg)
+    hotwords = audio.refresh_hotwords(cfg) if audio.supports_hotwords(cfg) else []
     pipeline = audio.AudioPipeline(cfg=cfg, stt=audio.make_stt(cfg, hotwords), lock=lock,
                                    vad=audio.make_vad(cfg), on_event=runtime.bus)
     source = audio.SelfHealingSource(lambda: audio.MicSource(int(cfg.get("audio.chunk_size", 512))),
@@ -468,12 +469,22 @@ def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
         ("声纹模型", str(cfg.path("audio.speaker_model", "")) if cfg.path("audio.speaker_model", "").exists() else "缺失（降级）"),
         ("声纹档案", "已录入" if cfg.path("audio.voiceprint_profiles").exists() else "未录入"),
         ("LLM", f"{cfg.get('llm.model')} @ {cfg.get('llm.base_url')}" if cfg.flag("llm.enabled") else "未启用（走快通道+离线兜底）"),
+        ("识别后端", _hotword_note(cfg, [])),
         ("dry_run", str(cfg.flag("workspace.dry_run"))),
         ("角色", str(cfg.get("workspace.role"))),
     ]
     for name, value in checks:
         print(f"{name:<12} {value}")
     return 0
+
+
+def _hotword_note(cfg: Config, words: list[str]) -> str:
+    """热词表对当前后端到底有没有用——没用就直说，别报一个好看的数字。"""
+    backend = str(cfg.get("stt.backend", ""))
+    label = STT_LABELS.get(backend, backend or "未设置")
+    if audio.supports_hotwords(cfg):
+        return f"{label}（热词表 {len(words)} 条生效）"
+    return f"{label}（无热词接口，热词表不生效）"
 
 
 def _version(module: str) -> str:

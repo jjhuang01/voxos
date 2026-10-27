@@ -42,6 +42,19 @@ def test_backend_sense_voice_is_wired(tmp_path: Path):
         audio.make_stt(cfg)
 
 
+def test_hotwords_only_apply_to_backends_that_support_them():
+    """热词表对 SenseVoice 不生效——启动横幅和 doctor 不能报一个假的「热词=N 条」。
+
+    sherpa-onnx 的 SenseVoice 没有热词偏置接口，扫几千个文件名出来也喂不进去。
+    与其装作生效，不如提前不扫（`refresh_hotwords` 的 rglob 不便宜）。
+    """
+    cfg = load()
+    assert audio.supports_hotwords(cfg.with_overrides(**{"stt.backend": "openai"}))
+    assert audio.supports_hotwords(cfg.with_overrides(**{"stt.backend": "local_whisper"}))
+    assert not audio.supports_hotwords(cfg.with_overrides(**{"stt.backend": "sense_voice"}))
+    assert not audio.supports_hotwords(cfg.with_overrides(**{"stt.backend": "scripted"}))
+
+
 def test_special_tags_are_stripped():
     """SenseVoice 会在文本里塞 <|zh|><|NEUTRAL|> 这类标记，必须清掉再进路由。"""
     raw = "<|zh|><|NEUTRAL|><|Speech|><|withitn|>把登录接口的空值校验补上"
