@@ -141,10 +141,16 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 
 ```bash
 cd voxos
+make setup                         # 首次：建 .venv 并装依赖（约 20s）
 python scripts/fetch_models.py     # 首次：下载 CAM++ 与 Silero（约 28MB）
 make test                          # 77 passed
 make verify                        # 10/10，产出 docs/acceptance.json + ACCEPTANCE.html
 make demo                          # 真实语音端到端（沙箱写盘）
+```
+
+**全新克隆实测**：`git clone` 到空目录后只跑 `make setup && make test`，
+得到 `76 passed, 1 skipped` —— 跳过的是 Silero 用例（缺模型文件时按设计 skip，
+而不是假装通过）。这条验证的是"提交里没有漏文件"，不是"功能没问题"。
 ```
 
 `make verify` 会在 `.voxos/verify/` 沙箱内运行，**不会写入你的真实日志目录**。
