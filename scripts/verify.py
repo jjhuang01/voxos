@@ -11,6 +11,8 @@ import argparse
 import ast
 import json
 import statistics
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -176,7 +178,28 @@ def measure_onboarding() -> dict[str, object]:
             "status_enrolled": cli._status(runtime, lock)["enrolled"]}
 
 
+def measure_confirm() -> dict[str, object]:
+    """确认通道必须真的能从「说话」走到：大改 → 挂起 → 点头才执行，且卡片上写的是人话。"""
+    cfg = load().with_overrides(**{"workspace.dry_run": True})
+    plan = core.heuristic_plan("重构整个登录模块", cfg)
+    reached = bool(plan) and plan[0][0] == "delegate_to_coding_cli"
+
+    seen: list[str] = []
+    executor = core.Executor(cfg=cfg, confirm=lambda name, args, verdict:
+                             seen.append(verdict.reason) or False)
+    denied = executor.execute_safely("delegate_to_coding_cli", {"prompt": "重构整个登录模块"})
+    reason = seen[0] if seen else ""
+    human = bool(reason) and "red_confirm" not in reason.lower() \
+        and "delegate_to_coding_cli" not in reason
+
+    approved = core.Executor(cfg=cfg, confirm=lambda *_: True)
+    allowed = approved.execute_safely("delegate_to_coding_cli", {"prompt": "重构整个登录模块"})
+    return {"reached_from_speech": reached, "reason": reason, "reason_is_human": human,
+            "deny_cancels": "已取消" in denied, "allow_runs": "dry-run" in allowed}
+
+
 def measure_voiceprint(cfg, refresh: bool) -> dict[str, object]:
+    """声纹语料上的 FRR/FAR：阈值不是拍的，是扫出来的。"""
     manifest = corpus.ensure_corpus(ROOT / ".voxos" / "corpus", force=refresh)
     embedder, threshold, kind = audio.make_embedder(cfg)
     root = ROOT / ".voxos" / "corpus"
@@ -285,8 +308,9 @@ def measure_redlines(cfg) -> dict[str, object]:
     ]
     blocked = sum(1 for name, args in cases if executor.execute_safely(name, args).startswith("⛔"))
     ops = core.Executor(cfg=cfg.with_overrides(**{"workspace.role": "OPS"}), confirm=lambda *_: False)
-    ops_blocked = "无权调用" in ops.execute_safely("write_code", {"file_path": "x.py",
-                                                                "operation": "CREATE_OR_OVERWRITE"})
+    ops_result = ops.execute_safely("write_code", {"file_path": "x.py",
+                                                  "operation": "CREATE_OR_OVERWRITE"})
+    ops_blocked = ops_result.startswith("⛔") and "OPS" in ops_result
     doctor = core.Executor(cfg=cfg.with_overrides(**{"workspace.role": "DOCTOR"}), confirm=lambda *_: False)
     draft = doctor.execute_safely("append_structured_log", {"content": "草稿验收"}).startswith("【未审核草稿】")
     confirm_needed = "已取消" in executor.execute_safely("delegate_to_coding_cli", {"prompt": "重构"})
@@ -319,18 +343,32 @@ def measure_code() -> dict[str, object]:
 
 
 def measure_tests() -> dict[str, object]:
-    started = time.perf_counter()
-    completed = subprocess.run([sys.executable, "-m", "pytest", "-q", "--no-header",
-                                "--basetemp", str(SANDBOX / "pytest")],
-                               cwd=ROOT, capture_output=True, text=True)
-    import re
+    """跑整套测试。
 
+    `--basetemp` 每次用新目录：pytest 启动时会先删旧 basetemp，而在受限环境里
+    这一步会被权限拦掉，紧接着每个用 tmp_path 的测试都会在"建软链"上炸掉
+    （表现是几十个 error，看起来像代码坏了）。
+    """
+    started = time.perf_counter()
+    temp = SANDBOX / f"pytest-{datetime.now():%H%M%S}"
+    completed = subprocess.run([sys.executable, "-m", "pytest", "-q", "--no-header",
+                                "--basetemp", str(temp)],
+                               cwd=ROOT, capture_output=True, text=True)
+    _prune_basetemps(keep=temp)
     text = completed.stdout + completed.stderr
     matched = re.search(r"\d+ (?:passed|failed)[^\n]*", text)
     summary = matched.group(0).strip() if matched else text.strip().splitlines()[-1:]
     return {"returncode": completed.returncode,
             "summary": summary if isinstance(summary, str) else str(summary),
             "seconds": round(time.perf_counter() - started, 1)}
+
+
+def _prune_basetemps(keep: Path) -> None:
+    """只留本次与上一次的 basetemp，别让沙箱目录越堆越大。"""
+    olds = sorted(SANDBOX.glob("pytest-*"), key=lambda p: p.name)
+    for stale in olds[:-2]:
+        if stale != keep:
+            shutil.rmtree(stale, ignore_errors=True)
 
 
 # ------------------------------------------------------------------ 报告
@@ -357,6 +395,8 @@ def build_report(refresh: bool = False) -> dict[str, object]:
     settings_report = measure_settings()
     print("→ 首次启动引导 …")
     onboarding = measure_onboarding()
+    print("→ 确认通道 …")
+    confirm = measure_confirm()
     print("→ 代码度量 …")
     code = measure_code()
     print("→ 测试套件 …")
@@ -367,7 +407,7 @@ def build_report(refresh: bool = False) -> dict[str, object]:
                 "sherpa": _version("sherpa_onnx"), "platform": sys.platform},
         "fast_path": fast, "dispatch": dispatch, "voiceprint": voiceprint,
         "e2e": e2e, "redlines": redlines, "security": security, "standby": standby,
-        "settings": settings_report, "onboarding": onboarding,
+        "settings": settings_report, "onboarding": onboarding, "confirm": confirm,
         "code": code, "tests": tests,
     }
 
@@ -410,6 +450,12 @@ def verdicts(report: dict[str, object]) -> list[dict[str, object]]:
         {"item": "无声纹时给出录入入口", "measured": str(report["onboarding"]["enroll_available"]),  # type: ignore[index]
          "pass": bool(report["onboarding"]["enroll_available"]
                       and not report["onboarding"]["status_enrolled"])},  # type: ignore[index]
+        {"item": "确认通道从语音可达且文案是人话",
+         "measured": "可达" if report["confirm"]["reached_from_speech"] else "不可达",  # type: ignore[index]
+         "pass": bool(report["confirm"]["reached_from_speech"]  # type: ignore[index]
+                      and report["confirm"]["reason_is_human"]
+                      and report["confirm"]["deny_cancels"]
+                      and report["confirm"]["allow_runs"])},
         {"item": "静音待机 CPU < 1.5%", "measured": f"{report['standby']['cpu_percent']}%/秒音频",  # type: ignore[index]
          "pass": report["standby"]["cpu_percent"] < 1.5},  # type: ignore[index]
         {"item": "静音零误触发", "measured": f"{report['standby']['segments']} 段",  # type: ignore[index]

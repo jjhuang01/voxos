@@ -32,7 +32,7 @@ def test_ops_role_cannot_write_files(cfg, bus):
     ops_cfg = cfg.with_overrides(**{"workspace.role": "OPS"})
     executor = core.Executor(cfg=ops_cfg, on_event=bus)
     result = executor.execute_safely("write_code", {"file_path": "x.py", "operation": "CREATE_OR_OVERWRITE"})
-    assert "无权调用" in result
+    assert "OPS" in result and "权限" in result
     assert "已巡检" not in result
 
 
@@ -64,6 +64,34 @@ def test_confirm_channel_exception_fails_closed(cfg, bus):
     executor = core.Executor(cfg=cfg, on_event=bus, confirm=boom)
     result = executor.execute_safely("delegate_to_coding_cli", {"prompt": "x"})
     assert "已取消" in result or "已拦截" in result
+
+
+def test_confirm_text_is_human(cfg, bus):
+    """确认卡是最后一道防线：上面写的必须是人话，不能是 red_confirm · tool_name。"""
+    seen: list[object] = []
+    executor = core.Executor(cfg=cfg, on_event=bus,
+                             confirm=lambda name, args, verdict: seen.append(verdict) or False)
+    executor.execute_safely("delegate_to_coding_cli", {"prompt": "重构登录模块"})
+    verdict = seen[0]
+    assert "red_confirm" not in verdict.reason.lower()
+    assert "delegate_to_coding_cli" not in verdict.reason
+    assert "确认" in verdict.reason or "点头" in verdict.reason
+
+
+def test_blocked_reason_is_human(cfg, bus):
+    """角色越权与红线拦截的理由同样要能直接读给用户听。"""
+    guard = core.Guard(role="OPS")
+    reason = guard.inspect("write_code", {"path": "/tmp/a.py"}).reason
+    assert "OPS" in reason and "write_code" not in reason
+    forbidden = guard.inspect("write_code", {"content": "rm -rf /"}).reason
+    assert "红线" in forbidden and "已直接拒绝" in forbidden
+
+
+def test_every_tool_has_a_human_name():
+    """人话名字来自工具自己的中文描述首句——新加工具忘了写中文，这里就会红。"""
+    core.ensure_tools()
+    missing = [name for name in core.REGISTRY if core.human_name(name) == name]
+    assert not missing, f"这些工具没有中文描述：{missing}"
 
 
 def test_snapshot_and_rollback(cfg, executor, tmp_path):

@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterator
 from .config import Config, load, load_redlines
 from .registry import REGISTRY, RiskLevel, Tool, ensure_tools
 
-__all__ = ["Verdict", "Guard", "Executor", "snapshot_file", "restore_latest"]
+__all__ = ["Verdict", "Guard", "Executor", "human_name", "snapshot_file", "restore_latest"]
 
 
 @dataclass(frozen=True)
@@ -48,12 +48,26 @@ class Guard:
         payload = f"{name} {json.dumps(args, ensure_ascii=False, default=str)}"
         for pattern in self.forbidden:
             if pattern.search(payload):
-                return Verdict(RiskLevel.RED_FORBIDDEN, f"命中安全红线 /{pattern.pattern}/")
+                return Verdict(RiskLevel.RED_FORBIDDEN,
+                               f"红线规则 /{pattern.pattern}/ 命中了这次调用，已直接拒绝")
         allow = list(self.policy.get("allow", ["*"]))
         if "*" not in allow and name not in allow:
-            return Verdict(RiskLevel.RED_FORBIDDEN, f"角色 {self.role} 无权调用 {name}")
+            return Verdict(RiskLevel.RED_FORBIDDEN,
+                           f"当前角色 {self.role} 没有「{human_name(name)}」的权限")
         level = self.risk.get(name, RiskLevel.RED_CONFIRM)  # 未登记 → 保守处理
-        return Verdict(level, f"{level.value} · {name}", draft=bool(self.policy.get("draft")))
+        if level is RiskLevel.RED_CONFIRM:
+            reason = f"「{human_name(name)}」会真的改动东西，需要你点头"
+        else:
+            reason = f"{level.value} · {name}"
+        return Verdict(level, reason, draft=bool(self.policy.get("draft")))
+
+
+def human_name(name: str) -> str:
+    """把工具名翻成人话：用工具自己的中文描述首句，取不到就退回原名。"""
+    meta = REGISTRY.get(name)
+    schema = (meta.schema.get("function", {}) if meta else {})
+    text = schema.get("description") or name
+    return re.split(r"[。；，,（(]", text, maxsplit=1)[0].strip() or name
 
 
 

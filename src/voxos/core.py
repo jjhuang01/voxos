@@ -22,12 +22,14 @@ from .config import Config, load
 from .registry import (  # noqa: F401  # re-export 给旧调用方
     FAST_ROUTES, REGISTRY, RiskLevel, Tool, build_schema, ensure_tools, tool,
 )
-from .safety import Executor, Guard, Verdict, restore_latest, snapshot_file  # noqa: F401
+from .safety import (  # noqa: F401  # re-export 给旧调用方
+    Executor, Guard, Verdict, human_name, restore_latest, snapshot_file,
+)
 
 __all__ = [
     "DispatchResult", "dispatch", "chat", "heuristic_plan", "execute_safely", "SYSTEM_PROMPT",
     "RiskLevel", "Tool", "Verdict", "REGISTRY", "FAST_ROUTES", "tool", "build_schema",
-    "Guard", "Executor", "ensure_tools", "snapshot_file", "restore_latest",
+    "Guard", "Executor", "ensure_tools", "snapshot_file", "restore_latest", "human_name",
 ]
 
 
@@ -221,6 +223,10 @@ _CODE_FILE = re.compile(
     r"[\w./-]+\.(?:py|js|ts|tsx|jsx|go|java|rs|rb|php|vue|sql|sh|ya?ml|toml|json|md)\b", re.I)
 _CHANGE_VERB = re.compile(r"补|加上|加个|改|删|修|实现|重构|替换|优化")
 
+# 「大改」才交给 Coding CLI（red_confirm，会弹确认卡）。小修小补走 dispatch_code_session，
+# 免得每句话都拦一次确认——那样人就会习惯性点允许。
+_BIG_CHANGE = re.compile(r"重构|大改|重写|整个项目|整块|全部重写|交给 ?(?:claude|aider|codex|coding)", re.I)
+
 
 def heuristic_plan(text: str, cfg: Config | None = None) -> list[tuple[str, dict[str, Any]]]:
     """无模型/断网兜底：只认三大高频场景 + 撤销，命中不了就不做（宁可不做，不能乱做）。"""
@@ -232,9 +238,12 @@ def heuristic_plan(text: str, cfg: Config | None = None) -> list[tuple[str, dict
             continue
         if re.search(r"日志|记录|记一下|记一条|记个", piece):
             plan.append(("append_structured_log", {"content": piece}))
+        elif _BIG_CHANGE.search(piece):
+            # 大改交给 Coding CLI：这是 red_confirm，会真的弹确认卡等你点头
+            plan.append(("delegate_to_coding_cli", {"prompt": piece}))
         elif _CODE_FILE.search(piece) and _CHANGE_VERB.search(piece):
             plan.append(("dispatch_code_session", {"instruction": piece}))
-        elif re.search(r"写代码|改代码|改一下|加个|修复|重构|续接", piece):
+        elif re.search(r"写代码|改代码|改一下|加个|修复|续接", piece):
             plan.append(("dispatch_code_session", {"instruction": piece}))
         elif re.search(r"服务器|负载|流量|巡检|磁盘|容器|线上", piece):
             plan.append(("inspect_server_ops", {"query": piece}))

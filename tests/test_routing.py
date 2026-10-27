@@ -28,6 +28,11 @@ CASES: list[tuple[str, str, str]] = [
     ("rollback_file", "撤销刚才的修改", "标准句式"),
     ("rollback_file", "回滚", "极简"),
     ("rollback_file", "还原上次改动", "还原"),
+    # 大改走确认通道：red_confirm 必须有一条从「说话」出发的可达路径，
+    # 否则确认卡片就是个永远弹不出来的摆设。
+    ("delegate_to_coding_cli", "重构整个登录模块", "大改要确认"),
+    ("delegate_to_coding_cli", "把重构交给 claude 去做", "点名 CLI"),
+    ("delegate_to_coding_cli", "这个项目全部重写一遍", "全量重写"),
 ]
 
 
@@ -69,3 +74,22 @@ def test_code_intent_needs_file_and_verb():
     cfg = load()
     assert core.heuristic_plan("把这件事补上", cfg) == []
     assert core.heuristic_plan("auth.py 在哪", cfg) == []
+
+
+def test_big_change_does_not_steal_small_edits():
+    """大改走确认，小修小补仍走编程会话——不然每句话都弹确认，人就会闭眼点允许。"""
+    cfg = load()
+    small = core.heuristic_plan("把 auth.py 的空值校验补上", cfg)
+    assert small[0][0] == "dispatch_code_session"
+    big = core.heuristic_plan("重构整个登录模块", cfg)
+    assert big[0][0] == "delegate_to_coding_cli"
+
+
+def test_unrecognized_speech_says_the_same_thing_everywhere(cfg):
+    """接口返回与历史记录不能各说各话（曾经一处「(无动作)」一处「没听懂」）。"""
+    from voxos import main, ui
+
+    runtime = main.Runtime(cfg, ui.StatusBus())
+    reply = main._run_text(runtime, "今天天气不错")
+    assert reply == main.NO_ACTION
+    assert runtime.recent[0]["reply"] == main.NO_ACTION

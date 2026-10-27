@@ -19,6 +19,16 @@ from pathlib import Path
 from . import __version__, audio, core, corpus, dsp, settings, tools, ui
 from .config import Config, load
 
+# 一句话没匹配到任何能力时，终端、接口、历史三处必须说同一句话。
+NO_ACTION = "没听懂，什么也没做"
+
+# 识别后端在界面上的人话名（配置里仍是英文标识，不为人机耦合让步）。
+STT_LABELS = {
+    "scripted": "脚本回放（演示）",
+    "local_whisper": "本地 Whisper",
+    "openai": "OpenAI 接口",
+}
+
 # ------------------------------------------------------------------ 运行态
 
 class ConfirmGate:
@@ -73,7 +83,8 @@ class Runtime:
 
     def record(self, text: str, result: core.DispatchResult) -> None:
         self.recent.appendleft({
-            "ts": time.strftime("%H:%M:%S"), "text": text, "reply": result.reply,
+            "ts": time.strftime("%H:%M:%S"), "text": text,
+            "reply": result.reply or NO_ACTION,
             "route": result.route, "ms": round(result.latency_ms, 1),
         })
 
@@ -151,6 +162,7 @@ def _lock(cfg: Config) -> dsp.SpeakerLock:
 
 def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]:
     cfg = runtime.cfg
+    backend = str(cfg.get("stt.backend", ""))
     return {
         "version": __version__,
         "enrolled": bool(lock and lock.profiles),
@@ -158,7 +170,8 @@ def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]
         "role": cfg.get("workspace.role"),
         "dry_run": cfg.flag("workspace.dry_run"),
         "llm": cfg.flag("llm.enabled"),
-        "stt": cfg.get("stt.backend"),
+        "stt": STT_LABELS.get(backend, backend or "—"),
+        "confirm_timeout_s": float(cfg.get("workspace.confirm_timeout_s", 8)),
         "uptime_s": round(time.time() - runtime.started),
     }
 
@@ -204,7 +217,7 @@ def _ui_context(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
 def _run_text(runtime: Runtime, text: str) -> str:
     result = runtime.dispatch(text)
     runtime.record(text, result)
-    return result.reply or "(无动作)"
+    return result.reply or NO_ACTION
 
 
 def _serve(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
@@ -220,7 +233,7 @@ def _serve(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
 def cmd_text(args: argparse.Namespace, cfg: Config) -> int:
     runtime = Runtime(cfg, _bus(cfg))
     result = runtime.dispatch(args.text)
-    print(f"[{result.route}] {result.reply or '(无动作)'}  {result.latency_ms:.1f}ms")
+    print(f"[{result.route}] {result.reply or NO_ACTION}  {result.latency_ms:.1f}ms")
     return 0 if result.route != "ignore" else 2
 
 
