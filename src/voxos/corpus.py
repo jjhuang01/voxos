@@ -44,6 +44,37 @@ EN_LINES = (
     "deploy the staging build and tell me the result",
 )
 
+# 中英混说：中文句子里夹英文术语，这才是中文开发者的真实说话方式。
+# 上面那组 EN_LINES 是「英文句子用英文音色读」，量的是英文识别能力，不是混说——
+# 两件事差别很大（实测 87.5% vs 29%），别拿前者当后者的成绩。
+MIXED_LINES = (
+    "把 redis 的连接池调大一点",
+    "帮我 review 一下这个 merge request",
+    "docker 镜像重新 build 一下",
+    "nginx 的配置里加上 gzip",
+    "这个 sql 查询太慢了",
+    "把 json 解析改成 yaml",
+    "用 git rebase 把提交压一下",
+    "接口返回五零二，看一下 nginx 日志",
+    "python 脚本里 import 报错",
+    "把 token 过期时间改成两小时",
+)
+
+
+def build_mixed(root: Path, voice: str = OWNER_VOICE) -> list[dict[str, str]]:
+    """合成中英混说语料：用**中文音色**读，模拟中文开发者夹英文术语的发音。
+
+    用英文音色读同一批句子会得到一份漂亮得多的成绩，但那不是产品要面对的场景。
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    clips: list[dict[str, str]] = []
+    for index, text in enumerate(MIXED_LINES):
+        path = root / f"mixed-{index}.wav"
+        if not path.exists() and not _say(text, voice, path):
+            return []
+        clips.append({"path": path.name, "text": text})
+    return clips
+
 
 def ensure_corpus(root: Path, force: bool = False) -> dict[str, object]:
     """生成或复用语料，返回 manifest（含每段音频的路径与转写）。"""

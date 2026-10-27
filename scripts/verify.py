@@ -239,6 +239,52 @@ def measure_stt() -> dict[str, object]:
             "samples": heard_samples[:4]}
 
 
+def measure_codeswitch() -> dict[str, object]:
+    """中英混说：中文句子里夹英文术语，量术语召回和中文准确率。
+
+    这一项是补上一个测错了对象的指标：原来报的「英文 3.1%」来自**英文句子用英文
+    音色读**，那量的是英文识别；产品要面对的是中文句子里夹 `docker`、`nginx`。
+    同一个模型，同一批术语，两种念法差 3 倍——所以必须分开记。
+    """
+    model_dir = ROOT / ".voxos" / "models" / "sense-voice"
+    if not (model_dir / "model.int8.onnx").exists():
+        return {"available": False, "why": "未下载 SenseVoice 模型"}
+    root = ROOT / ".voxos" / "corpus"
+    clips = corpus.build_mixed(root)
+    if not clips:
+        return {"available": False, "why": "缺 say/afconvert，合成不了混说语料"}
+    engine = audio.SenseVoiceStt(model_dir)
+    hits = total = zh_errors = zh_chars = 0
+    samples: list[dict[str, str]] = []
+    for entry in clips:
+        heard = engine.transcribe(corpus.load_clip(root, entry))
+        want_terms = _terms(entry["text"])
+        got_terms = _terms(heard)
+        total += len(want_terms)
+        hits += sum(1 for term in want_terms if any(_close(term, got) for got in got_terms))
+        want_zh, got_zh = _cjk(entry["text"]), _cjk(heard)
+        zh_errors += _edit_distance(got_zh, want_zh)
+        zh_chars += len(want_zh)
+        samples.append({"want": entry["text"], "heard": heard})
+    return {"available": True, "cases": len(clips), "terms": total,
+            "recall": round(hits / max(total, 1) * 100, 1),
+            "zh_cer": round(zh_errors / max(zh_chars, 1) * 100, 1),
+            "samples": samples[:4]}
+
+
+def _terms(text: str) -> list[str]:
+    return [term.lower() for term in re.findall(r"[A-Za-z][A-Za-z0-9_.]*", str(text))]
+
+
+def _cjk(text: str) -> str:
+    return "".join(re.findall(r"[\u4e00-\u9fff]", str(text)))
+
+
+def _close(want: str, got: str) -> bool:
+    """术语算不算识别对了：允许长度相关的少量字符差（`merge` 少个 e 仍算对）。"""
+    return _edit_distance(got, want) <= max(1, len(want) // 4)
+
+
 def _normalize(text: str) -> str:
     """比对前统一口径：去掉标点与空白，英文小写。"""
     return re.sub(r"[\s，。、？！：；,.?!:;\"'（）()《》]", "", str(text)).lower()
@@ -377,7 +423,13 @@ def measure_redlines(cfg) -> dict[str, object]:
 
 
 def measure_code() -> dict[str, object]:
-    files = sorted((ROOT / "src" / "voxos").glob("*.py"))
+    """代码度量：**源码和脚本一起量**。
+
+    只扫 `src/` 会让「单函数 ≤ 40 行」这条规矩管不到真正干活的脚本，
+    而脚本一样会烂——这一轮就有两个函数在 40 行以上，因为没人量。
+    """
+    files = sorted(list((ROOT / "src" / "voxos").glob("*.py"))
+                   + list((ROOT / "scripts").glob("*.py")))
     rows = []
     max_function = ("", 0)
     classes = 0
@@ -389,8 +441,8 @@ def measure_code() -> dict[str, object]:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 length = (node.end_lineno or node.lineno) - node.lineno + 1
                 if length > max_function[1]:
-                    max_function = (f"{path.name}:{node.name}", length)
-        rows.append({"file": path.name, "lines": len(source.splitlines()),
+                    max_function = (f"{path.relative_to(ROOT)}:{node.name}", length)
+        rows.append({"file": str(path.relative_to(ROOT)), "lines": len(source.splitlines()),
                      "code_lines": sum(1 for line in source.splitlines()
                                        if line.strip() and not line.strip().startswith("#"))})
     tests = len(list((ROOT / "tests").glob("test_*.py")))
@@ -432,44 +484,34 @@ def _prune_basetemps(keep: Path) -> None:
 # ------------------------------------------------------------------ 报告
 
 def build_report(refresh: bool = False) -> dict[str, object]:
+    """跑完所有测量，返回原始数据。顺序就是打印顺序。"""
     cfg = sandbox_config()
     bus = ui.StatusBus(SANDBOX / "status.jsonl")
     started = datetime.now()
-    print("→ 快通道延迟 …")
-    fast = measure_fast_path()
-    print("→ 端到端触发延迟 …")
-    dispatch = measure_dispatch(cfg)
-    print("→ 声纹 FRR/FAR …")
-    voiceprint = measure_voiceprint(cfg, refresh=refresh)
-    print("→ 全链路 demo …")
-    e2e = measure_e2e(cfg, bus)
-    print("→ 安全红线矩阵 …")
-    redlines = measure_redlines(cfg)
-    print("→ 静音待机开销 …")
-    standby = measure_standby()
-    print("→ 本地接口安全 …")
-    security = measure_security()
-    print("→ 设置写回 …")
-    settings_report = measure_settings()
-    print("→ 首次启动引导 …")
-    onboarding = measure_onboarding()
-    print("→ 确认通道 …")
-    confirm = measure_confirm()
-    print("→ 真实识别率 …")
-    stt = measure_stt()
-    print("→ 代码度量 …")
-    code = measure_code()
-    print("→ 测试套件 …")
-    tests = measure_tests()
-    return {
-        "generated_at": started.isoformat(timespec="seconds"),
-        "env": {"python": sys.version.split()[0], "numpy": np.__version__,
-                "sherpa": _version("sherpa_onnx"), "platform": sys.platform},
-        "fast_path": fast, "dispatch": dispatch, "voiceprint": voiceprint,
-        "e2e": e2e, "redlines": redlines, "security": security, "standby": standby,
-        "settings": settings_report, "onboarding": onboarding, "confirm": confirm,
-        "stt": stt, "code": code, "tests": tests,
-    }
+    steps = [
+        ("快通道延迟", "fast_path", lambda: measure_fast_path()),
+        ("端到端触发延迟", "dispatch", lambda: measure_dispatch(cfg)),
+        ("声纹 FRR/FAR", "voiceprint", lambda: measure_voiceprint(cfg, refresh=refresh)),
+        ("全链路 demo", "e2e", lambda: measure_e2e(cfg, bus)),
+        ("安全红线矩阵", "redlines", lambda: measure_redlines(cfg)),
+        ("静音待机开销", "standby", lambda: measure_standby()),
+        ("本地接口安全", "security", lambda: measure_security()),
+        ("设置写回", "settings", lambda: measure_settings()),
+        ("首次启动引导", "onboarding", lambda: measure_onboarding()),
+        ("确认通道", "confirm", lambda: measure_confirm()),
+        ("真实识别率", "stt", lambda: measure_stt()),
+        ("中英混说术语", "codeswitch", lambda: measure_codeswitch()),
+        ("代码度量", "code", lambda: measure_code()),
+        ("测试套件", "tests", lambda: measure_tests()),
+    ]
+    report: dict[str, object] = {}
+    for label, key, run in steps:
+        print(f"→ {label} …")
+        report[key] = run()
+    report["generated_at"] = started.isoformat(timespec="seconds")
+    report["env"] = {"python": sys.version.split()[0], "numpy": np.__version__,
+                     "sherpa": _version("sherpa_onnx"), "platform": sys.platform}
+    return report
 
 
 def _version(module: str) -> str:
@@ -480,56 +522,82 @@ def _version(module: str) -> str:
 
 
 def verdicts(report: dict[str, object]) -> list[dict[str, object]]:
+    """19 项验收，分三组：性能 / 安全 / 质量。拆开是为了每组都读得完。"""
+    return _perf_verdicts(report) + _safety_verdicts(report) + _quality_verdicts(report)
+
+
+def _perf_verdicts(report: dict[str, object]) -> list[dict[str, object]]:
     fast = report["fast_path"]  # type: ignore[index]
     dispatch = report["dispatch"]  # type: ignore[index]
-    voice = report["voiceprint"]  # type: ignore[index]
-    redlines = report["redlines"]  # type: ignore[index]
-    code = report["code"]  # type: ignore[index]
-    e2e = report["e2e"]  # type: ignore[index]
+    standby = report["standby"]  # type: ignore[index]
     return [
         {"item": "快通道决策延迟 p95 < 5ms", "measured": f"{fast['p95']}ms", "pass": fast["p95"] < 5},
         {"item": "端到端触发 p95 < 500ms", "measured": f"{dispatch['p95']}ms", "pass": dispatch["p95"] < 500},
-        {"item": "声纹 FRR < 2%", "measured": f"{voice['frr']}%", "pass": voice["frr"] < 2},
-        {"item": "声纹 FAR < 1%", "measured": f"{voice['far']}%", "pass": voice["far"] < 1},
-        {"item": "冒名语音被拒（全链路）", "measured": f"{e2e['rejected']} 条被拒", "pass": e2e["rejected"] >= 1},
-        {"item": "红线禁令全部拦截", "measured": f"{redlines['blocked']}/{redlines['forbidden_cases']}",
-         "pass": redlines["blocked"] == redlines["forbidden_cases"]},
-        {"item": "角色隔离（OPS 不可写文件）", "measured": str(redlines["ops_isolated"]), "pass": redlines["ops_isolated"]},
-        {"item": "医疗草稿强制标记", "measured": str(redlines["doctor_draft"]), "pass": redlines["doctor_draft"]},
-        {"item": "单函数 ≤ 40 行", "measured": f"{code['max_function']['lines']} 行",
-         "pass": code["max_function"]["lines"] <= 40},
-        {"item": "测试全绿", "measured": report["tests"]["summary"], "pass": report["tests"]["returncode"] == 0},  # type: ignore[index]
-        {"item": "跨站 / 无令牌请求被拦截", "measured": str(report["security"]["codes"]),  # type: ignore[index]
-         "pass": bool(report["security"]["blocked"])},  # type: ignore[index]
-        {"item": "上下文注入不阻塞派发", "measured": f"{report['dispatch']['context_p95']}ms",  # type: ignore[index]
-         "pass": report["dispatch"]["context_p95"] < 5},  # type: ignore[index]
-        {"item": "设置写回保住注释", "measured": str(report["settings"]["comments_kept"]),  # type: ignore[index]
-         "pass": bool(report["settings"]["applied"] and report["settings"]["comments_kept"]
-                      and report["settings"]["source_kept"]
-                      and report["settings"]["invalid_rejected"])},  # type: ignore[index]
-        {"item": "无声纹时给出录入入口", "measured": str(report["onboarding"]["enroll_available"]),  # type: ignore[index]
-         "pass": bool(report["onboarding"]["enroll_available"]
-                      and not report["onboarding"]["status_enrolled"])},  # type: ignore[index]
-        {"item": "确认通道从语音可达且文案是人话",
-         "measured": "可达" if report["confirm"]["reached_from_speech"] else "不可达",  # type: ignore[index]
-         "pass": bool(report["confirm"]["reached_from_speech"]  # type: ignore[index]
-                      and report["confirm"]["reason_is_human"]
-                      and report["confirm"]["deny_cancels"]
-                      and report["confirm"]["allow_runs"])},
-        {"item": "本地识别字符错误率 < 10%",
-         "measured": (f"{report['stt']['cer']}%（中文 {report['stt']['by_script']['zh']}%"
-                      f" / 英文 {report['stt']['by_script']['en']}%，{report['stt']['cases']} 句，"
-                      # 实时率单次会在 33–38× 之间抖，取下界才是个稳定的说法
-                      f"≥{int(1 / max(report['stt']['rtf'], 1e-6) // 10 * 10)}× 实时）")  # type: ignore[index]
-                     if report["stt"]["available"] else report["stt"].get("why", "跳过"),  # type: ignore[index]
-         "pass": report["stt"]["cer"] < 10 if report["stt"]["available"] else False,  # type: ignore[index]
-         "skipped": not report["stt"]["available"]},  # type: ignore[index]
-        {"item": "静音待机 CPU < 1.5%", "measured": f"{report['standby']['cpu_percent']}%/秒音频",  # type: ignore[index]
-         "pass": report["standby"]["cpu_percent"] < 1.5},  # type: ignore[index]
-        {"item": "静音零误触发", "measured": f"{report['standby']['segments']} 段",  # type: ignore[index]
-         "pass": report["standby"]["segments"] == 0},  # type: ignore[index]
+        {"item": "静音待机 CPU < 1.5%", "measured": f"{standby['cpu_percent']}%/秒音频",
+         "pass": standby["cpu_percent"] < 1.5},
+        {"item": "静音零误触发", "measured": f"{standby['segments']} 段", "pass": standby["segments"] == 0},
     ]
 
+
+def _safety_verdicts(report: dict[str, object]) -> list[dict[str, object]]:
+    voice = report["voiceprint"]  # type: ignore[index]
+    e2e = report["e2e"]  # type: ignore[index]
+    redlines = report["redlines"]  # type: ignore[index]
+    confirm = report["confirm"]  # type: ignore[index]
+    return [
+        {"item": "声纹 FRR < 2%", "measured": f"{voice['frr']}%", "pass": voice["frr"] < 2},
+        {"item": "声纹 FAR < 1%", "measured": f"{voice['far']}%", "pass": voice["far"] < 1},
+        {"item": "冒名语音被拒（全链路）", "measured": f"{e2e['rejected']} 条被拒",
+         "pass": e2e["rejected"] >= 1},
+        {"item": "红线禁令全部拦截", "measured": f"{redlines['blocked']}/{redlines['forbidden_cases']}",
+         "pass": redlines["blocked"] == redlines["forbidden_cases"]},
+        {"item": "角色隔离（OPS 不可写文件）", "measured": str(redlines["ops_isolated"]),
+         "pass": redlines["ops_isolated"]},
+        {"item": "医疗草稿强制标记", "measured": str(redlines["doctor_draft"]), "pass": redlines["doctor_draft"]},
+        {"item": "跨站 / 无令牌请求被拦截", "measured": str(report["security"]["codes"]),  # type: ignore[index]
+         "pass": bool(report["security"]["blocked"])},  # type: ignore[index]
+        {"item": "确认通道从语音可达且文案是人话",
+         "measured": "可达" if confirm["reached_from_speech"] else "不可达",
+         "pass": bool(confirm["reached_from_speech"] and confirm["reason_is_human"]
+                      and confirm["deny_cancels"] and confirm["allow_runs"])},
+    ]
+
+
+def _quality_verdicts(report: dict[str, object]) -> list[dict[str, object]]:
+    code = report["code"]  # type: ignore[index]
+    dispatch = report["dispatch"]  # type: ignore[index]
+    settings_report = report["settings"]  # type: ignore[index]
+    onboarding = report["onboarding"]  # type: ignore[index]
+    stt = report["stt"]  # type: ignore[index]
+    mixed = report["codeswitch"]  # type: ignore[index]
+    return [
+        {"item": "单函数 ≤ 40 行（src + scripts）", "measured": f"{code['max_function']['lines']} 行",
+         "pass": code["max_function"]["lines"] <= 40},
+        {"item": "测试全绿", "measured": report["tests"]["summary"],  # type: ignore[index]
+         "pass": report["tests"]["returncode"] == 0},  # type: ignore[index]
+        {"item": "上下文注入不阻塞派发", "measured": f"{dispatch['context_p95']}ms",
+         "pass": dispatch["context_p95"] < 5},
+        {"item": "设置写回保住注释", "measured": str(settings_report["comments_kept"]),
+         "pass": bool(settings_report["applied"] and settings_report["comments_kept"]
+                      and settings_report["source_kept"] and settings_report["invalid_rejected"])},
+        {"item": "无声纹时给出录入入口", "measured": str(onboarding["enroll_available"]),
+         "pass": bool(onboarding["enroll_available"] and not onboarding["status_enrolled"])},
+        {"item": "本地识别字符错误率 < 10%",
+         "measured": (f"{stt['cer']}%（中文 {stt['by_script']['zh']}% / 英文 {stt['by_script']['en']}%，"
+                      # 实时率单次会在 33–38× 之间抖，取下界才是个稳定的说法
+                      f"{stt['cases']} 句，≥{int(1 / max(stt['rtf'], 1e-6) // 10 * 10)}× 实时）")
+                     if stt["available"] else stt.get("why", "跳过"),
+         "pass": stt["cer"] < 10 if stt["available"] else False,
+         "skipped": not stt["available"]},
+        # gap=True：这一项**没达标**，而且不是回归——是能力边界。分开标，
+        # 免得它把「有没有退化」这个信号淹掉，也免得把它藏进 SKIP 里假装不存在。
+        {"item": "中英混说英文术语召回 ≥ 95%",
+         "measured": (f"{mixed['recall']}%（{mixed['terms']} 个术语，中文 {mixed['zh_cer']}% 字错）")
+                     if mixed["available"] else mixed.get("why", "跳过"),
+         "pass": mixed["recall"] >= 95 if mixed["available"] else False,
+         "skipped": not mixed["available"],
+         "gap": True},
+    ]
 
 HTML = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><title>VoxOS 验收报告</title>
@@ -550,6 +618,7 @@ tr:last-child td{{border-bottom:0}}
 code{{background:#f3f4f6;border-radius:5px;padding:1px 6px;font-size:12.5px}}
 .pass{{color:var(--ok);font-weight:600}}.fail{{color:var(--bad);font-weight:600}}
 .skip{{color:var(--muted);font-weight:600}}
+.gap{{color:#b45309;font-weight:600}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}}
 .kpi{{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px 18px}}
 .kpi .n{{font-size:24px;font-weight:650;letter-spacing:-.02em}}
@@ -588,10 +657,14 @@ def render(report: dict[str, object], rows: list[dict[str, object]]) -> str:
     voice = report["voiceprint"]  # type: ignore[index]
     e2e = report["e2e"]  # type: ignore[index]
     code = report["code"]  # type: ignore[index]
+    def _cls(row: dict[str, object]) -> str:
+        if row.get("skipped"):
+            return "skip"
+        return "gap" if row.get("gap") else ("pass" if row["pass"] else "fail")
+
     verdict_rows = "\n".join(
         f"<tr><td>{row['item']}</td><td><code>{row['measured']}</code></td>"
-        f"<td class=\"{'skip' if row.get('skipped') else ('pass' if row['pass'] else 'fail')}\">"
-        f"{_label(row)}</td></tr>"
+        f"<td class=\"{_cls(row)}\">{_label(row)}</td></tr>"
         for row in rows
     )
     sweep_rows = "\n".join(
@@ -637,11 +710,14 @@ def main() -> int:
     print("-" * 62)
     for row in rows:
         print(f"{_label(row):<4}  {row['item']:<28} {row['measured']}")
-    failed = [row for row in rows if not row["pass"] and not row.get("skipped")]
+    failed = [row for row in rows if not row["pass"] and not row.get("skipped") and not row.get("gap")]
+    gaps = [row for row in rows if row.get("gap") and not row.get("skipped")]
     skipped = [row for row in rows if row.get("skipped")]
-    print("-" * 62)
+    judged = len(rows) - len(skipped)
     tail = f" · {len(skipped)} 跳过（缺模型/缺素材）" if skipped else ""
-    print(f"{len(rows) - len(failed) - len(skipped)}/{len(rows) - len(skipped)} 通过{tail}"
+    if gaps:
+        tail += f" · {len(gaps)} 项未达标（能力边界，见 REVIEW §22）"
+    print(f"{judged - len(failed) - len(gaps)}/{judged} 通过{tail}"
           f" · 报告 docs/ACCEPTANCE.html")
     return 1 if failed else 0
 
@@ -649,6 +725,8 @@ def main() -> int:
 def _label(row: dict[str, object]) -> str:
     if row.get("skipped"):
         return "SKIP"
+    if row.get("gap"):
+        return "GAP"
     return "PASS" if row["pass"] else "FAIL"
 
 

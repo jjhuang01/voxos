@@ -5,7 +5,7 @@ PIP_INDEX ?= https://pypi.tuna.tsinghua.edu.cn/simple
 PIP := $(VENV)/bin/python -m pip install -q -i $(PIP_INDEX) --timeout 15 --retries 2
 export PYTHONPATH := src
 
-.PHONY: setup test verify demo doctor tools clean
+.PHONY: setup test verify demo doctor tools audit-ui soak clean
 
 # 一条命令把可跑的仓库变成能跑的仓库：建 .venv 并装齐依赖
 setup:
@@ -26,6 +26,16 @@ verify:
 demo:
 	@$(PY) -c "import numpy" 2>/dev/null || { echo "❌ 缺 numpy —— 先跑 make setup"; exit 1; }
 	$(PY) -m voxos.main demo
+
+# 界面回归：把审查里量出来的数重新量一遍（需要先起 serve）
+audit-ui:
+	@curl -s --noproxy '*' -o /dev/null http://127.0.0.1:$${PORT:-8765}/ \
+		|| { echo "❌ 先起服务：voxos serve"; exit 1; }
+	$(PY) scripts/audit_ui.py --port $${PORT:-8765}
+
+# 长稳：默认 30 分钟，覆盖不到真麦克风热插拔
+soak:
+	$(PY) -u scripts/soak.py --minutes $${MINUTES:-30} --stt $${STT:-sense_voice}
 
 doctor:
 	$(PY) -m voxos.main doctor
