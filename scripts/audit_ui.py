@@ -1,6 +1,6 @@
 """界面回归探针：把审查里「量出来的数」变成每次能重跑的门禁。
 
-为什么需要它：`docs/REVIEW.md` 的 32 条缺陷里有 9 条是界面问题，修的时候全靠
+为什么需要它：`docs/REVIEW.md` 的 35 条缺陷里有 12 条是界面问题，修的时候全靠
 `getBoundingClientRect` 量出来。但量完就过去了——代码一改，没人知道有没有退回去。
 截图只能回答「像不像」，这里断言的是「对不对」：元素在不在、宽度够不够、有没有盖住。
 
@@ -105,6 +105,36 @@ def check_dirty(cdp: Cdp, base: str) -> tuple[bool, str]:
     return ok, f"保存可用={state['save']} 页签带点={state['dot']} 放弃可用={state['reset']}"
 
 
+def check_clean_state(cdp: Cdp, base: str) -> tuple[bool, str]:
+    """#29：没改动时「放弃改动」亮着，点了什么也不会发生——一个假按钮。"""
+    goto(cdp, base, "/settings?still=1")
+    cdp.wait("typeof loadSettings === 'function'")
+    time.sleep(0.8)
+    state = json.loads(cdp.js("""(() => JSON.stringify({
+        save: document.getElementById('save').disabled,
+        reset: document.getElementById('reset').disabled
+    }))()"""))
+    ok = state["save"] and state["reset"]
+    return ok, f"刚打开时 保存禁用={state['save']} 放弃禁用={state['reset']}"
+
+
+def check_undo_names(cdp: Cdp, base: str) -> tuple[bool, str]:
+    """#27：「还原」和「撤销」并排，两个词都在说退回去，分不清谁退什么。"""
+    goto(cdp, base, "/settings?still=1")
+    cdp.wait("typeof setUndo === 'function'")
+    time.sleep(0.6)
+    cdp.js("setUndo(true)")
+    info = json.loads(cdp.js("""(() => {
+        const pick = id => { const el = document.getElementById(id);
+            return {text: el.textContent.trim(), title: el.title}; };
+        return JSON.stringify({undo: pick('undo'), reset: pick('reset')}); })()"""))
+    ok = (info["undo"]["text"] != info["reset"]["text"]
+          and bool(info["undo"]["title"]) and bool(info["reset"]["title"])
+          and info["undo"]["title"] != info["reset"]["title"])
+    labels = f"「{info['undo']['text']}」/「{info['reset']['text']}」"
+    return ok, f"{labels} 各自带说明={bool(info['undo']['title'] and info['reset']['title'])}"
+
+
 def check_hover(cdp: Cdp, base: str) -> tuple[bool, str]:
     """#22：`:hover` 被 `[data-state]` 的边框色盖掉过，鼠标移上去毫无反应。"""
     goto(cdp, base, "/?panel=status&still=1")
@@ -168,6 +198,61 @@ def check_save_bar(cdp: Cdp, base: str) -> tuple[bool, str]:
     return ok, f"保存条底 {bar['bottom']:.0f} / 滚动区底 {body['bottom']:.0f}"
 
 
+def check_countdown(cdp: Cdp, base: str) -> tuple[bool, str]:
+    """#35：倒计时条是信息不是装饰——它必须等于服务端真正等的秒数。
+
+    这条规则曾经只在文档里，靠人肉比对 `animation-duration` 与 `/api/status`。
+    现在改成每次重跑：服务端说几秒，条子就得走几秒。
+    """
+    goto(cdp, base, "/?panel=status&still=1")
+    cdp.js("new Promise(ok => setTimeout(ok, 700))")
+    cdp.js("new Promise(ok => { loadStatus().then(ok); })")      # 真实链路读超时
+    server = cdp.js("new Promise(ok => api('/api/status')"
+                    ".then(s => ok(s.confirm_timeout_s)))")
+    cdp.js("render({state:'confirm', detail:'需要你点头'})")
+    settle(cdp)
+    css = float(cdp.js("parseFloat(getComputedStyle("
+                       "document.getElementById('confirm-left')).animationDuration)"))
+    page = float(cdp.js("confirmTimeout"))
+    ok = abs(css - float(server)) < 0.01 and abs(page - float(server)) < 0.01
+    return ok, f"服务端 {server}s / 页面 {page:g}s / 动画 {css:g}s"
+
+
+def motion_state(cdp: Cdp) -> dict:
+    """当前状态下，倒计时条与装饰点各自跑什么动画。"""
+    return json.loads(cdp.js("""(() => {
+        const name = sel => { const el = document.querySelector(sel);
+            return el ? getComputedStyle(el).animationName : 'missing'; };
+        return JSON.stringify({bar: name('#confirm-left'), dot: name('.dot')}); })()"""))
+
+
+def check_reduced_motion(cdp: Cdp, base: str) -> tuple[bool, str]:
+    """减弱动效时装饰该停，但倒计时是信息——停了等于把「还有多久」删掉。
+
+    必须**两个状态都量**。headless Chrome 默认就报 `prefers-reduced-motion: reduce`
+    （实测 `matchMedia` 返回 true），所以只量 reduce 那一半的话，「装饰本来会动」
+    永远验不到——把 `animation` 全写成 `none` 也照样通过。
+    """
+    goto(cdp, base, "/?panel=status&still=1")
+    cdp.js("new Promise(ok => setTimeout(ok, 400))")
+    cdp.js("render({state:'confirm', detail:'需要你点头'})")
+    try:
+        cdp.call("Emulation.setEmulatedMedia",
+                 features=[{"name": "prefers-reduced-motion", "value": "no-preference"}])
+        settle(cdp)
+        normal = motion_state(cdp)
+        cdp.call("Emulation.setEmulatedMedia",
+                 features=[{"name": "prefers-reduced-motion", "value": "reduce"}])
+        settle(cdp)
+        reduced = motion_state(cdp)
+    finally:
+        cdp.call("Emulation.setEmulatedMedia", features=[])
+    ok = (normal["bar"] == "drain" and normal["dot"] != "none"
+          and reduced["bar"] == "drain" and reduced["dot"] == "none")
+    return ok, (f"正常 倒计时={normal['bar']}/装饰={normal['dot']}｜"
+                f"减弱 倒计时={reduced['bar']}/装饰={reduced['dot']}")
+
+
 def check_confirm_fits(cdp: Cdp, base: str) -> tuple[bool, str]:
     """确认卡是最后一道防线：在真实窗口里必须整张可见，不能被挤出去。"""
     goto(cdp, base, "/settings?still=1")
@@ -195,8 +280,12 @@ CHECKS = [
     ("#21 有未保存改动看得出来", check_dirty),
     ("#22 hover 有可见反馈", check_hover),
     ("#26 主操作最宽", check_primary_width),
+    ("#27 两个「退回」各说各的", check_undo_names),
     ("#28 撤销第一下只上膛", check_undo_arms),
+    ("#29 没改动时按钮是禁用的", check_clean_state),
     ("#30 保存条下面不漏内容", check_save_bar),
+    ("#35 倒计时等于服务端超时", check_countdown),
+    ("#35 减弱动效不关倒计时", check_reduced_motion),
     ("确认卡在真实窗口里完整可见", check_confirm_fits),
 ]
 

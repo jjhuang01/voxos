@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import re
+import time
 import urllib.error
 import urllib.request
 import wave
@@ -11,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from voxos import ui
+from voxos import audio, main, ui
+from voxos.config import load
 
 REPO = Path(__file__).resolve().parents[1]
 TOKEN = "test-token"
@@ -249,6 +253,57 @@ def test_pill_html_has_four_states():
     for state in ("listening", "executing", "done", "blocked", "confirm", "onboard"):
         assert f'data-state="{state}"' in html or f"{state}:" in html
     assert "prefers-reduced-motion" in html
+
+
+def test_page_is_read_from_disk_once_until_it_changes(server, monkeypatch):
+    """#9：每次请求都读盘返回 HTML 曾经是热路径上的浪费。
+
+    断言的是缓存**按 mtime 失效**——只测「第二次没读盘」的话，一个永远不失效的
+    缓存也能通过，而那意味着改完页面得重启才生效。
+    """
+    instance, _ = server
+    ui._PAGE_CACHE.clear()
+    reads: list[Path] = []
+    real = Path.read_bytes
+
+    def counting_read(self):
+        reads.append(self)
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read)
+    _get(instance, "/")
+    _get(instance, "/")
+    assert len(reads) == 1, f"两次请求读了 {len(reads)} 次盘，缓存没生效"
+
+    page = REPO / "web" / "pill.html"
+    os.utime(page, (page.stat().st_atime, page.stat().st_mtime + 10))
+    try:
+        _get(instance, "/")
+        assert len(reads) == 2, "文件改过了还在用旧缓存"
+    finally:
+        os.utime(page, (page.stat().st_atime, page.stat().st_mtime - 10))
+        ui._PAGE_CACHE.clear()
+
+
+def test_every_stt_backend_has_a_human_label():
+    """#24：状态卡上曾经直接显示 `scripted` 这种配置标识符。
+
+    这条守的是漂移：新增一个后端却忘了起中文名，这里先红，而不是等用户
+    在状态卡上读到一个英文枚举值。
+    """
+    source = Path(audio.__file__).read_text(encoding="utf-8")
+    backends = set(re.findall(r'backend == "(\w+)"', source))
+    assert backends, "没解析到 make_stt 的分支，说明它的结构变了，改这条测试"
+    missing = backends - set(main.STT_LABELS)
+    assert not missing, f"这些后端在界面上没有中文名：{sorted(missing)}"
+    for key, label in main.STT_LABELS.items():
+        assert label != key, f"{key} 的中文名就是它自己"
+
+    class FakeRuntime:
+        cfg = load().with_overrides(**{"stt.backend": "scripted"})
+        started = time.time()
+
+    assert main._status(FakeRuntime(), None)["stt"] == "脚本回放（演示）"
 
 
 def test_play_is_silent_when_no_player(monkeypatch):
