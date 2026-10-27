@@ -1,6 +1,6 @@
 {
   "report": {
-    "generated_at": "2026-10-28T00:25:31",
+    "generated_at": "2026-10-28T01:14:36",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -9,14 +9,14 @@
     },
     "fast_path": {
       "p50": 0.0008,
-      "p95": 0.001,
-      "p99": 0.002,
+      "p95": 0.0008,
+      "p99": 0.0009,
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 26.605,
-      "p95": 42.293,
-      "context_p95": 0.011,
+      "p50": 0.32,
+      "p95": 0.599,
+      "context_p95": 0.006,
       "rounds": 30
     },
     "voiceprint": {
@@ -98,11 +98,11 @@
       "backend": "sherpa-cam++",
       "threshold": 0.82,
       "dispatch_ms": [
-        66.18,
-        297.1
+        0.43,
+        125.09
       ],
-      "wall_ms": 763.6,
-      "realtime_factor": 0.042
+      "wall_ms": 344.1,
+      "realtime_factor": 0.019
     },
     "redlines": {
       "forbidden_cases": 8,
@@ -126,8 +126,8 @@
       "seconds": 30,
       "segments": 0,
       "vad": "SileroVad",
-      "cpu_percent": 0.4,
-      "realtime_factor": 0.004
+      "cpu_percent": 0.33,
+      "realtime_factor": 0.003
     },
     "settings": {
       "errors": [],
@@ -148,6 +148,36 @@
       "deny_cancels": true,
       "allow_runs": true
     },
+    "stt": {
+      "available": true,
+      "cases": 24,
+      "cer": 2.8,
+      "by_script": {
+        "zh": 1.4,
+        "en": 3.1
+      },
+      "chars": 818,
+      "rtf": 0.026,
+      "wall_s": 2.0,
+      "samples": [
+        {
+          "want": "把刚才登录模块的报错原因记到今天的开发日志里",
+          "heard": "把刚才登录模块的报错原因记到今天的开发日志里。"
+        },
+        {
+          "want": "帮我在认证文件里加上空值校验",
+          "heard": "帮我在认证文件里加上空值校验。"
+        },
+        {
+          "want": "Siri，我要写日志，今天把登录接口的空值校验补上了",
+          "heard": "siri,我要写日志，今天把登录接口的空值校验补上了。"
+        },
+        {
+          "want": "Siri，检查一下服务器现在的负载和磁盘使用情况",
+          "heard": "siri检查一下服务器现在的负载和磁盘使用情况。"
+        }
+      ]
+    },
     "code": {
       "modules": [
         {
@@ -157,8 +187,8 @@
         },
         {
           "file": "audio.py",
-          "lines": 491,
-          "code_lines": 393
+          "lines": 527,
+          "code_lines": 423
         },
         {
           "file": "config.py",
@@ -167,8 +197,8 @@
         },
         {
           "file": "core.py",
-          "lines": 267,
-          "code_lines": 220
+          "lines": 326,
+          "code_lines": 268
         },
         {
           "file": "corpus.py",
@@ -182,8 +212,8 @@
         },
         {
           "file": "main.py",
-          "lines": 519,
-          "code_lines": 413
+          "lines": 532,
+          "code_lines": 425
         },
         {
           "file": "registry.py",
@@ -197,8 +227,8 @@
         },
         {
           "file": "settings.py",
-          "lines": 255,
-          "code_lines": 207
+          "lines": 293,
+          "code_lines": 235
         },
         {
           "file": "tools.py",
@@ -207,35 +237,35 @@
         },
         {
           "file": "ui.py",
-          "lines": 346,
-          "code_lines": 287
+          "lines": 361,
+          "code_lines": 300
         }
       ],
-      "total_lines": 3111,
+      "total_lines": 3272,
       "max_function": {
-        "name": "corpus.py:_build_synthetic",
-        "lines": 35
+        "name": "core.py:dispatch",
+        "lines": 39
       },
-      "classes": 31,
+      "classes": 32,
       "tools": 10,
       "fast_routes": 4,
-      "test_files": 10
+      "test_files": 11
     },
     "tests": {
       "returncode": 0,
-      "summary": "141 passed in 14.52s",
-      "seconds": 15.7
+      "summary": "156 passed in 14.72s",
+      "seconds": 15.3
     }
   },
   "verdicts": [
     {
       "item": "快通道决策延迟 p95 < 5ms",
-      "measured": "0.001ms",
+      "measured": "0.0008ms",
       "pass": true
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "42.293ms",
+      "measured": "0.599ms",
       "pass": true
     },
     {
@@ -270,12 +300,12 @@
     },
     {
       "item": "单函数 ≤ 40 行",
-      "measured": "35 行",
+      "measured": "39 行",
       "pass": true
     },
     {
       "item": "测试全绿",
-      "measured": "141 passed in 14.52s",
+      "measured": "156 passed in 14.72s",
       "pass": true
     },
     {
@@ -285,7 +315,7 @@
     },
     {
       "item": "上下文注入不阻塞派发",
-      "measured": "0.011ms",
+      "measured": "0.006ms",
       "pass": true
     },
     {
@@ -304,8 +334,14 @@
       "pass": true
     },
     {
+      "item": "本地识别字符错误率 < 10%",
+      "measured": "2.8%（中文 1.4% / 英文 3.1%，24 句，≥30× 实时）",
+      "pass": true,
+      "skipped": false
+    },
+    {
       "item": "静音待机 CPU < 1.5%",
-      "measured": "0.4%/秒音频",
+      "measured": "0.33%/秒音频",
       "pass": true
     },
     {

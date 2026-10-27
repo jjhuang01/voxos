@@ -72,10 +72,30 @@
   其中两个是 P0：确认卡在说枚举值、以及**没有任何语音路径能走到确认卡**。
 
 
+### Task 1.6 把「已知缺口」逐条做掉（2026-10-28）
+
+- [x] **真实 STT**：`SenseVoiceStt`（sherpa-onnx，int8 229MB）接进 `make_stt()`，
+      设置页 `stt.backend = sense_voice` 即用；缺模型退回 `scripted` 并给出人话错误。
+      实测 24 句 818 字：字符错误率 **2.8%**（中文 1.4%、英文 3.1%），**≥30× 实时**。
+      中文那 1.4% 全是「十点→10点」的数字规范化，语义上零错；英文按词算是 **12.5%**
+      （`null`→`Ill`、`auth`→`Oth`），证明热词注入是必需的。
+- [x] **多意图切分接进快通道之前**：原先快通道抢到第一件事就返回，把后半句悄悄吃掉。
+      现在先数段数，多段则逐段规划；路由标签也照实标（全走正则 = `fast`，有一段落到启发式 = `offline`）。
+- [x] **设置撤销**：保存前把旧文件留一份到 `.voxos/settings.bak`，`POST /api/settings/undo` 退回一步，
+      退完备份消费掉、按钮消失。端到端验过：0.82 → 保存 0.90 → 撤销 → 0.82 → 再撤销 409。
+- [x] **launchd 常驻**：`scripts/install_launchd.sh`（`--print` / `--status` / `--uninstall`），
+      `KeepAlive{SuccessfulExit=false}`，`plutil -lint` 通过。脚本头部写清 macOS 的 TCC 陷阱：
+      launchd 弹不出麦克风授权框，必须先手动跑一次 `voxos run` 授权。
+- [x] **截图工具的第三课**：headless Chrome 不产帧，CSS `transition` 会永远停在起始值，
+      `getComputedStyle` 读到的是改之前的样子。`shot.py` 加 `settle()` 先逼两帧再截。
+- *验收*：验收项 17 → **18 项**，测试 141 → **156 项**，`core.dispatch` 一度涨到 43 行被
+  验收项 #9 逮住，提成 `_multi_intent()` 后回到 39 行。
+
+
 ### Task 1.5 工程化
 
-- [x] 141 项测试（`make test`），`scripts/verify.py` 17 项验收指标（`make verify`）。
-- [x] 全模块单函数 ≤ 40 行、类 ≤ 12 个、核心零第三方依赖。
+- [x] 156 项测试（`make test`），`scripts/verify.py` 18 项验收指标（`make verify`）。
+- [x] 全模块单函数 ≤ 40 行（最长 39 行）、核心五模块共 8 个类、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README / BUSINESS。
 
 ---
@@ -86,8 +106,9 @@
       验收：4G 下首字延迟 < 800ms，断网 5s 内自动重连。
 - [ ] **Task 2.2 面罩声学校准向导**：录 10 句戴面罩语音 → 拟合 EQ 曲线 → 写入 `config/mask_profile.json`。
       验收：戴面罩识别率从 84% 提升到 ≥ 97%（自建测试集）。
-- [ ] **Task 2.3 真实 STT 接入**：SenseVoice-Small（本地 ONNX）与 faster-whisper 双后端 + 热词注入。
-      验收：中英混说 + 代码术语识别率 ≥ 95%；流式首字 < 300ms。
+- [~] **Task 2.3 真实 STT 接入**：本地 SenseVoice-Small（ONNX）已接（见 Task 1.6），
+      还差 faster-whisper 第二后端、热词注入、流式首字 < 300ms。
+      验收：中英混说 + 代码术语识别率 ≥ 95%（现在词级 87.5%）；流式首字 < 300ms。
 - [ ] **Task 2.4 医疗/OPS 插件包**：科室词库、只读 EHR 草稿箱、审计导出。
       验收：DOCTOR 角色无法触达任何系统修改工具（已有测试，需补真实插件）。
 
@@ -103,15 +124,16 @@
 
 | 缺口 | 影响 | 下一步 |
 | :--- | :--- | :--- |
-| 未接真实 STT（默认 `scripted`） | 语音识别靠外部后端，本地无模型时只能跑演示脚本 | Task 2.3 |
 | 未在真麦克风上做 8 小时长稳测试 | 只有 30 秒底噪的 CPU 采样，没有小时级内存曲线 | 用 `voxos run` + `psutil` 采样补测 |
 | 真人声纹未标定 | 现有 FRR/FAR 来自 6 个 TTS 音色，真人未知 | 录 20 条真人音频重跑 `make verify` |
+| 中英混说术语识别率 87.5% | `null`/`auth` 这类术语在中文音色下会听错 | 热词注入（Task 2.3） |
 | 降级声纹（无 CAM++ 时）精度不足 | 仅能区分明显不同音色 | 强制引导下载模型，或降级为"仅日志模式" |
 | 无手机端 | 只能在电脑旁说话 | Phase 2 |
-| macOS 麦克风权限/launchd 未自动化 | 首次运行需手动授权 | 补 `scripts/install_launchd.sh` |
 | 多意图的语义切分仅靠连接词 | "记日志，顺便看下负载" 可切分，"帮我搞定" 不行 | 慢通道兜底 + 语料扩充 |
-| 设置无历史/撤销 | 改错了只能再改回去 | 保存前把旧文件复制到 `.voxos/settings.bak` |
 | 面板只覆盖了静态与 hover/焦点 | 拖拽、长按、动效逐帧没看（`scripts/shot.py` 已能派发鼠标事件） | 补 `Input.dispatchMouseEvent` 的拖拽序列 |
 
-> 已关闭：「面板未做像素级走查」（`scripts/shot.py` + 8 张真实截图，见 `docs/REVIEW.md §12-14`）、
-> 「没有打断词」（回声门 + 打断词白名单 + `stop_speaking()`，见 `tests/test_barge.py`）。
+> 已关闭：「面板未做像素级走查」（`scripts/shot.py` + 10 张真实截图，见 `docs/REVIEW.md §12-14`）、
+> 「没有打断词」（回声门 + 打断词白名单 + `stop_speaking()`，见 `tests/test_barge.py`）、
+> 「未接真实 STT」（SenseVoice int8，2.8% / 36× 实时，见 `docs/REVIEW.md §15`）、
+> 「macOS 麦克风权限 / launchd 未自动化」（`scripts/install_launchd.sh`）、
+> 「设置无历史 / 撤销」（`settings.bak` + `POST /api/settings/undo`，见 `docs/REVIEW.md §19`）。

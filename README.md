@@ -18,9 +18,10 @@
 cd voxos
 make setup                                   # 建 .venv 并装依赖（只需一次）
 make doctor                                  # 环境自检
-python scripts/fetch_models.py               # 下载声纹 + VAD 模型（约 28MB，可选但强烈建议）
+python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
+python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 141 项测试
+make test                                    # 156 项测试
 make verify                                  # 工程验收，产出 docs/ACCEPTANCE.html
 ```
 
@@ -34,6 +35,17 @@ PYTHONPATH=src python -m voxos.main run                 # 守护进程 + 胶囊 
 PYTHONPATH=src python -m voxos.main pill                # 用无边框小窗打开胶囊（最接近悬浮）
 PYTHONPATH=src python -m voxos.main text "Siri，检查一下服务器负载"   # 不想说话？打字也行
 ```
+
+想让它开机就活着：
+
+```bash
+sh scripts/install_launchd.sh --print      # 先看一眼会装什么（plist 全文）
+sh scripts/install_launchd.sh              # 装进 ~/Library/LaunchAgents 并立刻拉起
+sh scripts/install_launchd.sh --status     # 在跑吗
+```
+
+> **先手动跑一次 `voxos run` 再说。** macOS 的麦克风授权框弹不出来给 launchd 守护进程——
+> 它只在你亲自启动的那个进程里弹。先手动授权，再交给 launchd。
 
 ## 它是什么 / 不是什么
 
@@ -85,9 +97,11 @@ PYTHONPATH=src python -m voxos.main text "Siri，检查一下服务器负载"   
 | :--- | :--- |
 | **状态** | 声纹是否录入 / 阈值 / 角色 / 识别后端 / 大模型 / 演练开关 + 一句话输入框 |
 | **最近** | 最近 8 条：时间、它听成的原文、执行结果、路由 |
-| **设置** | 20 个真会改的字段，分组呈现；保存即时生效，保留 TOML 注释 |
+| **设置** | 22 个真会改的字段，分组呈现；保存即时生效，保留 TOML 注释；可撤销上一次保存 |
 
 改设置不用重启、不用手改文件；被环境变量接管的字段会置灰并说明是哪一条。
+每次保存前会把旧文件留一份在 `.voxos/settings.bak`，所以「撤销保存」能退回保存前的样子——
+只退一步，退完备份就消费掉了，界面上的按钮也跟着消失。
 
 界面上的真实状态（`docs/screenshots/`，由 `scripts/shot.py` 驱动真实页面截取）：
 
@@ -102,6 +116,10 @@ PYTHONPATH=src python -m voxos.main text "Siri，检查一下服务器负载"   
 | 设置（保存条钉底、页签带未保存点） | 展开时的 hover 反馈 |
 | :--- | :--- |
 | ![设置](docs/screenshots/settings-dirty.png) | ![hover](docs/screenshots/status-hover.png) |
+
+| 有一步可退时：撤销保存 / 放弃改动 / 保存 |
+| :--- |
+| ![撤销](docs/screenshots/settings-undo.png) |
 
 ### 安全边界画在门口
 
@@ -138,15 +156,18 @@ voxos/
 │   ├── ui.py               # 状态总线 + SSE 服务 + Earcon 合成
 │   ├── corpus.py           # 验收语料生成（say 合成 / 合成音降级）
 │   ├── config.py           # TOML 加载 + 环境变量覆盖
+│   ├── settings.py         # 设置层：字段模式 / 校验 / 保留注释的写回 / 撤销
 │   ├── main.py             # CLI：text / demo / run / enroll / serve / tools / doctor
 │   └── __init__.py
 ├── web/pill.html           # 36px 胶囊 + 展开式控制面板（状态/最近/设置）
 ├── scripts/
 │   ├── verify.py           # 工程验收：延迟/FRR/FAR/红线矩阵/代码度量 → HTML 报告
-│   ├── fetch_models.py     # 模型下载（支持代理）
+│   ├── fetch_models.py     # 模型下载（支持代理；--no-asr 跳过 239MB 识别模型）
+│   ├── shot.py             # 零依赖 CDP 客户端：截 10 个界面状态，也能当探针量尺寸
+│   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 141 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/端到端
+└── tests/                  # 156 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端
 ```
 
 ## 四条关键设计决策
@@ -179,7 +200,7 @@ JSON Schema 由类型注解自省生成（`registry.py`），正则快通道由�
 | :--- | :--- | :--- | :--- |
 | VAD | Silero ONNX（实时率 0.4%） | 能量 VAD（自适应底噪） | 嘈杂环境误触发率上升 |
 | 声纹 | CAM++ 192 维 | 频谱统计 + UBM | **FRR/FAR 不再满足 PRD**，仅保证链路可跑 |
-| STT | SenseVoice / faster-whisper | OpenAI Whisper 兼容接口 / 脚本化 | 脚本化仅用于测试与演示 |
+| STT | **SenseVoice int8（本地，239MB，≥30× 实时）** | faster-whisper / OpenAI 兼容接口 / 脚本化 | 本地识别不出网；脚本化仅用于测试与演示 |
 | LLM | 任意 OpenAI 兼容（Ollama/DeepSeek/Claude） | 离线启发式（4 条规则） | 只认三大高频场景，其余不执行 |
 | GUI | 无头 + SSE 胶囊 | CLI 状态行 | 无 |
 
@@ -208,6 +229,22 @@ JSON Schema 由类型注解自省生成（`registry.py`），正则快通道由�
 pip install -e ".[models]"     # numpy + sherpa-onnx + onnxruntime（推荐）
 pip install -e ".[audio]"      # + sounddevice（真麦克风）
 pip install -e ".[dev]"        # + pytest
+python scripts/fetch_models.py # 声纹 + VAD + SenseVoice 识别模型（约 267MB）
 ```
 
 核心链路（core/tools/ui/config）**只用标准库**；numpy 仅用于音频。
+
+模型三件套与用途：
+
+| 文件 | 大小 | 缺了会怎样 |
+| :--- | :--- | :--- |
+| `.voxos/models/campplus.onnx` | 27MB | 声纹退化成频谱统计，FRR/FAR 不再满足 PRD |
+| `.voxos/models/silero_vad.onnx` | 0.6MB | 退化成能量 VAD，嘈杂环境误触发变多 |
+| `.voxos/models/sense-voice/model.int8.onnx` + `tokens.txt` | 239MB | `stt.backend=sense_voice` 起不来；改成 `scripted` 仍可跑通链路 |
+
+识别率不是估的：24 句 TTS 语料 818 字，字符错误率 **2.8%**（中文 1.4%、英文 3.1%），
+**≥30× 实时**。中文那 1.4% 全是「十点→10点」这类数字规范化；英文按词算是 12.5%
+（`null`→`Ill`、`auth`→`Oth`），所以代码术语得靠热词表，不能指望声学模型自己扛。
+
+识别后端在设置页切换（`stt.backend`），默认 `scripted`（不依赖模型，CI 与演示用）。
+换成 `sense_voice` 后完全离线，音频不出本机。
