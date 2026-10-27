@@ -1,4 +1,4 @@
-"""长稳采样：把音频管道挂在合成源上跑，定期采样 RSS / CPU / 缓冲。
+"""长稳采样：把音频管道挂在合成源上跑，定期采样内存 / CPU / 缓冲。
 
 为什么不是「8 小时真麦克风」：没人愿意让一个后台进程开麦八小时，这台机器也不行。
 但「跑久了内存涨不涨」跟麦克风无关，跟管道里的缓冲、VAD 状态、STT 会话有关——
@@ -6,6 +6,8 @@
 
 覆盖得到：管道缓冲泄漏、VAD 状态机漂移、STT 会话重复创建、静音段误触发。
 覆盖不到：设备热插拔、蓝牙切换、系统休眠唤醒、TCC 授权过期。这几项只能真挂机。
+
+内存读的是 `phys_footprint` 而不是 RSS——理由见 `_footprint_reader()`。
 
 用法：
     .venv/bin/python scripts/soak.py --minutes 30
@@ -20,6 +22,7 @@ import ctypes.util
 import json
 import os
 import resource
+import struct
 import sys
 import threading
 import time
@@ -35,31 +38,37 @@ from voxos.config import load  # noqa: E402
 
 _READER: Callable[[], float] | None = None
 
-
-class _MachInfo(ctypes.Structure):
-    _fields_ = [("virtual_size", ctypes.c_uint64), ("resident_size", ctypes.c_uint64),
-                ("resident_size_max", ctypes.c_uint64), ("user_time", ctypes.c_int32 * 2),
-                ("system_time", ctypes.c_int32 * 2), ("policy", ctypes.c_int32),
-                ("suspend_count", ctypes.c_int32)]
+# proc_pid_rusage(RUSAGE_INFO_V4) 的 rusage_info_v4 里 ri_phys_footprint 的偏移：
+# uuid[16] + user_time + system_time + pkg_idle_wkups + interrupt_wkups + pageins
+# + wired_size + resident_size = 16 + 7*8 = 72
+_FOOTPRINT_OFFSET = 72
 
 
-def _mach_reader() -> Callable[[], float]:
-    """macOS：直接问内核要当前常驻内存。
+def _footprint_reader() -> Callable[[], float]:
+    """macOS：问内核要 `phys_footprint`，也就是活动监视器里「内存」那一列。
 
-    不用 `ps` 是因为它在沙箱里起不来（operation not permitted），
-    也不用 ru_maxrss——那是历史峰值，涨上去就不下来，看不出「稳定住了」。
+    为什么不用 RSS：模型的 229MB 权重是 mmap 进来的，`resident_size` 数的是
+    「此刻有多少页还留在物理内存里」——页被回收就掉、被读到就涨。实测同一个
+    进程的 RSS 在 **28MB 和 364MB 之间来回跳**（28MB 比裸 Python 还低），
+    而它每分钟干的活一模一样。**拿 RSS 判泄漏，量到的是页缓存命中率。**
+
+    `phys_footprint` 把已压缩页也算进来，是「这个进程到底占了多少」。
+    解码 3 次前后它从 555.7 走到 557.2，稳定且单调——这才是能判泄漏的量。
+
+    也不用 `ps`（沙箱里 operation not permitted）和 `ru_maxrss`（历史峰值，
+    涨上去就不下来）。缓冲区给 1KB 是因为 `proc_pid_rusage` 没有长度参数，
+    内核按自己的结构体写满；按结构体精确开 80 字节会被写穿并段错误。
     """
     lib = ctypes.CDLL(ctypes.util.find_library("System"))
-    lib.mach_task_self.restype = ctypes.c_uint32
-    task = lib.mach_task_self()
-    size = ctypes.sizeof(_MachInfo) // ctypes.sizeof(ctypes.c_uint32)
+    lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+    lib.proc_pid_rusage.restype = ctypes.c_int
+    buf = ctypes.create_string_buffer(1024)
+    pid = os.getpid()
 
     def read() -> float:
-        info = _MachInfo()
-        count = ctypes.c_uint32(size)
-        if lib.task_info(task, 20, ctypes.byref(info), ctypes.byref(count)) != 0:
-            raise OSError("task_info 失败")
-        return round(info.resident_size / 2 ** 20, 1)
+        if lib.proc_pid_rusage(pid, 4, buf) != 0:          # 4 = RUSAGE_INFO_V4
+            raise OSError("proc_pid_rusage 失败")
+        return round(struct.unpack_from("<Q", buf.raw, _FOOTPRINT_OFFSET)[0] / 2 ** 20, 1)
     read()
     return read
 
@@ -70,12 +79,12 @@ def _rusage_reader() -> Callable[[], float]:
     return read
 
 
-def rss_mb() -> float:
-    """当前常驻内存（MB）；拿不到就返回 -1，不编数字。"""
+def mem_mb() -> float:
+    """当前内存占用（MB）；拿不到就返回 -1，不编数字。"""
     global _READER
     if _READER is None:
         try:
-            _READER = _mach_reader()
+            _READER = _footprint_reader()
         except Exception:                                  # noqa: BLE001
             _READER = _rusage_reader()
     try:
@@ -135,14 +144,14 @@ def sample_loop(pipeline: audio.AudioPipeline, counter: dict, args,
                 started: float, cpu0: float) -> list[dict]:
     """按间隔采样，返回每个采样点。"""
     samples: list[dict] = []
-    print(f"{'分钟':>6} {'RSS(MB)':>9} {'CPU%':>7} {'块':>9} {'语音段':>7}")
+    print(f"{'分钟':>6} {'内存(MB)':>9} {'CPU%':>7} {'块':>9} {'语音段':>7}")
     while time.time() - started < args.minutes * 60:
         left = args.minutes * 60 - (time.time() - started)
         time.sleep(min(args.interval, max(1.0, left)))
         elapsed = time.time() - started
         record = {
             "minute": round(elapsed / 60, 2),
-            "rss_mb": rss_mb(),
+            "mem_mb": mem_mb(),
             "cpu_pct": round((time.process_time() - cpu0) / elapsed * 100, 1),
             "chunks": pipeline.stats["chunks"],
             "utterances": counter["utterances"],
@@ -150,7 +159,7 @@ def sample_loop(pipeline: audio.AudioPipeline, counter: dict, args,
             "rejected": pipeline.stats["rejected"],
         }
         samples.append(record)
-        print(f"{record['minute']:6.1f} {record['rss_mb']:9.1f} {record['cpu_pct']:7.1f} "
+        print(f"{record['minute']:6.1f} {record['mem_mb']:9.1f} {record['cpu_pct']:7.1f} "
               f"{record['chunks']:9d} {record['utterances']:7d}")
     return samples
 
@@ -196,11 +205,21 @@ def main() -> int:
 
 
 def slope(samples: list[dict]) -> float:
-    """一段采样里的 RSS 斜率（MB/小时）。"""
+    """一段采样里的内存斜率（MB/小时）。"""
     span = samples[-1]["minute"] - samples[0]["minute"]
     if span <= 0:
         return 0.0
-    return (samples[-1]["rss_mb"] - samples[0]["rss_mb"]) / span * 60
+    return (samples[-1]["mem_mb"] - samples[0]["mem_mb"]) / span * 60
+
+
+def spread(samples: list[dict]) -> float:
+    """去掉第一分钟后，内存最高与最低的差（MB）。
+
+    短时长的斜率会被噪声淹没，但「稳定住了没有」可以直接看这个：
+    一个在泄漏的进程，跨度只会越拉越大。
+    """
+    warm = [s["mem_mb"] for s in samples[1:]] or [s["mem_mb"] for s in samples]
+    return round(max(warm) - min(warm), 1)
 
 
 def report(samples: list[dict], counter: dict, pipeline: audio.AudioPipeline,
@@ -209,11 +228,11 @@ def report(samples: list[dict], counter: dict, pipeline: audio.AudioPipeline,
         print("采样点太少，得不出结论")
         return 2
     first, last = samples[0], samples[-1]
-    drift = last["rss_mb"] - first["rss_mb"]
+    drift = last["mem_mb"] - first["mem_mb"]
     late = slope(samples[len(samples) // 2:])
     print("-" * 52)
-    print(f"时长 {last['minute']:.1f} 分钟｜RSS {first['rss_mb']:.1f} → {last['rss_mb']:.1f} MB"
-          f"（{drift:+.1f}）")
+    print(f"时长 {last['minute']:.1f} 分钟｜内存 {first['mem_mb']:.1f} → {last['mem_mb']:.1f} MB"
+          f"（{drift:+.1f}），预热后跨度 {spread(samples):.1f} MB")
     # 全程斜率包含模型加载/分配器预热，不能当泄漏；后半程才是。
     print(f"全程 {slope(samples):+.1f} MB/小时（含预热）｜后半程 {late:+.1f} MB/小时（更像真实泄漏）")
     print(f"语音段 {counter['utterances']}（接受 {counter['accepted']}）｜"
@@ -222,8 +241,8 @@ def report(samples: list[dict], counter: dict, pipeline: audio.AudioPipeline,
         print(f"管道异常：{counter['error']}")
     if args.json:
         Path(args.json).write_text(json.dumps(
-            {"minutes": last["minute"], "drift_mb": drift, "per_hour_mb": round(slope(samples), 1),
-             "late_per_hour_mb": round(late, 1),
+            {"minutes": last["minute"], "drift_mb": drift, "spread_mb": spread(samples),
+             "per_hour_mb": round(slope(samples), 1), "late_per_hour_mb": round(late, 1),
              "samples": samples, "error": counter.get("error", "")},
             ensure_ascii=False, indent=1), encoding="utf-8")
         print(f"明细写入 {args.json}")

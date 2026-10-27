@@ -15,9 +15,11 @@ setup:
 	@echo "✅ 依赖就绪：$(VENV)/bin/python"
 
 # 缺依赖时给一句人话，而不是 ModuleNotFoundError
+# --basetemp 钉在仓库内：受限环境里 pytest 默认的 /var/folders 临时目录会被
+# 文件代理拒掉（mkdir 已存在的目录 → PermissionError: EEXIST），90 个用例全废。
 test:
 	@$(PY) -c "import pytest" 2>/dev/null || { echo "❌ 缺 pytest —— 先跑 make setup"; exit 1; }
-	$(PY) -m pytest -q
+	$(PY) -m pytest -q --basetemp=.voxos/pytest-tmp
 
 verify:
 	@$(PY) -c "import numpy" 2>/dev/null || { echo "❌ 缺 numpy —— 先跑 make setup"; exit 1; }
