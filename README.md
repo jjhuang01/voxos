@@ -20,7 +20,7 @@ make setup                                   # 建 .venv 并装依赖（只需�
 make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 下载声纹 + VAD 模型（约 28MB，可选但强烈建议）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 133 项测试
+make test                                    # 141 项测试
 make verify                                  # 工程验收，产出 docs/ACCEPTANCE.html
 ```
 
@@ -79,15 +79,29 @@ PYTHONPATH=src python -m voxos.main text "Siri，检查一下服务器负载"   
 
 ## 界面：一个胶囊，展开就是全部
 
-点胶囊，在它正下方展开一张 392px 的控制面板 —— **不是主窗口，收起后不留痕迹**。
+点胶囊，在它正下方展开一张 400px 的控制面板 —— **不是主窗口，收起后不留痕迹**。
 
 | 页 | 内容 |
 | :--- | :--- |
 | **状态** | 声纹是否录入 / 阈值 / 角色 / 识别后端 / 大模型 / 演练开关 + 一句话输入框 |
 | **最近** | 最近 8 条：时间、它听成的原文、执行结果、路由 |
-| **设置** | 19 个真会改的字段，分组呈现；保存即时生效，保留 TOML 注释 |
+| **设置** | 20 个真会改的字段，分组呈现；保存即时生效，保留 TOML 注释 |
 
 改设置不用重启、不用手改文件；被环境变量接管的字段会置灰并说明是哪一条。
+
+界面上的真实状态（`docs/screenshots/`，由 `scripts/shot.py` 驱动真实页面截取）：
+
+| 待机 → 聆听 | 最近（窄到 340px 也不裁标签） |
+| :--- | :--- |
+| ![状态](docs/screenshots/status.png) | ![最近](docs/screenshots/narrow.png) |
+
+| 危险操作等确认（8 秒倒计时） | 首次启动：录 3 秒声纹 |
+| :--- | :--- |
+| ![确认](docs/screenshots/confirm-620.png) | ![引导](docs/screenshots/onboard.png) |
+
+| 设置（保存条钉底、页签带未保存点） | 展开时的 hover 反馈 |
+| :--- | :--- |
+| ![设置](docs/screenshots/settings-dirty.png) | ![hover](docs/screenshots/status-hover.png) |
 
 ### 安全边界画在门口
 
@@ -132,7 +146,7 @@ voxos/
 │   ├── fetch_models.py     # 模型下载（支持代理）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 133 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/端到端
+└── tests/                  # 141 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/端到端
 ```
 
 ## 四条关键设计决策

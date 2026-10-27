@@ -53,11 +53,17 @@
 
 ```
 含"日志|记录|记一下"        → append_structured_log(content=整句去前缀)
+含"重构|大改|重写|整个项目|交给 claude" → delegate_to_coding_cli(prompt=整句)   ← red_confirm，会弹确认卡
+含"文件名 + 补|加|改|删|修"  → dispatch_code_session(instruction=整句)
 含"写代码|改代码|改一下|加个|修复" → dispatch_code_session(instruction=整句)
 含"服务器|负载|流量|巡检"   → inspect_server_ops(query=整句)
 含"撤销|回滚|还原"          → rollback_file()
 否则                        → IGNORE
 ```
+
+**为什么大改要单独一条**：确认通道如果没有任何语音入口，那张确认卡就是摆设
+（LLM 通道默认关闭，而 `delegate_to_coding_cli` 只由它触发）。但反过来，如果小修小补也弹确认，
+人就会养成闭眼点"允许"的习惯——那比不弹更危险。所以分界线画在"是不是重写整块"上。
 
 多意图用连接词切分：`然后|接着|再|，然后`。切分后逐段独立匹配。
 

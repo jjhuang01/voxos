@@ -1,6 +1,6 @@
 {
   "report": {
-    "generated_at": "2026-10-27T23:45:13",
+    "generated_at": "2026-10-28T00:25:31",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -8,15 +8,15 @@
       "platform": "darwin"
     },
     "fast_path": {
-      "p50": 0.0007,
-      "p95": 0.0008,
-      "p99": 0.0008,
+      "p50": 0.0008,
+      "p95": 0.001,
+      "p99": 0.002,
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 0.22,
-      "p95": 1.363,
-      "context_p95": 0.03,
+      "p50": 26.605,
+      "p95": 42.293,
+      "context_p95": 0.011,
       "rounds": 30
     },
     "voiceprint": {
@@ -98,11 +98,11 @@
       "backend": "sherpa-cam++",
       "threshold": 0.82,
       "dispatch_ms": [
-        0.49,
-        202.59
+        66.18,
+        297.1
       ],
-      "wall_ms": 421.1,
-      "realtime_factor": 0.023
+      "wall_ms": 763.6,
+      "realtime_factor": 0.042
     },
     "redlines": {
       "forbidden_cases": 8,
@@ -126,8 +126,8 @@
       "seconds": 30,
       "segments": 0,
       "vad": "SileroVad",
-      "cpu_percent": 0.32,
-      "realtime_factor": 0.003
+      "cpu_percent": 0.4,
+      "realtime_factor": 0.004
     },
     "settings": {
       "errors": [],
@@ -140,6 +140,13 @@
       "has_profiles": false,
       "enroll_available": true,
       "status_enrolled": false
+    },
+    "confirm": {
+      "reached_from_speech": true,
+      "reason": "「把复杂重构委托给本地 Coding CLI」会真的改动东西，需要你点头",
+      "reason_is_human": true,
+      "deny_cancels": true,
+      "allow_runs": true
     },
     "code": {
       "modules": [
@@ -160,8 +167,8 @@
         },
         {
           "file": "core.py",
-          "lines": 258,
-          "code_lines": 215
+          "lines": 267,
+          "code_lines": 220
         },
         {
           "file": "corpus.py",
@@ -175,8 +182,8 @@
         },
         {
           "file": "main.py",
-          "lines": 506,
-          "code_lines": 404
+          "lines": 519,
+          "code_lines": 413
         },
         {
           "file": "registry.py",
@@ -185,8 +192,8 @@
         },
         {
           "file": "safety.py",
-          "lines": 253,
-          "code_lines": 205
+          "lines": 267,
+          "code_lines": 217
         },
         {
           "file": "settings.py",
@@ -204,7 +211,7 @@
           "code_lines": 287
         }
       ],
-      "total_lines": 3075,
+      "total_lines": 3111,
       "max_function": {
         "name": "corpus.py:_build_synthetic",
         "lines": 35
@@ -216,19 +223,19 @@
     },
     "tests": {
       "returncode": 0,
-      "summary": "133 passed in 8.70s",
-      "seconds": 9.2
+      "summary": "141 passed in 14.52s",
+      "seconds": 15.7
     }
   },
   "verdicts": [
     {
       "item": "快通道决策延迟 p95 < 5ms",
-      "measured": "0.0008ms",
+      "measured": "0.001ms",
       "pass": true
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "1.363ms",
+      "measured": "42.293ms",
       "pass": true
     },
     {
@@ -268,7 +275,7 @@
     },
     {
       "item": "测试全绿",
-      "measured": "133 passed in 8.70s",
+      "measured": "141 passed in 14.52s",
       "pass": true
     },
     {
@@ -278,7 +285,7 @@
     },
     {
       "item": "上下文注入不阻塞派发",
-      "measured": "0.03ms",
+      "measured": "0.011ms",
       "pass": true
     },
     {
@@ -292,8 +299,13 @@
       "pass": true
     },
     {
+      "item": "确认通道从语音可达且文案是人话",
+      "measured": "可达",
+      "pass": true
+    },
+    {
       "item": "静音待机 CPU < 1.5%",
-      "measured": "0.32%/秒音频",
+      "measured": "0.4%/秒音频",
       "pass": true
     },
     {

@@ -50,8 +50,8 @@
 
 - [x] **本地接口鉴权**：每次运行生成随机令牌，页面渲染时注入；非本机同源 `Origin` 一律 403。
       修复前：任意网页 `fetch('http://127.0.0.1:8765/command', ...)` 可直接执行工具。
-- [x] **控制面板**：胶囊点击展开为 392px 面板（状态 / 最近 / 设置），收起不留痕。
-- [x] **设置层** `settings.py`：19 个字段的模式 + 范围校验 + 保留注释的 TOML 写回 + 热重载。
+- [x] **控制面板**：胶囊点击展开为 400px 面板（状态 / 最近 / 设置），收起不留痕。
+- [x] **设置层** `settings.py`：20 个字段的模式 + 范围校验 + 保留注释的 TOML 写回 + 热重载。
       写回目标跟随 `--config`（修复前总是写仓库里的默认文件）。
 - [x] **首次启动闭环**：无声纹时进入 ONBOARD 态并在面板内一键录音，录完自动进入待机。
 - [x] **确认闸门双通道**：终端与面板谁先回答谁生效；无 TTY 时不再秒退为"已取消"。
@@ -65,13 +65,16 @@
 - [x] **静音待机实测**：-40dBFS 底噪跑 30 秒 → **0.32% 单核/秒音频，零误触发**。
 - [x] **路由覆盖表**：`tests/test_routing.py` 22 项，16 条自然说法 + 未知句不乱动。
       补上了「把 auth.py 的空值校验补上」这类把字句，以及「Jarvis：」中文冒号唤醒词。
-- *验收*：`tests/test_settings.py` 19 项 + `tests/test_ui.py` 14 项 + `tests/test_routing.py` 22 项
-  + `tests/test_barge.py` 4 项；验收项从 10 项扩到 **16 项**，新增的都是抽查出来的坑。
+- *验收*：`tests/test_settings.py` 19 项 + `tests/test_ui.py` 14 项 + `tests/test_routing.py` 25 项
+  + `tests/test_barge.py` 4 项；验收项从 10 项扩到 **17 项**，新增的都是抽查出来的坑。
+- [x] **像素走查工具**：`scripts/shot.py`（零依赖 CDP 客户端）驱动真实页面截 8 个状态，
+  同时能当探针量 `getBoundingClientRect`。本轮据此修掉 9 个界面与链路问题，
+  其中两个是 P0：确认卡在说枚举值、以及**没有任何语音路径能走到确认卡**。
 
 
 ### Task 1.5 工程化
 
-- [x] 77 项测试（`make test`），`scripts/verify.py` 10 项验收指标（`make verify`）。
+- [x] 141 项测试（`make test`），`scripts/verify.py` 17 项验收指标（`make verify`）。
 - [x] 全模块单函数 ≤ 40 行、类 ≤ 12 个、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README / BUSINESS。
 
@@ -100,12 +103,15 @@
 
 | 缺口 | 影响 | 下一步 |
 | :--- | :--- | :--- |
-| 未接真实 STT（默认 `scripted`） | 语音识别靠外部后端，本地无模型时只能演示 | Task 2.3 |
-| 未在真麦克风上做 8 小时长稳测试 | 长待机 CPU/内存指标未实测 | 用 `voxos run` + `psutil` 采样补测 |
+| 未接真实 STT（默认 `scripted`） | 语音识别靠外部后端，本地无模型时只能跑演示脚本 | Task 2.3 |
+| 未在真麦克风上做 8 小时长稳测试 | 只有 30 秒底噪的 CPU 采样，没有小时级内存曲线 | 用 `voxos run` + `psutil` 采样补测 |
+| 真人声纹未标定 | 现有 FRR/FAR 来自 6 个 TTS 音色，真人未知 | 录 20 条真人音频重跑 `make verify` |
 | 降级声纹（无 CAM++ 时）精度不足 | 仅能区分明显不同音色 | 强制引导下载模型，或降级为"仅日志模式" |
 | 无手机端 | 只能在电脑旁说话 | Phase 2 |
 | macOS 麦克风权限/launchd 未自动化 | 首次运行需手动授权 | 补 `scripts/install_launchd.sh` |
 | 多意图的语义切分仅靠连接词 | "记日志，顺便看下负载" 可切分，"帮我搞定" 不行 | 慢通道兜底 + 语料扩充 |
-| 面板未做像素级走查 | 本机无头浏览器被沙箱拦截，只校验了 DOM 结构与 id 引用 | 在真机上按 `DESIGN_SYSTEM.md §1.1` 逐项对照 |
-| 没有打断词 | TTS 播报中喊"停"不能中止 | Phase 2：回声门里加打断词白名单 |
 | 设置无历史/撤销 | 改错了只能再改回去 | 保存前把旧文件复制到 `.voxos/settings.bak` |
+| 面板只覆盖了静态与 hover/焦点 | 拖拽、长按、动效逐帧没看（`scripts/shot.py` 已能派发鼠标事件） | 补 `Input.dispatchMouseEvent` 的拖拽序列 |
+
+> 已关闭：「面板未做像素级走查」（`scripts/shot.py` + 8 张真实截图，见 `docs/REVIEW.md §12-14`）、
+> 「没有打断词」（回声门 + 打断词白名单 + `stop_speaking()`，见 `tests/test_barge.py`）。
