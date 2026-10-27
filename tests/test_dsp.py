@@ -145,3 +145,16 @@ def test_cosine_edge_cases():
     assert dsp.cosine(np.zeros(4), np.zeros(4)) == 0.0
     assert dsp.cosine(np.array([1.0, 0.0]), np.array([1.0, 0.0])) == pytest.approx(1.0)
     assert dsp.cosine(np.array([1.0, 0.0]), np.array([0.0, 1.0])) == pytest.approx(0.0)
+
+
+def test_silence_never_produces_an_utterance():
+    """纯静音跑 60 秒不能产出任何一段「语音」——否则没人说话时它每 12 秒醒一次。"""
+    ep = dsp.EndpointDetector()
+    states = [ep.push(False, 512) for _ in range(1875)]
+    assert set(states) == {"idle"}
+
+
+def test_long_speech_still_hits_the_hard_limit():
+    ep = dsp.EndpointDetector(max_ms=1000.0)
+    states = [ep.push(True, 512) for _ in range(60)]
+    assert "force_end" in states

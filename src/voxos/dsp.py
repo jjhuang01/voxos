@@ -119,15 +119,16 @@ class EndpointDetector:
         """喂入一帧，返回 idle | speech | candidate | force_end。"""
         span = n_samples / self.sr * 1000.0
         self.total_ms += span
-        if self.total_ms >= self.max_ms:
-            return "force_end"
         if is_speech:
             self.speech_ms += span
             self.silence_ms_now = 0.0
-            return "speech"
+            return "force_end" if self.total_ms >= self.max_ms else "speech"
         if self.speech_ms == 0.0:
+            self.total_ms = 0.0        # 没有语音就不累计：否则静音 12 秒会造出一段假语音
             return "idle"
         self.silence_ms_now += span
+        if self.total_ms >= self.max_ms:
+            return "force_end"
         return "candidate" if self.silence_ms_now >= self.deadline_ms else "speech"
 
     def should_end(self, text: str) -> bool:

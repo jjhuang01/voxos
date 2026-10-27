@@ -147,7 +147,8 @@ class SileroVad:
 
     WINDOW = 512
 
-    def __init__(self, model_path: str | Path, threshold: float = 0.5) -> None:
+    def __init__(self, model_path: str | Path, threshold: float = 0.5,
+                 floor_dbfs: float = -55.0) -> None:
         import onnxruntime as ort  # noqa: PLC0415
 
         options = ort.SessionOptions()
@@ -163,9 +164,15 @@ class SileroVad:
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
         self._context = np.zeros((1, 64), dtype=np.float32)
         self._pending = np.zeros(0, dtype=np.float32)
+        self._floor = floor_dbfs
 
     def is_speech(self, chunk: np.ndarray) -> bool:
-        self._pending = np.concatenate([self._pending, dsp.as_float(chunk)])
+        audio = dsp.as_float(chunk)
+        if dsp.dbfs(audio) < self._floor:
+            # 数字静音/极低底噪不进模型：实测 Silero 在纯零上仍有约 4% 的假阳性
+            self._pending = np.zeros(0, dtype=np.float32)
+            return False
+        self._pending = np.concatenate([self._pending, audio])
         speech = False
         while self._pending.size >= self.WINDOW:
             frame, self._pending = self._pending[:self.WINDOW], self._pending[self.WINDOW:]
@@ -421,12 +428,11 @@ class AudioPipeline:
         buffer: list[np.ndarray] = []
         last_partial_ms = 0.0
         for raw in source:
-            if not self.echo.allow_chunk(dsp.dbfs(dsp.as_float(raw))):
-                self.echo.tick(dsp.as_float(raw).size / dsp.SR * 1000.0)  # 半双工：TTS 期间丢弃
-                buffer.clear()
-                self._ep.reset()
-                continue
             chunk = self._preprocess(raw)
+            if not self.echo.allow_chunk(dsp.dbfs(chunk)):
+                # 半双工：这一段按静音处理，但**不能清空已有缓冲**。
+                # 清空会把「用户喊停之后的那一下停顿」连同喊停本身一起丢掉。
+                chunk = np.zeros_like(chunk)
             state = self._ep.push(bool(self.vad.is_speech(chunk)), chunk.size)  # type: ignore[attr-defined]
             if state == "idle":
                 continue

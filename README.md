@@ -20,7 +20,7 @@ make setup                                   # 建 .venv 并装依赖（只需�
 make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 下载声纹 + VAD 模型（约 28MB，可选但强烈建议）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 105 项测试
+make test                                    # 133 项测试
 make verify                                  # 工程验收，产出 docs/ACCEPTANCE.html
 ```
 
@@ -132,7 +132,7 @@ voxos/
 │   ├── fetch_models.py     # 模型下载（支持代理）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 105 项：内核/安全/工具/DSP/管道/UI/设置/端到端
+└── tests/                  # 133 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/端到端
 ```
 
 ## 四条关键设计决策

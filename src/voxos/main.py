@@ -305,6 +305,9 @@ def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[s
     for utterance in pipeline.run(source):
         if not utterance.accepted:
             continue
+        if pipeline.echo.is_interrupt(utterance.text) and stop_speaking():
+            runtime.bus.emit("idle", "已停止", utterance.text)
+            continue
         if cfg.flag("ui.earcons", True):
             ui.play(sounds["listen"])
         runtime.bus.emit("executing", "处理中…", utterance.text)
@@ -321,15 +324,33 @@ def _speak_async(text: str, pipeline: audio.AudioPipeline) -> None:
     threading.Thread(target=_speak, args=(text, pipeline), daemon=True).start()
 
 
+_TTS: dict[str, subprocess.Popen | None] = {"proc": None}
+
+
+def stop_speaking() -> bool:
+    """打断：把正在念的 say 杀掉。没有在念就返回 False。"""
+    proc = _TTS.get("proc")
+    if proc is None or proc.poll() is not None:
+        return False
+    proc.terminate()
+    return True
+
+
 def _speak(text: str, pipeline: audio.AudioPipeline) -> None:
     if not shutil.which("say"):
         return
     pipeline.echo.tts_start()
+    proc = None
     try:
-        subprocess.run(["say", "-r", "220", text[:60]], timeout=15, check=False)
+        proc = subprocess.Popen(["say", "-r", "220", text[:60]])
+        _TTS["proc"] = proc
+        proc.wait(timeout=15)
     except (subprocess.SubprocessError, OSError):
         pass
     finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+        _TTS["proc"] = None
         pipeline.echo.tts_end()
 
 

@@ -90,7 +90,8 @@ def _wake_pattern(cfg: Config | None) -> re.Pattern[str] | None:
     if not words:
         return None
     alternation = "|".join(re.escape(w) for w in words)
-    return re.compile(rf"^(?:{alternation})[，,、\s]*", re.IGNORECASE)
+    # 分隔符要覆盖中文冒号与句点：用户会说「Jarvis：写个日志」
+    return re.compile(rf"^(?:{alternation})[，,、：:。.\s]*", re.IGNORECASE)
 
 
 def dispatch(
@@ -214,6 +215,12 @@ def _llm_route(
 
 _SPLIT = re.compile(r"(?:然后|接着|再然后|[，,;；]\s*然后|[;；])")
 
+# 「把 auth.py 的空值校验补上」——最自然的编程说法。文件名 + 变更动词才认，
+# 避免把「把日志改一下」误判成改代码。
+_CODE_FILE = re.compile(
+    r"[\w./-]+\.(?:py|js|ts|tsx|jsx|go|java|rs|rb|php|vue|sql|sh|ya?ml|toml|json|md)\b", re.I)
+_CHANGE_VERB = re.compile(r"补|加上|加个|改|删|修|实现|重构|替换|优化")
+
 
 def heuristic_plan(text: str, cfg: Config | None = None) -> list[tuple[str, dict[str, Any]]]:
     """无模型/断网兜底：只认三大高频场景 + 撤销，命中不了就不做（宁可不做，不能乱做）。"""
@@ -225,6 +232,8 @@ def heuristic_plan(text: str, cfg: Config | None = None) -> list[tuple[str, dict
             continue
         if re.search(r"日志|记录|记一下|记一条|记个", piece):
             plan.append(("append_structured_log", {"content": piece}))
+        elif _CODE_FILE.search(piece) and _CHANGE_VERB.search(piece):
+            plan.append(("dispatch_code_session", {"instruction": piece}))
         elif re.search(r"写代码|改代码|改一下|加个|修复|重构|续接", piece):
             plan.append(("dispatch_code_session", {"instruction": piece}))
         elif re.search(r"服务器|负载|流量|巡检|磁盘|容器|线上", piece):

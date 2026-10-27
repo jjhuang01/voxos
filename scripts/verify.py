@@ -107,6 +107,22 @@ def _post_status(url: str, payload: dict, token: str = "", origin: str = "") -> 
         return int(error.code)
 
 
+def measure_standby(seconds: int = 30) -> dict[str, object]:
+    """没人说话时它占多少 CPU：底噪 -40dBFS 跑 30 秒，看误触发与单核占用。"""
+    cfg = load()
+    rng = np.random.default_rng(0)
+    noise = rng.normal(0, 0.01, SR * seconds).astype(np.float32)
+    vad = audio.make_vad(cfg)
+    lock = dsp.SpeakerLock(threshold=0.9, embedder=lambda chunk: np.zeros(8, dtype=np.float32))
+    pipeline = audio.AudioPipeline(cfg=cfg, stt=audio.ScriptedStt([]), lock=lock, vad=vad)
+    started, cpu = time.perf_counter(), time.process_time()
+    segments = sum(1 for _ in pipeline.run(audio.ArraySource(noise)))
+    wall, used = time.perf_counter() - started, time.process_time() - cpu
+    return {"seconds": seconds, "segments": segments, "vad": type(vad).__name__,
+            "cpu_percent": round(used / seconds * 100, 2),
+            "realtime_factor": round(wall / seconds, 3)}
+
+
 def measure_security() -> dict[str, object]:
     """跨站页面与无令牌请求必须在"执行"之前被挡住。"""
     hits: list[str] = []
@@ -333,6 +349,8 @@ def build_report(refresh: bool = False) -> dict[str, object]:
     e2e = measure_e2e(cfg, bus)
     print("→ 安全红线矩阵 …")
     redlines = measure_redlines(cfg)
+    print("→ 静音待机开销 …")
+    standby = measure_standby()
     print("→ 本地接口安全 …")
     security = measure_security()
     print("→ 设置写回 …")
@@ -348,7 +366,7 @@ def build_report(refresh: bool = False) -> dict[str, object]:
         "env": {"python": sys.version.split()[0], "numpy": np.__version__,
                 "sherpa": _version("sherpa_onnx"), "platform": sys.platform},
         "fast_path": fast, "dispatch": dispatch, "voiceprint": voiceprint,
-        "e2e": e2e, "redlines": redlines, "security": security,
+        "e2e": e2e, "redlines": redlines, "security": security, "standby": standby,
         "settings": settings_report, "onboarding": onboarding,
         "code": code, "tests": tests,
     }
@@ -392,6 +410,10 @@ def verdicts(report: dict[str, object]) -> list[dict[str, object]]:
         {"item": "无声纹时给出录入入口", "measured": str(report["onboarding"]["enroll_available"]),  # type: ignore[index]
          "pass": bool(report["onboarding"]["enroll_available"]
                       and not report["onboarding"]["status_enrolled"])},  # type: ignore[index]
+        {"item": "静音待机 CPU < 1.5%", "measured": f"{report['standby']['cpu_percent']}%/秒音频",  # type: ignore[index]
+         "pass": report["standby"]["cpu_percent"] < 1.5},  # type: ignore[index]
+        {"item": "静音零误触发", "measured": f"{report['standby']['segments']} 段",  # type: ignore[index]
+         "pass": report["standby"]["segments"] == 0},  # type: ignore[index]
     ]
 
 
