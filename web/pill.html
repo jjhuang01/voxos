@@ -13,6 +13,9 @@
     --radius:20px; --pill-h:36px;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  /* hidden 属性会被 .ask{display:flex} 这类规则盖掉（同一优先级，作者样式胜出），
+     所以统一加一条兜底：以后任何元素写 hidden 都真的会消失。 */
+  [hidden]{display:none !important}
   html,body{height:100%;margin:0}
   body{
     background:radial-gradient(120% 80% at 50% 0%,#1a1c20 0%,#0e0f11 55%,#0b0c0e 100%);
@@ -36,13 +39,19 @@
     transition:border-color .2s ease,box-shadow .2s ease,width .2s ease;
     min-width:180px;max-width:340px;
   }
-  .pill:hover{border-color:rgba(255,255,255,.2)}
+  /* hover 只加投影与内高光：边框留给状态色，否则 done/blocked 会把 hover 盖掉 */
+  .pill:hover{box-shadow:0 10px 38px rgba(0,0,0,.5);background:rgba(30,30,33,.92)}
+  .pill:active{transform:translateY(.5px)}
   .pill:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:0 0 auto}
   .label{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
     font-variant-numeric:tabular-nums;color:var(--ink)}
   .meter{display:flex;align-items:flex-end;gap:2px;height:12px;opacity:0;transition:opacity .2s}
-  .meter i{display:block;width:2px;height:3px;border-radius:1px;background:var(--ok);opacity:.85}
+  .meter i{display:block;width:2px;border-radius:1px;background:var(--ok);opacity:.85}
+  /* 三根柱子给不同基线高度：静止时也读作电平表，不会像省略号 */
+  .meter i:nth-child(1){height:5px}
+  .meter i:nth-child(2){height:10px}
+  .meter i:nth-child(3){height:7px}
   .gear{width:22px;height:22px;border:0;background:transparent;color:var(--dim);
     display:grid;place-items:center;border-radius:6px;cursor:pointer;padding:0}
   .gear:hover{color:var(--ink);background:rgba(255,255,255,.08)}
@@ -73,6 +82,9 @@
     max-height:calc(100vh - 70px);display:flex;flex-direction:column;
   }
   .panel[hidden]{display:none}
+  /* 确认卡在面板下方。胶囊窗口只有 420×620，面板吃满高度时卡片会被挤出屏幕——
+     而它是限时 8 秒的，必须始终可见。有卡片时把面板压矮。 */
+  .stage:has(.confirm:not([hidden])) .panel{max-height:calc(100vh - 200px)}
   @keyframes drop{from{opacity:0;transform:translateY(-6px) scale(.985)}to{opacity:1;transform:none}}
 
   .head{display:flex;align-items:center;gap:10px;padding:14px 16px 10px}
@@ -88,6 +100,9 @@
     font-size:12px;padding:5px 0;border-radius:7px;cursor:pointer;transition:.15s}
   .tabs button[aria-selected="true"]{background:rgba(255,255,255,.12);color:var(--ink);
     box-shadow:0 1px 2px rgba(0,0,0,.25)}
+  .tabs button .mark{display:none;width:5px;height:5px;border-radius:50%;
+    background:var(--warn);margin-left:5px;vertical-align:1.5px}
+  .tabs button.dirty .mark{display:inline-block}
 
   .body{padding:14px 16px 16px;overflow-y:auto;overscroll-behavior:contain}
   .body::-webkit-scrollbar{width:8px}
@@ -117,11 +132,17 @@
   .row:last-child{border-bottom:0}
   .row .t{color:var(--dim);font-size:11px;font-variant-numeric:tabular-nums;padding-top:2px}
   .row .c{flex:1;min-width:0}
-  .row .q{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* 文本单独负责省略号，路由标签永远完整显示（窄面板下曾被裁掉半个标签） */
+  .row .q{font-size:12.5px;display:flex;align-items:center;gap:6px}
+  .row .q .txt{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .row .a{color:var(--muted);font-size:11.5px;margin-top:1px;
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .tag{font-size:9.5px;padding:1px 5px;border-radius:4px;background:rgba(255,255,255,.1);
-    color:var(--muted);margin-left:6px;vertical-align:1.5px;letter-spacing:.02em}
+    color:var(--muted);letter-spacing:.02em;flex:0 0 auto;white-space:nowrap}
+  .tag.fast{background:rgba(48,209,88,.14);color:#5FDD7E}
+  .tag.llm{background:rgba(10,132,255,.16);color:#63B0FF}
+  .tag.offline{background:rgba(255,255,255,.09);color:var(--muted)}
+  .tag.ignore{background:rgba(255,159,10,.14);color:#FFB84D}
   .empty{color:var(--dim);font-size:12px;text-align:center;padding:26px 0}
 
   /* 设置 */
@@ -155,7 +176,11 @@
   .range input[type=range]{flex:1 1 70px;min-width:56px;accent-color:var(--accent);margin:0}
   .range small{color:var(--dim);font-size:11px;margin-left:-4px}
 
-  .actions{display:flex;gap:8px;margin-top:14px}
+  /* 保存条钉在面板底部：20 个字段滚到中段也能看见「有未保存的改动」。
+     bottom 用 0 而不是负 padding：滚到底时它就落回原位，不会压住最后一栏。 */
+  .actions{display:flex;gap:8px;position:sticky;bottom:0;margin:12px -16px -16px;
+    padding:12px 16px;border-top:1px solid var(--line-soft);
+    background:linear-gradient(to top,rgba(28,29,33,.99) 62%,rgba(28,29,33,.9))}
   .btn{flex:1;border:1px solid var(--line);background:rgba(255,255,255,.06);color:var(--ink);
     border-radius:10px;padding:9px 0;font:inherit;font-size:12.5px;cursor:pointer;transition:.15s}
   .btn:hover{background:rgba(255,255,255,.11)}
@@ -165,17 +190,24 @@
 
   /* 确认卡 */
   .confirm{width:100%;margin-top:2px;background:rgba(255,159,10,.1);border:1px solid rgba(255,159,10,.35);
-    border-radius:14px;padding:12px 14px;animation:drop .18s cubic-bezier(.2,.8,.2,1)}
+    border-radius:14px;padding:12px 14px;animation:drop .18s cubic-bezier(.2,.8,.2,1);
+    overflow:hidden;position:relative}
   .confirm[hidden]{display:none}
   .confirm .q{font-size:12.5px;line-height:1.5}
   .confirm .a{display:flex;gap:8px;margin-top:10px}
   .confirm .btn{flex:1;padding:7px 0;font-size:12px}
+  /* 倒计时：闸门到点就按拒绝处理，界面必须让人看见还剩多久 */
+  .confirm .left{position:absolute;left:0;bottom:0;height:2px;background:var(--warn);
+    animation:drain linear forwards}
+  @keyframes drain{from{width:100%}to{width:0}}
 
   /* 引导卡 */
   .onboard{margin-top:10px;background:rgba(10,132,255,.1);border:1px solid rgba(10,132,255,.32);
     border-radius:14px;padding:12px 14px}
   .onboard[hidden]{display:none}
   .onboard p{margin:0 0 10px;font-size:12px;color:var(--muted);line-height:1.6}
+  /* 卡片里的按钮不参与 flex 均分，得自己撑出左右内边距，否则字贴着边被裁 */
+  .onboard .btn{flex:0 0 auto;padding:9px 20px;width:auto}
 
   .toast{position:fixed;left:50%;bottom:18px;transform:translate(-50%,8px);opacity:0;
     background:rgba(40,41,45,.96);border:1px solid var(--line);color:var(--ink);
@@ -219,18 +251,18 @@
     <div class="tabs" role="tablist">
       <button role="tab" data-tab="status" aria-selected="true">状态</button>
       <button role="tab" data-tab="recent" aria-selected="false">最近</button>
-      <button role="tab" data-tab="settings" aria-selected="false">设置</button>
+      <button role="tab" data-tab="settings" aria-selected="false">设置<span class="mark"></span></button>
     </div>
     <div class="body">
       <div class="view" data-view="status">
         <div class="grid" id="cells"></div>
-        <div class="ask">
-          <input id="ask" placeholder="说一句话，或在这里输入…" autocomplete="off" />
-          <button id="send">发送</button>
-        </div>
         <div class="onboard" id="onboard" hidden>
           <p>还没有声纹档案。录 3 秒，之后只有你的声音能驱动它。</p>
           <button class="btn primary" id="enroll">录入声纹</button>
+        </div>
+        <div class="ask" id="ask-row">
+          <input id="ask" placeholder="说一句话，或在这里输入…" autocomplete="off" />
+          <button id="send">发送</button>
         </div>
         <div class="hint" id="hint">点胶囊展开，Esc 收起。危险操作会在这里等你确认。</div>
       </div>
@@ -241,11 +273,11 @@
 
       <div class="view" data-view="settings" hidden>
         <div id="groups"></div>
+        <div class="hint">改动立即生效；标注「重启生效」的项需要重开守护进程。</div>
         <div class="actions">
           <button class="btn" id="reset">还原</button>
-          <button class="btn primary" id="save">保存</button>
+          <button class="btn primary" id="save" disabled>保存</button>
         </div>
-        <div class="hint">改动立即生效；标注「重启生效」的项需要重开守护进程。</div>
       </div>
     </div>
   </section>
@@ -256,6 +288,7 @@
       <button class="btn" data-allow="0">拒绝</button>
       <button class="btn primary" data-allow="1">允许</button>
     </div>
+    <i class="left" id="confirm-left"></i>
   </div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -269,7 +302,7 @@ const STATE_TEXT = {
   idle:'待机', listening:'聆听中', executing:'执行中', done:'完成',
   blocked:'已拦截', confirm:'需要确认', onboard:'待设置'
 };
-let current = 'idle', settingsCache = null, dirty = {};
+let current = 'idle', settingsCache = null, dirty = {}, confirmTimeout = 8;
 const ROUTE = {fast:'快通道', offline:'离线兜底', llm:'大模型', ignore:'未识别'};
 
 /* ---------------- 通信 ---------------- */
@@ -334,15 +367,24 @@ function render(event) {
   if (state === 'confirm') {
     $('confirm-q').textContent = event.detail || '这个操作需要你确认';
     $('confirm').hidden = false;
+    startCountdown();
     open();
   } else if (state === 'onboard') {
-    $('onboard').hidden = false;
+    setOnboard(true);
     open('status');
     loadStatus();
   } else {
     $('confirm').hidden = true;
   }
   if (state === 'done' || state === 'blocked') loadStatus();
+}
+
+/* 闸门到点就按拒绝处理：让倒计时可见，别让人以为卡片是凭空消失的 */
+function startCountdown() {
+  const bar = $('confirm-left');
+  bar.style.animation = 'none';
+  void bar.offsetWidth;                       // 强制回流，重启动画
+  bar.style.animation = `drain ${confirmTimeout}s linear forwards`;
 }
 
 document.querySelectorAll('[data-allow]').forEach(button =>
@@ -368,8 +410,18 @@ async function loadStatus() {
     $('cells').innerHTML = rows.map(([k, v, tone]) =>
       `<div class="cell"><div class="k">${k}</div><div class="v ${tone}">${v}</div></div>`).join('');
     $('uptime').textContent = `v${status.version} · ${Math.floor((status.uptime_s || 0) / 60)} 分钟`;
-    $('onboard').hidden = !!status.enrolled;
+    if (status.confirm_timeout_s) confirmTimeout = status.confirm_timeout_s;
+    setOnboard(!status.enrolled);
   } catch (_) { /* 守护进程没起来时静默 */ }
+}
+
+/* 待录入时输入框是死的：藏起来，把「录 3 秒」顶到第一眼能看到的位置 */
+function setOnboard(on) {
+  $('onboard').hidden = !on;
+  $('ask-row').hidden = on;
+  $('hint').textContent = on
+    ? '录完声纹，胶囊就会开始听你说话。'
+    : '点胶囊展开，Esc 收起。危险操作会在这里等你确认。';
 }
 
 async function loadRecent() {
@@ -381,7 +433,10 @@ async function loadRecent() {
       <div class="row">
         <span class="t">${row.ts || ''}</span>
         <div class="c">
-          <div class="q">${escapeHtml(row.text || '')}<span class="tag">${ROUTE[row.route] || row.route || ''}</span></div>
+          <div class="q">
+            <span class="txt">${escapeHtml(row.text || '')}</span>
+            <span class="tag ${row.route || ''}">${ROUTE[row.route] || row.route || ''}</span>
+          </div>
           <div class="a">${escapeHtml(row.reply || '没听懂，什么也没做')}</div>
         </div>
       </div>`).join('');
@@ -404,6 +459,7 @@ async function loadSettings() {
         ${group.fields.map(field => fieldHtml(field)).join('')}
       </div>`).join('');
     bindFields();
+    markDirty();
   } catch (error) { toast(error.message, true); }
 }
 
@@ -444,7 +500,7 @@ function fieldHtml(field) {
 function bindFields() {
   document.querySelectorAll('[data-key]').forEach(input => {
     const key = input.dataset.key;
-    const sync = value => { dirty[key] = value; };
+    const sync = value => { dirty[key] = value; markDirty(); };
     input.addEventListener('input', () => {
       sync(input.type === 'checkbox' ? input.checked
         : input.type === 'number' || input.type === 'range' ? Number(input.value)
@@ -455,6 +511,13 @@ function bindFields() {
     });
     input.addEventListener('change', () => input.dispatchEvent(new Event('input')));
   });
+}
+
+/* 保存条在滚动区里，改一个开关就可能滚出视野——页签上点个点，保存按钮跟着亮 */
+function markDirty() {
+  const pending = Object.keys(dirty).length > 0;
+  $('save').disabled = !pending;
+  document.querySelector('[data-tab="settings"]').classList.toggle('dirty', pending);
 }
 
 $('save').addEventListener('click', async () => {
@@ -468,7 +531,7 @@ $('save').addEventListener('click', async () => {
     await loadSettings();
     await loadStatus();
   } catch (error) { toast(error.message, true); }
-  finally { $('save').disabled = false; }
+  finally { markDirty(); }
 });
 
 $('reset').addEventListener('click', () => { settingsCache = null; dirty = {}; loadSettings(); });
@@ -498,7 +561,7 @@ $('enroll').addEventListener('click', async () => {
   try {
     const result = await api('/api/enroll', {method:'POST', body: JSON.stringify({seconds: 3})});
     toast(`录入完成，一致性 ${result.consistency}`);
-    $('onboard').hidden = true;
+    setOnboard(false);
     await loadStatus();
   } catch (error) {
     toast(error.message, true);
