@@ -1,0 +1,239 @@
+{
+  "report": {
+    "generated_at": "2026-10-27T22:30:22",
+    "env": {
+      "python": "3.13.12",
+      "numpy": "2.5.4",
+      "sherpa": "2.0.1",
+      "platform": "darwin"
+    },
+    "fast_path": {
+      "p50": 0.0007,
+      "p95": 0.0008,
+      "p99": 0.0008,
+      "rounds": 2000
+    },
+    "dispatch": {
+      "p50": 0.135,
+      "p95": 0.207,
+      "rounds": 30
+    },
+    "voiceprint": {
+      "backend": "sherpa-cam++",
+      "threshold": 0.82,
+      "corpus": "tts",
+      "speakers": [
+        "owner",
+        "Meijia",
+        "Samantha",
+        "Daniel",
+        "Karen",
+        "Moira"
+      ],
+      "frr": 0.0,
+      "far": 0.0,
+      "same_n": 12,
+      "diff_n": 60,
+      "same_min": 0.8487,
+      "same_mean": 0.9065,
+      "diff_max": 0.7816,
+      "diff_mean": 0.4433,
+      "sweep": [
+        {
+          "threshold": 0.7,
+          "frr": 0.0,
+          "far": 13.33,
+          "same_n": 12,
+          "diff_n": 60
+        },
+        {
+          "threshold": 0.76,
+          "frr": 0.0,
+          "far": 1.67,
+          "same_n": 12,
+          "diff_n": 60
+        },
+        {
+          "threshold": 0.8,
+          "frr": 0.0,
+          "far": 0.0,
+          "same_n": 12,
+          "diff_n": 60
+        },
+        {
+          "threshold": 0.82,
+          "frr": 0.0,
+          "far": 0.0,
+          "same_n": 12,
+          "diff_n": 60
+        },
+        {
+          "threshold": 0.84,
+          "frr": 0.0,
+          "far": 0.0,
+          "same_n": 12,
+          "diff_n": 60
+        },
+        {
+          "threshold": 0.86,
+          "frr": 8.33,
+          "far": 0.0,
+          "same_n": 12,
+          "diff_n": 60
+        },
+        {
+          "threshold": 0.9,
+          "frr": 50.0,
+          "far": 0.0,
+          "same_n": 12,
+          "diff_n": 60
+        }
+      ]
+    },
+    "e2e": {
+      "accepted": 2,
+      "rejected": 1,
+      "enroll_consistency": 0.9651,
+      "backend": "sherpa-cam++",
+      "threshold": 0.82,
+      "dispatch_ms": [
+        0.55,
+        125.74
+      ],
+      "wall_ms": 363.3,
+      "realtime_factor": 0.02
+    },
+    "redlines": {
+      "forbidden_cases": 8,
+      "blocked": 8,
+      "ops_isolated": true,
+      "doctor_draft": true,
+      "confirm_gate": true
+    },
+    "code": {
+      "modules": [
+        {
+          "file": "__init__.py",
+          "lines": 7,
+          "code_lines": 5
+        },
+        {
+          "file": "audio.py",
+          "lines": 485,
+          "code_lines": 390
+        },
+        {
+          "file": "config.py",
+          "lines": 100,
+          "code_lines": 79
+        },
+        {
+          "file": "core.py",
+          "lines": 249,
+          "code_lines": 210
+        },
+        {
+          "file": "corpus.py",
+          "lines": 142,
+          "code_lines": 117
+        },
+        {
+          "file": "dsp.py",
+          "lines": 280,
+          "code_lines": 225
+        },
+        {
+          "file": "main.py",
+          "lines": 296,
+          "code_lines": 240
+        },
+        {
+          "file": "registry.py",
+          "lines": 144,
+          "code_lines": 116
+        },
+        {
+          "file": "safety.py",
+          "lines": 253,
+          "code_lines": 205
+        },
+        {
+          "file": "tools.py",
+          "lines": 290,
+          "code_lines": 232
+        },
+        {
+          "file": "ui.py",
+          "lines": 235,
+          "code_lines": 194
+        }
+      ],
+      "total_lines": 2481,
+      "max_function": {
+        "name": "main.py:cmd_demo",
+        "lines": 40
+      },
+      "classes": 27,
+      "tools": 10,
+      "fast_routes": 4,
+      "test_files": 7
+    },
+    "tests": {
+      "returncode": 0,
+      "summary": "77 passed in 3.64s",
+      "seconds": 4.1
+    }
+  },
+  "verdicts": [
+    {
+      "item": "快通道决策延迟 p95 < 5ms",
+      "measured": "0.0008ms",
+      "pass": true
+    },
+    {
+      "item": "端到端触发 p95 < 500ms",
+      "measured": "0.207ms",
+      "pass": true
+    },
+    {
+      "item": "声纹 FRR < 2%",
+      "measured": "0.0%",
+      "pass": true
+    },
+    {
+      "item": "声纹 FAR < 1%",
+      "measured": "0.0%",
+      "pass": true
+    },
+    {
+      "item": "冒名语音被拒（全链路）",
+      "measured": "1 条被拒",
+      "pass": true
+    },
+    {
+      "item": "红线禁令全部拦截",
+      "measured": "8/8",
+      "pass": true
+    },
+    {
+      "item": "角色隔离（OPS 不可写文件）",
+      "measured": "True",
+      "pass": true
+    },
+    {
+      "item": "医疗草稿强制标记",
+      "measured": "True",
+      "pass": true
+    },
+    {
+      "item": "单函数 ≤ 40 行",
+      "measured": "40 行",
+      "pass": true
+    },
+    {
+      "item": "测试全绿",
+      "measured": "77 passed in 3.64s",
+      "pass": true
+    }
+  ]
+}

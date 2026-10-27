@@ -1,0 +1,178 @@
+# VoxOS
+
+> **只听你一个人说话的语音操作系统 Agent。**
+> 说一句话，它知道你要写日志、写代码还是查运维，然后真的去做，做完用一句话回报你。
+
+没有主窗口，没有聊天记录页。它的形态是一个后台守护进程 + 一个 36px 悬浮胶囊。
+声纹不对的语音直接丢弃，危险操作在架构上不可能发生。
+
+```
+你说：Siri，我要写日志，今天把登录接口的空值校验补上了
+它做：→ 声纹比对 0.95（本人）→ 正则命中（0.8µs）→ 写入今日 Markdown → 胶囊闪绿
+它说：日志已记录
+```
+
+## 30 秒上手
+
+```bash
+cd voxos
+make setup                                   # 建 .venv 并装依赖（只需一次）
+make doctor                                  # 环境自检
+python scripts/fetch_models.py               # 下载声纹 + VAD 模型（约 28MB，可选但强烈建议）
+make demo                                    # 无需麦克风/网络/API Key 的端到端演示
+make test                                    # 77 项测试
+make verify                                  # 工程验收，产出 docs/ACCEPTANCE.html
+```
+
+> `make` 会自动优先使用 `.venv/bin/python`；已有自己的环境就 `PY=/path/to/python make test`。
+
+真机使用：
+
+```bash
+PYTHONPATH=src python -m voxos.main enroll --record 3   # 录 3 秒声纹（可跑两次，normal/mask）
+PYTHONPATH=src python -m voxos.main run                 # 守护进程 + 胶囊 http://127.0.0.1:8765
+PYTHONPATH=src python -m voxos.main text "Siri，检查一下服务器负载"   # 不想说话？打字也行
+```
+
+## 它是什么 / 不是什么
+
+| 是 | 不是 |
+| :--- | :--- |
+| 一个**只听主人**的本地语音 Agent（声纹锁 + VAD 门控） | 通用语音助手 / 聊天机器人 |
+| 三个高频动作做到 100 分：写日志、续接编程会话、只读巡检 | 什么都能干的万能助手 |
+| 无头守护进程 + 极简胶囊（状态即界面） | 带主窗口、侧边栏、会话列表的应用 |
+| 快通道确定性执行（< 1µs 决策），慢通道 LLM 兜底 | 每句话都先问一遍大模型 |
+| 修改类操作强制快照，一句话可回滚 | 让语音直接改你的代码且不可撤销 |
+
+## 架构：四层漏斗 + 双通道路由
+
+```
+麦克风 PCM 16k ──► [自愈重连] ──► [回声门] ──► [AGC/面罩EQ]
+                                                   │
+                                    ┌──────────────▼──────────────┐
+                                    │  VAD（Silero / 能量降级）    │ 无语音 → 丢弃，CPU ≈ 0
+                                    └──────────────┬──────────────┘
+                                                   │ 人声片段
+                                    ┌──────────────▼──────────────┐
+                                    │ 端点判定（语义尾词等待 2.5s）│ 半截话不会被切断
+                                    └──────────────┬──────────────┘
+                                                   │ 完整一句话
+                                    ┌──────────────▼──────────────┐
+                                    │ 声纹锁（CAM++ 192 维余弦）   │ 非本人 → 丢弃，不进 STT/LLM
+                                    └──────────────┬──────────────┘
+                                                   │ 文本
+                          ┌────────────────────────▼────────────────────────┐
+                          │ 快通道正则（4 条，<1µs）──命中──► 工具           │
+                          │        └─未命中─► LLM 慢通道 ──► tool_calls      │
+                          │                    └─不可用─► 离线启发式          │
+                          └────────────────────────┬────────────────────────┘
+                                                   │ (tool, args)
+                                    ┌──────────────▼──────────────┐
+                                    │ 安全网关：红线→确认→快照→单飞 │
+                                    └──────────────┬──────────────┘
+                                                   │
+                                        工具执行 + 审计 JSONL
+                                                   │
+                                     状态总线 ──► SSE ──► 胶囊 + Earcon
+```
+
+## 目录
+
+```text
+voxos/
+├── AGENTS.md               # AI 编码宪章（改代码前必读）
+├── CODING_PHILOSOPHY.md    # 代码审美：深模块 / 无类泛滥 / 40 行 / 物理世界四原则
+├── PRD.md                  # 产品需求、用户旅程、消融决策、验收口径
+├── REDLINES.md             # 三级风险矩阵与医疗/运维红线
+├── PROMPTS_AND_ROUTING.md  # 快慢双通道、热词、Prompt、Session 寻址
+├── DESIGN_SYSTEM.md        # 胶囊四态、Earcon、声学补偿、无障碍
+├── TODO_ROADMAP.md         # 分阶段验收清单（含真实完成状态）
+├── BUSINESS.md             # Lean Canvas / 4P / 演进与风险
+├── docs/ACCEPTANCE.md      # 实测验收报告（数字来自 scripts/verify.py）
+├── config/
+│   ├── settings.toml       # 全局配置（TOML，标准库解析）
+│   ├── redlines.toml       # 红线正则 + 工具风险等级 + 角色白名单
+│   └── ubm.npz             # 降级声纹的背景模型（几 KB）
+├── src/voxos/
+│   ├── registry.py         # 工具契约：@tool 自省生成 Schema + 快通道 + 注册表
+│   ├── safety.py           # 安全边界：红线网关 / 快照回滚 / 单飞执行器 / 审计
+│   ├── core.py             # 路由：快慢双通道 + LLM 客户端（re-export 旧入口）
+│   ├── tools.py            # 10 个原子工具，每个 ≤ 15 行
+│   ├── dsp.py              # 纯函数：AGC / 高架滤波 / VAD / 端点 / 回声门 / 声纹
+│   ├── audio.py            # 设备源、自愈重连、Silero/Sherpa 适配、STT、管道
+│   ├── ui.py               # 状态总线 + SSE 服务 + Earcon 合成
+│   ├── corpus.py           # 验收语料生成（say 合成 / 合成音降级）
+│   ├── config.py           # TOML 加载 + 环境变量覆盖
+│   ├── main.py             # CLI：text / demo / run / enroll / serve / tools / doctor
+│   └── __init__.py
+├── web/pill.html           # 36px 胶囊（订阅 SSE，四种状态）
+├── scripts/
+│   ├── verify.py           # 工程验收：延迟/FRR/FAR/红线矩阵/代码度量 → HTML 报告
+│   ├── fetch_models.py     # 模型下载（支持代理）
+│   ├── build_ubm.py        # 生成降级声纹背景模型
+│   └── enroll_voice.py     # 声纹录入（显式版）
+└── tests/                  # 77 项：内核/安全/工具/DSP/管道/UI/端到端
+```
+
+## 四条关键设计决策
+
+**1. 快通道永远先跑。** "我要写日志"是确定意图，让 LLM 去推理它等于花 800ms 和一份 API 费
+去重新发现一个正则能确定的事实。实测快通道决策 p95 = **0.0008ms**。
+
+**2. 函数即插件。** 加一个能力 = 在 `tools.py` 写一个带 `@tool` 的普通函数。
+JSON Schema 由类型注解自省生成（`registry.py`），正则快通道由装饰器参数声明，Prompt 自动带上。
+**改一个参数不需要同步改第二处。**
+
+**3. 复用 OS 原语，不自研状态机。** 编程会话归 `tmux` 与 `claude -c` 所有；
+我们只做寻址（`has-session` / `send-keys`）。没有 `sessions.json`，没有状态同步。
+
+**4. UI 只是订阅者。** 核心进程无头，状态通过本地 SSE 广播，胶囊是一个独立 HTML。
+杀掉胶囊，Agent 照常工作；换成终端输出，也只改一行。
+
+## 四个物理世界陷阱（这是和"玩具 Demo"的分界线）
+
+| 陷阱 | 现象 | 落地 |
+| :--- | :--- | :--- |
+| **声学自激死循环** | Agent 听到自己的 TTS → 无限触发 | `dsp.EchoGate`：播报期 + 300ms 混响期丢弃音频，仅放行"停/算了"等打断词 |
+| **蓝牙/面罩热插拔** | PortAudio `-9988` 直接崩进程 | `audio.SelfHealingSource`：`while True + backoff 2s`，设备重枚举后自动恢复 |
+| **半截话误触发** | "我要写代码…（想 1.2s）…加个校验" 只执行前半句 | `dsp.EndpointDetector`：以未完虚词结尾时静音窗 0.8s→2.5s |
+| **并发重入写坏文件** | 两句"改 auth.py"并发写同一文件 | `core.Executor` 单飞锁：修改类工具串行，绿色工具不受限 |
+
+## 降级矩阵（没有模型/没有依赖时会发生什么）
+
+| 组件 | 首选 | 降级 | 影响 |
+| :--- | :--- | :--- | :--- |
+| VAD | Silero ONNX（实时率 0.4%） | 能量 VAD（自适应底噪） | 嘈杂环境误触发率上升 |
+| 声纹 | CAM++ 192 维 | 频谱统计 + UBM | **FRR/FAR 不再满足 PRD**，仅保证链路可跑 |
+| STT | SenseVoice / faster-whisper | OpenAI Whisper 兼容接口 / 脚本化 | 脚本化仅用于测试与演示 |
+| LLM | 任意 OpenAI 兼容（Ollama/DeepSeek/Claude） | 离线启发式（4 条规则） | 只认三大高频场景，其余不执行 |
+| GUI | 无头 + SSE 胶囊 | CLI 状态行 | 无 |
+
+## 与原始规划文档的差异（以及为什么）
+
+| 文档写的 | 实际做的 | 原因 |
+| :--- | :--- | :--- |
+| `config/settings.yaml` | `settings.toml` | 标准库 `tomllib` 解析，零依赖；字段一一对应 |
+| 4 个源文件（core/tools/audio/main） | 7 个模块（多 dsp/ui/config/corpus） | 音频纯计算与设备 I/O 混在一个文件会同时违反"40 行"和"可单测"；`dsp.py` 无 I/O 所以能离线测 |
+| PyQt6 悬浮胶囊 | 本地 SSE + 50 行 HTML | 避免 GUI 主线程与音频线程争 GIL，且胶囊可随时替换 |
+| 声纹阈值 0.76 | **0.82** | 实测同人最小 0.849 / 异人最大 0.782，取中点；0.76 时同性别冒充 FAR 1.67%（见验收报告） |
+| 手写 TOOLS_SCHEMA 字典 | 类型注解自省生成 | 两处维护必然不一致 |
+| `sessions.json` 会话管理 | tmux 原生会话 | 不重复造状态机 |
+
+## 隐私与安全
+
+- 原始音频**不落盘**，只在内存环形缓冲中存活到句子结束。
+- 声纹是**单向嵌入**（不可逆），存 `.voxos/voiceprint_profiles.npz`，不入 Git。
+- 所有工具调用强制经过 `core.Executor.execute_safely()`，`REDLINES.md` 中的禁令
+  没有工具入口，不是"有入口但拦一下"。
+- 审计日志 `.voxos/audit.jsonl` 记录：时间、转写、工具、参数摘要、风险等级、耗时、结果。
+
+## 依赖
+
+```bash
+pip install -e ".[models]"     # numpy + sherpa-onnx + onnxruntime（推荐）
+pip install -e ".[audio]"      # + sounddevice（真麦克风）
+pip install -e ".[dev]"        # + pytest
+```
+
+核心链路（core/tools/ui/config）**只用标准库**；numpy 仅用于音频。

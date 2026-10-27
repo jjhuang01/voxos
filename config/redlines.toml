@@ -1,0 +1,45 @@
+# 安全红线配置（数据驱动：改策略不需要改代码）
+# 详见 REDLINES.md。所有正则以 IGNORECASE 匹配「工具名 + 序列化参数」的全文。
+
+forbidden = [
+  'rm\s+-rf\s+(/|~|\*|\$HOME)',
+  'drop\s+(database|table|schema)',
+  'truncate\s+table',
+  'git\s+push\s+.*(--force|-f)\b',
+  'git\s+reset\s+--hard',
+  'shutdown|reboot|init\s+0|halt',
+  'mkfs|dd\s+if=.*of=/dev/',
+  'chmod\s+-R\s+777\s+/',
+  'submit_final_prescription',
+  'delete_patient_record',
+  '>\s*/dev/sd[a-z]',
+]
+
+# 工具风险等级。新增工具必须在此登记，否则 tests/test_safety.py 会失败。
+[risk]
+append_structured_log = "green"
+inspect_server_ops = "green"
+read_file_head = "green"
+search_notes = "green"
+open_in_ide = "green"
+list_tools = "green"
+write_code = "yellow"
+dispatch_code_session = "yellow"
+rollback_file = "yellow"
+delegate_to_coding_cli = "red_confirm"
+
+# 角色白名单（"*" 表示全部）。未在白名单内 -> RED_FORBIDDEN。
+[roles.DEVELOPER]
+allow = ["*"]
+draft = false
+
+[roles.OPS]
+allow = [
+  "append_structured_log", "inspect_server_ops", "read_file_head",
+  "search_notes", "open_in_ide", "list_tools",
+]
+draft = false
+
+[roles.DOCTOR]
+allow = ["append_structured_log", "search_notes", "open_in_ide", "list_tools"]
+draft = true

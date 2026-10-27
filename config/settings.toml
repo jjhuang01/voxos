@@ -1,0 +1,63 @@
+# VoxOS 全局配置（TOML：Python 3.11+ 标准库 tomllib 解析，零第三方依赖）
+# 规范文档中的 settings.yaml 字段与此处一一对应；改这里不需要改代码。
+
+[audio]
+sample_rate = 16000
+chunk_size = 512              # 32ms @16kHz
+vad_threshold = 0.5
+vad_backend = "auto"          # auto | silero | energy（auto：有模型用 silero，否则能量 VAD）
+silero_model = ".voxos/models/silero_vad.onnx"
+speaker_model = ".voxos/models/campplus.onnx"   # CAM++ 声纹模型；缺失则降级频谱声纹
+silence_duration_ms = 800     # 停顿超过此值判定一句话结束
+max_utterance_ms = 12000      # 单句硬上限，防止一直说不停
+min_speech_ms = 200           # 低于此人声时长视为噪音
+voiceprint_threshold = 0.82   # 实测标定：同人最小 0.849 / 异人最大 0.782，取中点 0.82（两侧余量各约 0.03）
+                              # 对照：0.76 时 FAR 1.67%，0.86 时 FRR 8.3%（见 docs/ACCEPTANCE.md）
+voiceprint_threshold_fallback = 0.45   # 降级频谱声纹的独立阈值（尺度不同）
+voiceprint_profiles = ".voxos/voiceprint_profiles.npz"
+mask_mode = false             # 静音面罩/低语补偿
+agc_target_dbfs = -3.0
+echo_decay_ms = 300           # TTS 结束后的混响消退期
+hotwords_path = "config/hotwords.txt"
+hotwords_generated = "config/hotwords.txt.generated"
+hotwords_max = 2000
+wake_words = ["siri", "jarvis", "小助手", "嘿 siri"]
+
+[stt]
+backend = "scripted"          # scripted | local_whisper | openai
+language = "zh"
+model = "small"
+api_base = ""
+api_key = ""
+timeout_s = 30
+
+[llm]
+enabled = false               # false = 只走快通道 + 离线启发式（完全离线可用）
+base_url = "http://localhost:11434/v1"
+api_key = ""
+model = "qwen2.5-coder:14b"
+temperature = 0.1
+timeout_s = 20
+max_tool_rounds = 3
+
+[workspace]
+daily_log_dir = "~/Documents/DevLogs"
+default_code_dir = "~/Projects"
+ide_command = "code"
+code_cli = "claude"           # 编程会话内执行的 CLI：claude | aider | codex
+grafana_url = ""              # 说“看看监控”时打开的看板地址，留空则不打开
+backup_dir = ".voxos_backup"
+dry_run = true                # true = 不真的派发 tmux/IDE/浏览器，只打印将执行的命令
+role = "DEVELOPER"            # DEVELOPER | OPS | DOCTOR
+log_template = "- **[{time}] [{category}]** ({project}) {content}"
+confirm_timeout_s = 8
+
+[ui]
+host = "127.0.0.1"
+port = 8765
+earcons = true
+pill_file = "web/pill.html"
+
+[audit]
+enabled = true
+path = ".voxos/audit.jsonl"

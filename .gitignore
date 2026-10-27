@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.voxos/
+.voxos_backup/
+config/hotwords.txt.generated
+*.egg-info/
+dist/
+build/
+.DS_Store
