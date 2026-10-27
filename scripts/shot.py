@@ -169,6 +169,18 @@ def page_socket(port: int, timeout: float = 20.0) -> str:
     raise RuntimeError("连不上 Chrome 调试端口")
 
 
+def settle(cdp: Cdp, frames: int = 2) -> None:
+    """逼出几帧再截图。
+
+    headless Chrome 不主动产帧，而 CSS transition 靠帧推进——不逼帧的话过渡会永远停在
+    起始值：`getComputedStyle` 读到的是改之前的样子，截出来的图也是。这里用最便宜的
+    jpeg 截两帧把动画时钟推过去，正式那一张才是落定的状态。
+    """
+    for _ in range(frames):
+        cdp.call("Page.captureScreenshot", format="jpeg", quality=1)
+        time.sleep(0.05)
+
+
 def shot(cdp: Cdp, spec: dict, base: str, out: Path) -> Path:
     """进入一个状态并截图，按 .stage 的实际高度裁切。"""
     cdp.call("Emulation.setDeviceMetricsOverride", width=spec.get("width", 420),
@@ -187,6 +199,7 @@ def shot(cdp: Cdp, spec: dict, base: str, out: Path) -> Path:
         point = json.loads(box)
         cdp.call("Input.dispatchMouseEvent", type="mouseMoved", **point)
         time.sleep(0.2)
+    settle(cdp)
     clip = cdp.js("""(() => {
         const stage = document.querySelector('.stage').getBoundingClientRect();
         const toast = document.getElementById('toast');
@@ -230,9 +243,13 @@ def main() -> int:
 # setup 里调用的都是页面自己的函数（render / open / setOnboard），
 # 走的是真实渲染路径，不是另画一张假图。setup 可以返回 Promise，会被等待。
 SPECS = [
+    # 首屏会拉一次 /state 并按服务端事实重绘，等它落地再摆姿势，否则会被它覆盖回去
     {"name": "status", "path": "/?panel=status&still=1",
-     "setup": "render({state:'listening', label:'聆听中'})"},
-    {"name": "status-hover", "path": "/?panel=status&still=1", "hover": "#pill"},
+     "setup": "new Promise(ok => setTimeout(() => {"
+              "render({state:'listening', label:'聆听中'}); ok(true); }, 700))"},
+    {"name": "status-hover", "path": "/?panel=status&still=1", "hover": "#pill",
+     "setup": "new Promise(ok => setTimeout(() => {"
+              "render({state:'listening', label:'聆听中'}); ok(true); }, 700))"},
     {"name": "recent", "path": "/?panel=recent&still=1",
      "setup": "switchTab('recent')"},
     {"name": "confirm", "path": "/?panel=status&still=1",
@@ -256,6 +273,9 @@ SPECS = [
      "setup": "(() => { const el = document.querySelector('#f-audio-vad_threshold');"
               "el.value = '0.86'; el.dispatchEvent(new Event('input'));"
               "document.querySelector('.body').scrollTop = 99999; })()"},
+    # 有备份时保存条多出「撤销」：三个按钮在 400px 里怎么分宽度，得量出来看
+    {"name": "settings-undo", "path": "/settings?still=1",
+     "setup": "(() => { setUndo(true); document.querySelector('.body').scrollTop = 99999; })()"},
     {"name": "narrow", "path": "/?panel=recent&still=1", "width": 340,
      "setup": "switchTab('recent')"},
 ]

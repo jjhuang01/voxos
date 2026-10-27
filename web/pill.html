@@ -104,7 +104,10 @@
     background:var(--warn);margin-left:5px;vertical-align:1.5px}
   .tabs button.dirty .mark{display:inline-block}
 
-  .body{padding:14px 16px 16px;overflow-y:auto;overscroll-behavior:contain}
+  /* 底部留白放在 .view 上，不放在滚动容器上：滚动容器一旦有下内边距，
+     sticky 的保存条只能贴到内容盒底，那 16px 会露出一条正在滚的内容。 */
+  .body{padding:14px 16px 0;overflow-y:auto;overscroll-behavior:contain}
+  .view{padding-bottom:16px}
   .body::-webkit-scrollbar{width:8px}
   .body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:4px}
   .view[hidden]{display:none}
@@ -187,6 +190,8 @@
   .btn.primary{background:var(--accent);border-color:transparent;color:#fff;font-weight:500}
   .btn.primary:hover{filter:brightness(1.08)}
   .btn:disabled{opacity:.45;cursor:default}
+  /* 三个按钮时次要按钮收窄，把宽度让给「保存」——它才是这一栏的主语 */
+  .btn.sec{flex:0 0 auto;padding:9px 16px}
 
   /* 确认卡 */
   .confirm{width:100%;margin-top:2px;background:rgba(255,159,10,.1);border:1px solid rgba(255,159,10,.35);
@@ -274,8 +279,9 @@
       <div class="view" data-view="settings" hidden>
         <div id="groups"></div>
         <div class="hint">改动立即生效；标注「重启生效」的项需要重开守护进程。</div>
-        <div class="actions">
-          <button class="btn" id="reset">还原</button>
+        <div class="actions" id="actions">
+          <button class="btn" id="undo" hidden title="撤销上一次保存，配置退回保存前的样子">撤销保存</button>
+          <button class="btn" id="reset" disabled title="放弃没保存的改动，重新读当前配置">放弃改动</button>
           <button class="btn primary" id="save" disabled>保存</button>
         </div>
       </div>
@@ -460,7 +466,16 @@ async function loadSettings() {
       </div>`).join('');
     bindFields();
     markDirty();
+    setUndo(data.undo);
   } catch (error) { toast(error.message, true); }
+}
+
+/* 撤销只退一步：有备份才出现，退完就消失。没有可退的步骤时不留一个灰按钮在那儿。 */
+function setUndo(available) {
+  $('undo').hidden = !available;
+  $('undo').classList.toggle('sec', !!available);
+  $('reset').classList.toggle('sec', !!available);
+  if (!available) disarmUndo();
 }
 
 function fieldHtml(field) {
@@ -513,10 +528,12 @@ function bindFields() {
   });
 }
 
-/* 保存条在滚动区里，改一个开关就可能滚出视野——页签上点个点，保存按钮跟着亮 */
+/* 保存条在滚动区里，改一个开关就可能滚出视野——页签上点个点，保存按钮跟着亮。
+   「放弃改动」只在真的有改动时可用：没改的时候它无事可做，亮着只会让人点。 */
 function markDirty() {
   const pending = Object.keys(dirty).length > 0;
   $('save').disabled = !pending;
+  $('reset').disabled = !pending;
   document.querySelector('[data-tab="settings"]').classList.toggle('dirty', pending);
 }
 
@@ -535,6 +552,33 @@ $('save').addEventListener('click', async () => {
 });
 
 $('reset').addEventListener('click', () => { settingsCache = null; dirty = {}; loadSettings(); });
+
+/* 撤销不可逆（退完这一步就没了），所以要点两下：第一下把按钮变成「确认撤销」，
+   三秒不动自己变回来。比弹系统对话框轻，也比一点就退安全。 */
+let undoArmed = 0;
+function disarmUndo() {
+  clearTimeout(undoArmed);
+  undoArmed = 0;
+  $('undo').textContent = '撤销保存';
+}
+
+$('undo').addEventListener('click', async () => {
+  if (!undoArmed) {
+    $('undo').textContent = '确认撤销';
+    undoArmed = setTimeout(disarmUndo, 3000);
+    return;
+  }
+  disarmUndo();
+  $('undo').disabled = true;
+  try {
+    await api('/api/settings/undo', {method:'POST', body:'{}'});
+    toast('已撤销上一次保存');
+    settingsCache = null; dirty = {};
+    await loadSettings();
+    await loadStatus();
+  } catch (error) { toast(error.message, true); }
+  finally { $('undo').disabled = false; }
+});
 
 /* ---------------- 指令与录入 ---------------- */
 async function send() {
