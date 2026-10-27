@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -161,6 +162,36 @@ def test_settings_undo_requires_token(server):
     instance, _ = server                      # 这个上下文没接撤销，先验令牌门禁
     code, payload = _post(instance, "/api/settings/undo", {}, token=None)
     assert code == 401 and "令牌" in payload["error"]
+
+
+def test_post_does_not_poison_the_keepalive_connection():
+    """POST 完紧接着 GET，必须都正常。
+
+    HTTP/1.1 长连接上，处理函数不读请求体，那几个字节会留在连接里，下一个请求
+    从 `{}` 开始解析——服务器直接回 501。撤销接口不需要参数，当初就漏了这一步，
+    表现是"点完撤销，设置页刷不出来"。
+    """
+    ctx = ui.UiContext(bus=ui.StatusBus(None), token=TOKEN,
+                       settings_get=lambda: [{"id": "audio", "label": "声音与声纹", "fields": []}],
+                       settings_undo=lambda: {"ok": True, "groups": []})
+    instance = ui.serve(ctx, "127.0.0.1", 0, block=False)
+    port = instance.server_address[1]
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        conn.request("POST", "/api/settings/undo", body="{}",
+                     headers={"X-VoxOS-Token": TOKEN, "Content-Type": "application/json"})
+        first = conn.getresponse()
+        assert first.status == 200, first.status
+        first.read()
+        conn.request("GET", "/api/settings", headers={"X-VoxOS-Token": TOKEN})
+        second = conn.getresponse()
+        body = json.loads(second.read())
+        assert second.status == 200, (second.status, body)
+        assert body["groups"][0]["id"] == "audio"
+        conn.close()
+    finally:
+        instance.shutdown()
+        instance.server_close()
 
 
 def test_status_and_history_endpoints(server):

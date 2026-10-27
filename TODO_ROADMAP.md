@@ -88,13 +88,13 @@
       launchd 弹不出麦克风授权框，必须先手动跑一次 `voxos run` 授权。
 - [x] **截图工具的第三课**：headless Chrome 不产帧，CSS `transition` 会永远停在起始值，
       `getComputedStyle` 读到的是改之前的样子。`shot.py` 加 `settle()` 先逼两帧再截。
-- *验收*：验收项 17 → **18 项**，测试 141 → **156 项**，`core.dispatch` 一度涨到 43 行被
+- *验收*：验收项 17 → **18 项**，测试 141 → **157 项**，`core.dispatch` 一度涨到 43 行被
   验收项 #9 逮住，提成 `_multi_intent()` 后回到 39 行。
 
 
 ### Task 1.5 工程化
 
-- [x] 156 项测试（`make test`），`scripts/verify.py` 18 项验收指标（`make verify`）。
+- [x] 157 项测试（`make test`），`scripts/verify.py` 18 项验收指标（`make verify`）。
 - [x] 全模块单函数 ≤ 40 行（最长 39 行）、核心五模块共 8 个类、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README / BUSINESS。
 

@@ -22,7 +22,7 @@
 | 7 | 角色隔离（OPS 不可写文件） | 必须 | 拒绝并播报「当前角色 OPS 没有…的权限」 | ✅ |
 | 8 | 医疗草稿强制标记 | 必须 | 结果前缀`【未审核草稿】` | ✅ |
 | 9 | 单函数 ≤ 40 行 | 全部 | 最长 **39 行**（`core.dispatch`） | ✅ |
-| 10 | 测试全绿 | 100% | **156 passed**（约 19s） | ✅ |
+| 10 | 测试全绿 | 100% | **157 passed**（约 19s） | ✅ |
 | 11 | 跨站 / 无令牌请求被拦截 | 必须 | **401 / 403 / 200** 三个码全对，被拒请求一次都没执行 | ✅ |
 | 12 | 上下文注入不阻塞派发 | p95 < 5ms | **0.01ms**（修复前同步调 osascript 为 271ms） | ✅ |
 | 13 | 设置写回保住注释 | 必须 | 改值、保注释、写到 `--config` 指定文件、非法值零写入 | ✅ |
@@ -123,7 +123,7 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 | `corpus.py` | 142 | 验收语料生成 |
 | `config.py` | 102 | TOML + 环境变量 |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **3260** | 10 个工具 / 4 条快通道 / 156 项测试 |
+| **合计** | **3260** | 10 个工具 / 4 条快通道 / 157 项测试 |
 
 - 最长函数 **39 行**（`core.dispatch`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；
@@ -166,13 +166,13 @@ cd voxos
 make setup                         # 首次：建 .venv 并装依赖（约 20s）
 python scripts/fetch_models.py     # 首次：CAM++ 与 Silero（约 28MB，必需）
                                    #       加 --all 连 SenseVoice（229MB，可选，缺了就退回 scripted）
-make test                          # 156 passed
+make test                          # 157 passed
 make verify                        # 18/18，产出 docs/acceptance.json + ACCEPTANCE.html
 make demo                          # 真实语音端到端（沙箱写盘）
 ```
 
 **全新克隆实测**：把 `.voxos/models/` 整个挪走后再跑（等价于刚 clone 下来、还没下模型），
-得到 `153 passed, 3 skipped` —— 跳过的是 Silero VAD 1 项 + SenseVoice 2 项（缺模型文件时按设计
+得到 `154 passed, 3 skipped` —— 跳过的是 Silero VAD 1 项 + SenseVoice 2 项（缺模型文件时按设计
 skip，而不是假装通过）。这条验证的是"提交里没有漏文件"，不是"功能没问题"。
 ```
 

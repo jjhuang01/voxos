@@ -174,6 +174,7 @@ class _PillHandler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
     ctx: UiContext
+    _payload: dict[str, object] | None = None
 
     def log_message(self, *args: object) -> None:
         return
@@ -194,6 +195,15 @@ class _PillHandler(BaseHTTPRequestHandler):
                           "application/json; charset=utf-8")
 
     def _body(self) -> dict[str, object] | None:
+        """POST 的请求体。在 `do_POST` 里统一读完，这里只负责给出去。
+
+        一定要"统一读"：HTTP/1.1 是长连接，处理函数不读请求体，那几个字节就会留在
+        连接里，下一个请求从 `{}` 开始解析，服务器直接回 501。撤销接口不需要参数，
+        当初就是因为它没读，才让"撤销之后页面刷不出设置"。
+        """
+        return self._payload
+
+    def _read_body(self) -> dict[str, object] | None:
         try:
             raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             payload = json.loads(raw.decode("utf-8") or "{}")
@@ -255,6 +265,7 @@ class _PillHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if not self._guard():
             return None
+        self._payload = self._read_body()      # 先读完，见 _body 的说明
         path = urlparse(self.path).path
         routes: dict[str, Callable[[], None]] = {
             "/command": self._command,

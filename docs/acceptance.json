@@ -1,6 +1,6 @@
 {
   "report": {
-    "generated_at": "2026-10-28T01:14:36",
+    "generated_at": "2026-10-28T01:20:47",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -8,15 +8,15 @@
       "platform": "darwin"
     },
     "fast_path": {
-      "p50": 0.0008,
+      "p50": 0.0007,
       "p95": 0.0008,
-      "p99": 0.0009,
+      "p99": 0.0008,
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 0.32,
-      "p95": 0.599,
-      "context_p95": 0.006,
+      "p50": 0.24,
+      "p95": 1.061,
+      "context_p95": 0.004,
       "rounds": 30
     },
     "voiceprint": {
@@ -98,10 +98,10 @@
       "backend": "sherpa-cam++",
       "threshold": 0.82,
       "dispatch_ms": [
-        0.43,
-        125.09
+        0.55,
+        125.41
       ],
-      "wall_ms": 344.1,
+      "wall_ms": 349.3,
       "realtime_factor": 0.019
     },
     "redlines": {
@@ -157,7 +157,7 @@
         "en": 3.1
       },
       "chars": 818,
-      "rtf": 0.026,
+      "rtf": 0.025,
       "wall_s": 2.0,
       "samples": [
         {
@@ -237,11 +237,11 @@
         },
         {
           "file": "ui.py",
-          "lines": 361,
-          "code_lines": 300
+          "lines": 372,
+          "code_lines": 309
         }
       ],
-      "total_lines": 3272,
+      "total_lines": 3283,
       "max_function": {
         "name": "core.py:dispatch",
         "lines": 39
@@ -253,8 +253,8 @@
     },
     "tests": {
       "returncode": 0,
-      "summary": "156 passed in 14.72s",
-      "seconds": 15.3
+      "summary": "157 passed in 15.16s",
+      "seconds": 15.8
     }
   },
   "verdicts": [
@@ -265,7 +265,7 @@
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "0.599ms",
+      "measured": "1.061ms",
       "pass": true
     },
     {
@@ -305,7 +305,7 @@
     },
     {
       "item": "测试全绿",
-      "measured": "156 passed in 14.72s",
+      "measured": "157 passed in 15.16s",
       "pass": true
     },
     {
@@ -315,7 +315,7 @@
     },
     {
       "item": "上下文注入不阻塞派发",
-      "measured": "0.006ms",
+      "measured": "0.004ms",
       "pass": true
     },
     {
@@ -335,7 +335,7 @@
     },
     {
       "item": "本地识别字符错误率 < 10%",
-      "measured": "2.8%（中文 1.4% / 英文 3.1%，24 句，≥30× 实时）",
+      "measured": "2.8%（中文 1.4% / 英文 3.1%，24 句，≥40× 实时）",
       "pass": true,
       "skipped": false
     },
