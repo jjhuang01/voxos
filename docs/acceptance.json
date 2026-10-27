@@ -1,6 +1,6 @@
 {
   "report": {
-    "generated_at": "2026-10-27T22:30:22",
+    "generated_at": "2026-10-27T22:58:07",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -14,8 +14,9 @@
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 0.135,
-      "p95": 0.207,
+      "p50": 0.225,
+      "p95": 0.422,
+      "context_p95": 0.006,
       "rounds": 30
     },
     "voiceprint": {
@@ -97,11 +98,11 @@
       "backend": "sherpa-cam++",
       "threshold": 0.82,
       "dispatch_ms": [
-        0.55,
-        125.74
+        0.61,
+        209.15
       ],
-      "wall_ms": 363.3,
-      "realtime_factor": 0.02
+      "wall_ms": 473.2,
+      "realtime_factor": 0.026
     },
     "redlines": {
       "forbidden_cases": 8,
@@ -109,6 +110,29 @@
       "ops_isolated": true,
       "doctor_draft": true,
       "confirm_gate": true
+    },
+    "security": {
+      "codes": {
+        "no_token": 401,
+        "cross_site": 403,
+        "allowed": 200
+      },
+      "executed": [
+        "写日志"
+      ],
+      "blocked": true
+    },
+    "settings": {
+      "errors": [],
+      "applied": true,
+      "comments_kept": true,
+      "source_kept": true,
+      "invalid_rejected": true
+    },
+    "onboarding": {
+      "has_profiles": false,
+      "enroll_available": true,
+      "status_enrolled": false
     },
     "code": {
       "modules": [
@@ -124,8 +148,8 @@
         },
         {
           "file": "config.py",
-          "lines": 100,
-          "code_lines": 79
+          "lines": 102,
+          "code_lines": 81
         },
         {
           "file": "core.py",
@@ -144,8 +168,8 @@
         },
         {
           "file": "main.py",
-          "lines": 296,
-          "code_lines": 240
+          "lines": 485,
+          "code_lines": 387
         },
         {
           "file": "registry.py",
@@ -158,30 +182,35 @@
           "code_lines": 205
         },
         {
+          "file": "settings.py",
+          "lines": 255,
+          "code_lines": 207
+        },
+        {
           "file": "tools.py",
           "lines": 290,
           "code_lines": 232
         },
         {
           "file": "ui.py",
-          "lines": 235,
-          "code_lines": 194
+          "lines": 346,
+          "code_lines": 287
         }
       ],
-      "total_lines": 2481,
+      "total_lines": 3038,
       "max_function": {
-        "name": "main.py:cmd_demo",
-        "lines": 40
+        "name": "corpus.py:_build_synthetic",
+        "lines": 35
       },
-      "classes": 27,
+      "classes": 31,
       "tools": 10,
       "fast_routes": 4,
-      "test_files": 7
+      "test_files": 8
     },
     "tests": {
       "returncode": 0,
-      "summary": "77 passed in 3.64s",
-      "seconds": 4.1
+      "summary": "105 passed in 8.78s",
+      "seconds": 9.4
     }
   },
   "verdicts": [
@@ -192,7 +221,7 @@
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "0.207ms",
+      "measured": "0.422ms",
       "pass": true
     },
     {
@@ -227,12 +256,32 @@
     },
     {
       "item": "单函数 ≤ 40 行",
-      "measured": "40 行",
+      "measured": "35 行",
       "pass": true
     },
     {
       "item": "测试全绿",
-      "measured": "77 passed in 3.64s",
+      "measured": "105 passed in 8.78s",
+      "pass": true
+    },
+    {
+      "item": "跨站 / 无令牌请求被拦截",
+      "measured": "{'no_token': 401, 'cross_site': 403, 'allowed': 200}",
+      "pass": true
+    },
+    {
+      "item": "上下文注入不阻塞派发",
+      "measured": "0.006ms",
+      "pass": true
+    },
+    {
+      "item": "设置写回保住注释",
+      "measured": "True",
+      "pass": true
+    },
+    {
+      "item": "无声纹时给出录入入口",
+      "measured": "True",
       "pass": true
     }
   ]

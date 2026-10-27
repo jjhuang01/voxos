@@ -56,6 +56,7 @@ confirm_timeout_s = 8
 host = "127.0.0.1"
 port = 8765
 earcons = true
+speak = true                  # 完成后用系统 TTS 念一遍结果
 pill_file = "web/pill.html"
 
 [audit]

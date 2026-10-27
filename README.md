@@ -20,7 +20,7 @@ make setup                                   # 建 .venv 并装依赖（只需�
 make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 下载声纹 + VAD 模型（约 28MB，可选但强烈建议）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 77 项测试
+make test                                    # 105 项测试
 make verify                                  # 工程验收，产出 docs/ACCEPTANCE.html
 ```
 
@@ -31,6 +31,7 @@ make verify                                  # 工程验收，产出 docs/ACCEPT
 ```bash
 PYTHONPATH=src python -m voxos.main enroll --record 3   # 录 3 秒声纹（可跑两次，normal/mask）
 PYTHONPATH=src python -m voxos.main run                 # 守护进程 + 胶囊 http://127.0.0.1:8765
+PYTHONPATH=src python -m voxos.main pill                # 用无边框小窗打开胶囊（最接近悬浮）
 PYTHONPATH=src python -m voxos.main text "Siri，检查一下服务器负载"   # 不想说话？打字也行
 ```
 
@@ -76,6 +77,26 @@ PYTHONPATH=src python -m voxos.main text "Siri，检查一下服务器负载"   
                                      状态总线 ──► SSE ──► 胶囊 + Earcon
 ```
 
+## 界面：一个胶囊，展开就是全部
+
+点胶囊，在它正下方展开一张 392px 的控制面板 —— **不是主窗口，收起后不留痕迹**。
+
+| 页 | 内容 |
+| :--- | :--- |
+| **状态** | 声纹是否录入 / 阈值 / 角色 / 识别后端 / 大模型 / 演练开关 + 一句话输入框 |
+| **最近** | 最近 8 条：时间、它听成的原文、执行结果、路由 |
+| **设置** | 19 个真会改的字段，分组呈现；保存即时生效，保留 TOML 注释 |
+
+改设置不用重启、不用手改文件；被环境变量接管的字段会置灰并说明是哪一条。
+
+### 安全边界画在门口
+
+服务只监听 `127.0.0.1`，并且**只有页面本身免令牌**：其余接口都要本次运行的随机令牌，
+非本机同源的 `Origin` 一律 403。跨站页面读不到令牌（同源策略），所以
+`fetch('http://127.0.0.1:8765/command', ...)` 这类请求到不了执行层。
+
+> 这条是审查时补的：修复前，任意网页都能直接命令它干活。详见 `docs/REVIEW.md`。
+
 ## 目录
 
 ```text
@@ -105,13 +126,13 @@ voxos/
 │   ├── config.py           # TOML 加载 + 环境变量覆盖
 │   ├── main.py             # CLI：text / demo / run / enroll / serve / tools / doctor
 │   └── __init__.py
-├── web/pill.html           # 36px 胶囊（订阅 SSE，四种状态）
+├── web/pill.html           # 36px 胶囊 + 展开式控制面板（状态/最近/设置）
 ├── scripts/
 │   ├── verify.py           # 工程验收：延迟/FRR/FAR/红线矩阵/代码度量 → HTML 报告
 │   ├── fetch_models.py     # 模型下载（支持代理）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 77 项：内核/安全/工具/DSP/管道/UI/端到端
+└── tests/                  # 105 项：内核/安全/工具/DSP/管道/UI/设置/端到端
 ```
 
 ## 四条关键设计决策

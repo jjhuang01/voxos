@@ -32,9 +32,11 @@ _TRUE = {"1", "true", "yes", "on"}
 class Config:
     """只读配置视图。`cfg.get("audio.vad_threshold", 0.5)` 这样取值。"""
 
-    def __init__(self, data: dict[str, Any], root: Path = ROOT) -> None:
+    def __init__(self, data: dict[str, Any], root: Path = ROOT,
+                 source: Path | None = None) -> None:
         self.data = data
         self.root = root
+        self.source = source          # 这份配置是从哪个文件读出来的（写回时要用）
 
     def get(self, dotted: str, default: Any = None) -> Any:
         node: Any = self.data
@@ -66,7 +68,7 @@ class Config:
             for part in parts[:-1]:
                 node = node.setdefault(part, {})
             node[parts[-1]] = value
-        return Config(data, self.root)
+        return Config(data, self.root, self.source)
 
 
 def _apply_env(data: dict[str, Any]) -> None:
@@ -89,7 +91,7 @@ def load(path: str | Path | None = None) -> Config:
         with open(target, "rb") as handle:
             data = tomllib.load(handle)
     _apply_env(data)
-    return Config(data)
+    return Config(data, source=target)
 
 
 def load_redlines(path: str | Path | None = None) -> dict[str, Any]:

@@ -14,6 +14,8 @@ import statistics
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -22,7 +24,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import numpy as np  # noqa: E402
 
-from voxos import audio, core, corpus, dsp, tools, ui  # noqa: E402
+from voxos import audio, core, corpus, dsp, settings, tools, ui  # noqa: E402
 from voxos.config import load  # noqa: E402
 
 SANDBOX = ROOT / ".voxos" / "verify"
@@ -63,17 +65,99 @@ def measure_fast_path(rounds: int = 2000) -> dict[str, float]:
 
 
 def measure_dispatch(cfg, rounds: int = 30) -> dict[str, float]:
+    """走守护进程的真实路径：先取隐式上下文（缓存 + 后台刷新），再派发。
+
+    早期版本直接调 `core.dispatch` 而不带 context，测出来的 0.2ms 是假路径 ——
+    真实链路里 `_context()` 曾经同步调 osascript，实测 271ms。这里把两段都测出来。
+    """
+    from voxos import main as cli
+
     executor = core.Executor(cfg=cfg)
-    samples = []
+    cli._context()                      # 预热：把后台取窗口的那一次 fork 挪出计时区
+    time.sleep(0.4)
+    samples, context_ms = [], []
     for index in range(rounds):
+        tick = time.perf_counter()
+        context = cli._context()
+        context_ms.append((time.perf_counter() - tick) * 1000)
         started = time.perf_counter()
-        result = core.dispatch(f"Siri，我要写日志，第 {index} 次验收压测", executor=executor, cfg=cfg)
+        result = core.dispatch(f"Siri，我要写日志，第 {index} 次验收压测",
+                               executor=executor, cfg=cfg, context=context)
         assert result.route == "fast", result
         samples.append((time.perf_counter() - started) * 1000)
     samples.sort()
+    context_ms.sort()
     return {"p50": round(statistics.median(samples), 3),
             "p95": round(samples[int(len(samples) * 0.95)], 3),
+            "context_p95": round(context_ms[int(len(context_ms) * 0.95)], 3),
             "rounds": rounds}
+
+
+def _post_status(url: str, payload: dict, token: str = "", origin: str = "") -> int:
+    request = urllib.request.Request(url, data=json.dumps(payload).encode(), method="POST",
+                                     headers={"Content-Type": "application/json"})
+    if token:
+        request.add_header("X-VoxOS-Token", token)
+    if origin:
+        request.add_header("Origin", origin)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return int(response.status)
+    except urllib.error.HTTPError as error:
+        return int(error.code)
+
+
+def measure_security() -> dict[str, object]:
+    """跨站页面与无令牌请求必须在"执行"之前被挡住。"""
+    hits: list[str] = []
+    ctx = ui.UiContext(bus=ui.StatusBus(None), token="verify-token",
+                       on_command=lambda text: hits.append(text) or "ok")
+    server = ui.serve(ctx, "127.0.0.1", 0, block=False)
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        codes = {
+            "no_token": _post_status(f"{base}/command", {"text": "写日志"}),
+            "cross_site": _post_status(f"{base}/command", {"text": "删库"},
+                                       token="verify-token", origin="https://evil.example"),
+            "allowed": _post_status(f"{base}/command", {"text": "写日志"}, token="verify-token"),
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+    blocked = codes["no_token"] == 401 and codes["cross_site"] == 403 and hits == ["写日志"]
+    return {"codes": codes, "executed": hits, "blocked": blocked and codes["allowed"] == 200}
+
+
+def measure_settings() -> dict[str, object]:
+    """设置写回：只改值、保住注释、写到 --config 指定的那个文件。"""
+    target = SANDBOX / "settings.toml"
+    if not target.parent.exists():
+        target.parent.mkdir(parents=True)
+    target.write_text((ROOT / "config" / "settings.toml").read_text(encoding="utf-8"),
+                      encoding="utf-8")
+    cfg = load(target)
+    new_cfg, errors = settings.apply(cfg, {"audio.voiceprint_threshold": 0.86,
+                                           "workspace.role": "OPS"})
+    text = target.read_text(encoding="utf-8")
+    return {"errors": errors,
+            "applied": new_cfg.get("audio.voiceprint_threshold") == 0.86
+                       and new_cfg.get("workspace.role") == "OPS",
+            "comments_kept": "# 实测标定" in text and "# DEVELOPER | OPS | DOCTOR" in text,
+            "source_kept": new_cfg.source == target,
+            "invalid_rejected": bool(settings.validate({"audio.voiceprint_threshold": 5})[1])}
+
+
+def measure_onboarding() -> dict[str, object]:
+    """没有声纹档案时不能直接退出：必须给出可点的一键录入。"""
+    from voxos import main as cli
+
+    cfg = load().with_overrides(**{"audio.voiceprint_profiles": str(SANDBOX / "absent.npz")})
+    runtime = cli.Runtime(cfg, ui.StatusBus(None))
+    lock = cli._lock(cfg)
+    ctx = cli._ui_context(runtime, lock)
+    return {"has_profiles": bool(lock.profiles),
+            "enroll_available": ctx.on_enroll is not None,
+            "status_enrolled": cli._status(runtime, lock)["enrolled"]}
 
 
 def measure_voiceprint(cfg, refresh: bool) -> dict[str, object]:
@@ -159,7 +243,8 @@ def measure_e2e(cfg, bus) -> dict[str, object]:
             continue
         accepted += 1
         tick = time.perf_counter()
-        result = core.dispatch(utterance.text, executor=executor, cfg=cfg)
+        result = core.dispatch(utterance.text, executor=executor, cfg=cfg,
+                               context={"active_window": "verify", "recent_files": []})
         latencies.append((time.perf_counter() - tick) * 1000)
         assert result.route == "fast", result
     wall = (time.perf_counter() - started) * 1000
@@ -219,7 +304,8 @@ def measure_code() -> dict[str, object]:
 
 def measure_tests() -> dict[str, object]:
     started = time.perf_counter()
-    completed = subprocess.run([sys.executable, "-m", "pytest", "-q", "--no-header"],
+    completed = subprocess.run([sys.executable, "-m", "pytest", "-q", "--no-header",
+                                "--basetemp", str(SANDBOX / "pytest")],
                                cwd=ROOT, capture_output=True, text=True)
     import re
 
@@ -247,6 +333,12 @@ def build_report(refresh: bool = False) -> dict[str, object]:
     e2e = measure_e2e(cfg, bus)
     print("→ 安全红线矩阵 …")
     redlines = measure_redlines(cfg)
+    print("→ 本地接口安全 …")
+    security = measure_security()
+    print("→ 设置写回 …")
+    settings_report = measure_settings()
+    print("→ 首次启动引导 …")
+    onboarding = measure_onboarding()
     print("→ 代码度量 …")
     code = measure_code()
     print("→ 测试套件 …")
@@ -256,7 +348,9 @@ def build_report(refresh: bool = False) -> dict[str, object]:
         "env": {"python": sys.version.split()[0], "numpy": np.__version__,
                 "sherpa": _version("sherpa_onnx"), "platform": sys.platform},
         "fast_path": fast, "dispatch": dispatch, "voiceprint": voiceprint,
-        "e2e": e2e, "redlines": redlines, "code": code, "tests": tests,
+        "e2e": e2e, "redlines": redlines, "security": security,
+        "settings": settings_report, "onboarding": onboarding,
+        "code": code, "tests": tests,
     }
 
 
@@ -287,6 +381,17 @@ def verdicts(report: dict[str, object]) -> list[dict[str, object]]:
         {"item": "单函数 ≤ 40 行", "measured": f"{code['max_function']['lines']} 行",
          "pass": code["max_function"]["lines"] <= 40},
         {"item": "测试全绿", "measured": report["tests"]["summary"], "pass": report["tests"]["returncode"] == 0},  # type: ignore[index]
+        {"item": "跨站 / 无令牌请求被拦截", "measured": str(report["security"]["codes"]),  # type: ignore[index]
+         "pass": bool(report["security"]["blocked"])},  # type: ignore[index]
+        {"item": "上下文注入不阻塞派发", "measured": f"{report['dispatch']['context_p95']}ms",  # type: ignore[index]
+         "pass": report["dispatch"]["context_p95"] < 5},  # type: ignore[index]
+        {"item": "设置写回保住注释", "measured": str(report["settings"]["comments_kept"]),  # type: ignore[index]
+         "pass": bool(report["settings"]["applied"] and report["settings"]["comments_kept"]
+                      and report["settings"]["source_kept"]
+                      and report["settings"]["invalid_rejected"])},  # type: ignore[index]
+        {"item": "无声纹时给出录入入口", "measured": str(report["onboarding"]["enroll_available"]),  # type: ignore[index]
+         "pass": bool(report["onboarding"]["enroll_available"]
+                      and not report["onboarding"]["status_enrolled"])},  # type: ignore[index]
     ]
 
 
@@ -384,7 +489,8 @@ def main() -> int:
     SANDBOX.mkdir(parents=True, exist_ok=True)
     report = build_report(args.refresh_corpus)
     rows = verdicts(report)
-    (ROOT / "docs").mkdir(exist_ok=True)
+    if not (ROOT / "docs").exists():
+        (ROOT / "docs").mkdir()
     (ROOT / "docs" / "acceptance.json").write_text(
         json.dumps({"report": report, "verdicts": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
     (ROOT / "docs" / "ACCEPTANCE.html").write_text(render(report, rows), encoding="utf-8")

@@ -5,9 +5,11 @@ UI 只是状态的订阅者：核心进程无头运行，胶囊随时可杀可�
 
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import queue
+import secrets
 import shutil
 import struct
 import subprocess
@@ -20,8 +22,10 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
+from urllib.parse import parse_qs, urlparse
 
-__all__ = ["StatusBus", "Event", "serve", "play", "ensure_earcons", "EARCONS"]
+__all__ = ["StatusBus", "Event", "UiContext", "serve", "make_token",
+           "play", "ensure_earcons", "EARCONS"]
 
 EARCONS: dict[str, tuple[list[float], float]] = {
     "listen": ([880.0, 1320.0], 0.08),
@@ -134,63 +138,175 @@ def play(path: Path) -> None:
 
 # ------------------------------------------------------------------ HTTP/SSE
 
-class _PillHandler(BaseHTTPRequestHandler):
-    """无状态 HTTP 处理器：/ 胶囊、/state 快照、/history 历史、/events SSE、/command 文本指令。
+@dataclass
+class UiContext:
+    """胶囊页面能看到的全部能力。用注入代替 if 分支，加接口不用改 serve()。"""
 
-    上下文（bus / pill_file / on_command）由 `serve()` 通过子类属性注入，避免闭包把
-    `serve()` 撑成 80 行的巨型函数。
+    bus: StatusBus
+    token: str = ""
+    pill_file: Path | None = None
+    on_command: Callable[[str], str] | None = None
+    settings_get: Callable[[], list[dict[str, object]]] | None = None
+    settings_set: Callable[[dict[str, object]], dict[str, object]] | None = None
+    status: Callable[[], dict[str, object]] | None = None
+    on_enroll: Callable[[float], dict[str, object]] | None = None
+    on_confirm: Callable[[bool], None] | None = None
+    history: Callable[[], list[dict[str, object]]] | None = None
+
+
+_PAGE_CACHE: dict[Path, tuple[float, bytes]] = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def make_token() -> str:
+    """每次启动一个新的会话令牌：跨站页面拿不到它，也就驱动不了 Agent。"""
+    return secrets.token_urlsafe(18)
+
+
+class _PillHandler(BaseHTTPRequestHandler):
+    """无状态 HTTP 处理器：页面 + 状态 + 设置 + 录入 + 确认，全部走 `UiContext`。
+
+    安全模型（REDLINES.md §5.5）：只有页面本身免令牌；其余接口都要求本次运行的令牌，
+    且拒绝非本机同源的 `Origin`。浏览器跨站请求拿不到令牌，所以 CSRF 不成立。
     """
 
     protocol_version = "HTTP/1.1"
-    bus: StatusBus
-    pill_file: Path | None = None
-    on_command: Callable[[str], str] | None = None
+    ctx: UiContext
 
     def log_message(self, *args: object) -> None:
         return
 
+    # ---------------------------------------------------------- 基础设施
     def _send(self, code: int, body: bytes, content_type: str) -> None:
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self) -> None:  # noqa: N802
-        if self.path.startswith("/events"):
-            return self._stream()
-        if self.path.startswith("/state"):
-            return self._json(self.bus.snapshot())
-        if self.path.startswith("/history"):
-            return self._json(self.bus.history())
-        html = self.pill_file.read_bytes() if self.pill_file and self.pill_file.exists() else b"<h1>voxos</h1>"
-        return self._send(200, html, "text/html; charset=utf-8")
-
-    def do_POST(self) -> None:  # noqa: N802
-        if not self.path.startswith("/command") or self.on_command is None:
-            return self._send(404, b"not found", "text/plain; charset=utf-8")
-        length = int(self.headers.get("Content-Length", "0"))
-        text = self.rfile.read(length).decode("utf-8", "replace")
-        try:
-            reply = self.on_command(text)
-        except Exception as exc:  # 回调异常也要回一个可读响应，不能让胶囊转圈
-            reply = f"执行异常：{exc}"
-        return self._json({"reply": reply})
-
-    def _json(self, payload: object) -> None:
-        return self._send(200, json.dumps(payload, ensure_ascii=False).encode(),
+    def _json(self, payload: object, code: int = 200) -> None:
+        return self._send(code, json.dumps(payload, ensure_ascii=False).encode(),
                           "application/json; charset=utf-8")
 
+    def _body(self) -> dict[str, object] | None:
+        try:
+            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            payload = json.loads(raw.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _guard(self) -> bool:
+        """同源 + 令牌。失败时直接回 403，调用方不用再判。"""
+        origin = self.headers.get("Origin")
+        host = self.headers.get("Host", "")
+        if origin and origin != f"http://{host}":
+            self._json({"ok": False, "error": "跨站请求已拒绝"}, 403)
+            return False
+        token = self.ctx.token
+        if not token:
+            return True
+        supplied = self.headers.get("X-VoxOS-Token", "")
+        if not supplied:
+            supplied = (parse_qs(urlparse(self.path).query).get("t") or [""])[0]
+        if not hmac.compare_digest(supplied, token):
+            self._json({"ok": False, "error": "缺少或错误的令牌"}, 401)
+            return False
+        return True
+
+    def _page(self) -> None:
+        path = self.ctx.pill_file
+        if not path or not path.exists():
+            return self._send(200, b"<h1>voxos</h1>", "text/html; charset=utf-8")
+        mtime = path.stat().st_mtime
+        with _CACHE_LOCK:
+            cached = _PAGE_CACHE.get(path)
+        if not cached or cached[0] != mtime:
+            html = path.read_bytes().replace(b"__VOXOS_TOKEN__", self.ctx.token.encode())
+            with _CACHE_LOCK:
+                _PAGE_CACHE[path] = (mtime, html)
+            cached = (mtime, html)
+        return self._send(200, cached[1], "text/html; charset=utf-8")
+
+    # ---------------------------------------------------------- 路由
+    def do_GET(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        if path in ("/", "/index.html", "/settings"):
+            return self._page()
+        if not self._guard():
+            return None
+        routes: dict[str, Callable[[], object]] = {
+            "/state": self.ctx.bus.snapshot,
+            "/history": self.ctx.bus.history,
+            "/api/status": self.ctx.status or (lambda: {}),
+            "/api/settings": lambda: {"groups": self.ctx.settings_get() if self.ctx.settings_get else []},
+            "/api/history": self.ctx.history or list,
+        }
+        if path == "/events":
+            return self._stream()
+        route = routes.get(path)
+        return self._json(route()) if route else self._json({"ok": False, "error": "没有这个接口"}, 404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        if not self._guard():
+            return None
+        path = urlparse(self.path).path
+        routes: dict[str, Callable[[], None]] = {
+            "/command": self._command,
+            "/api/settings": self._save_settings,
+            "/api/enroll": self._enroll,
+            "/api/confirm": self._confirm,
+        }
+        route = routes.get(path)
+        return route() if route else self._json({"ok": False, "error": "没有这个接口"}, 404)
+
+    # ---------------------------------------------------------- 动作
+    def _command(self) -> None:
+        body = self._body()
+        if body is None or self.ctx.on_command is None:
+            return self._json({"ok": False, "error": "请求体需要 JSON"}, 400)
+        try:
+            reply = self.ctx.on_command(str(body.get("text", "")))
+        except Exception as exc:  # 回调异常也要回一个可读响应，不能让胶囊转圈
+            reply = f"执行异常：{exc}"
+        return self._json({"ok": True, "reply": reply})
+
+    def _save_settings(self) -> None:
+        body = self._body()
+        if body is None or self.ctx.settings_set is None:
+            return self._json({"ok": False, "errors": ["请求体需要 JSON"]}, 400)
+        result = self.ctx.settings_set(dict(body.get("values") or {}))
+        return self._json(result, 200 if result.get("ok") else 400)
+
+    def _enroll(self) -> None:
+        body = self._body() or {}
+        if self.ctx.on_enroll is None:
+            return self._json({"ok": False, "error": "未启用录入"}, 400)
+        try:
+            result = self.ctx.on_enroll(float(body.get("seconds", 3.0)))
+        except (TypeError, ValueError):
+            return self._json({"ok": False, "error": "秒数不合法"}, 400)
+        return self._json(result, 200 if result.get("ok") else 400)
+
+    def _confirm(self) -> None:
+        body = self._body() or {}
+        if self.ctx.on_confirm is not None:
+            self.ctx.on_confirm(bool(body.get("allow")))
+        return self._json({"ok": True})
+
+    # ---------------------------------------------------------- SSE
     def _stream(self) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
-        channel = self.bus.subscribe()
+        channel = self.ctx.bus.subscribe()
         try:
-            self._frame(self.bus.snapshot())
+            self._frame(self.ctx.bus.snapshot())
             while True:
                 try:
                     self._frame(asdict(channel.get(timeout=15.0)))
@@ -199,24 +315,19 @@ class _PillHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
         finally:
-            self.bus.unsubscribe(channel)
+            self.ctx.bus.unsubscribe(channel)
 
     def _frame(self, payload: object) -> None:
         self.wfile.write(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode())
         self.wfile.flush()
 
 
-def serve(
-    bus: StatusBus,
-    host: str = "127.0.0.1",
-    port: int = 8765,
-    pill_file: Path | None = None,
-    on_command: Callable[[str], str] | None = None,
-    block: bool = True,
-) -> ThreadingHTTPServer:
-    """起一个极简状态服务：/ 胶囊页面、/state 快照、/events SSE、/command 文本指令。"""
-    handler = type("VoxosHandler", (_PillHandler,),
-                   {"bus": bus, "pill_file": pill_file, "on_command": staticmethod(on_command) if on_command else None})
+def serve(ctx: UiContext, host: str = "127.0.0.1", port: int = 8765,
+          block: bool = True) -> ThreadingHTTPServer:
+    """起一个极简本地服务：页面、SSE、指令、设置、录入、确认。"""
+    if not ctx.token:
+        ctx.token = make_token()
+    handler = type("VoxosHandler", (_PillHandler,), {"ctx": ctx})
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
     if block:

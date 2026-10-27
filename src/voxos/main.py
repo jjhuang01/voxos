@@ -1,6 +1,7 @@
-"""VoxOS 命令行入口：text / demo / run / enroll / serve / tools / doctor。
+"""VoxOS 命令行入口：text / demo / run / enroll / serve / pill / tools / doctor。
 
-设计约束：CLI 只做编排，不做业务；每个子命令不超过 40 行。
+设计约束：CLI 只做编排，不做业务；每个函数不超过 40 行。
+可选信息（前台窗口、TTS 播报）一律不阻塞音频主循环 —— 见 CODING_PHILOSOPHY.md §5.5。
 """
 
 from __future__ import annotations
@@ -12,10 +13,123 @@ import sys
 import threading
 import time
 import webbrowser
+from collections import deque
 from pathlib import Path
 
-from . import audio, core, corpus, dsp, tools, ui
+from . import __version__, audio, core, corpus, dsp, settings, tools, ui
 from .config import Config, load
+
+# ------------------------------------------------------------------ 运行态
+
+class ConfirmGate:
+    """确认闸门：终端与胶囊谁先回答谁生效；无人回答按拒绝处理（失败关闭）。"""
+
+    def __init__(self, bus: ui.StatusBus, timeout: float) -> None:
+        self.bus = bus
+        self.timeout = timeout
+        self._event = threading.Event()
+        self._answer = False
+
+    def ask(self, name: str, args: dict[str, object], verdict: core.Verdict) -> bool:
+        self._event.clear()
+        self._answer = False
+        self.bus.emit("confirm", "需要确认", verdict.reason)
+        if sys.stdin is not None and sys.stdin.isatty():
+            threading.Thread(target=self._read_terminal, daemon=True).start()
+        answered = self._event.wait(self.timeout)
+        if not answered:
+            self.bus.emit("blocked", "确认超时", "按拒绝处理")
+        return self._answer
+
+    def resolve(self, allow: bool) -> None:
+        self._answer = allow
+        self._event.set()
+
+    def _read_terminal(self) -> None:
+        try:
+            line = sys.stdin.readline()
+        except (OSError, ValueError):
+            return
+        self.resolve(line.strip().lower() in ("y", "yes", "确认"))
+
+
+class Runtime:
+    """一次运行的全部可变状态：配置、执行器、最近记录。设置改动后就地换掉执行器。"""
+
+    def __init__(self, cfg: Config, bus: ui.StatusBus) -> None:
+        self.bus = bus
+        self.cfg = cfg
+        self.gate = ConfirmGate(bus, float(cfg.get("workspace.confirm_timeout_s", 8)))
+        self.executor = self._build()
+        self.recent: deque[dict[str, object]] = deque(maxlen=8)
+        self.started = time.time()
+
+    def _build(self) -> core.Executor:
+        return core.Executor(cfg=self.cfg, on_event=self.bus, confirm=self.gate.ask)
+
+    def dispatch(self, text: str, context: dict[str, object] | None = None) -> core.DispatchResult:
+        return core.dispatch(text, executor=self.executor, cfg=self.cfg,
+                             context=context if context is not None else _context())
+
+    def record(self, text: str, result: core.DispatchResult) -> None:
+        self.recent.appendleft({
+            "ts": time.strftime("%H:%M:%S"), "text": text, "reply": result.reply,
+            "route": result.route, "ms": round(result.latency_ms, 1),
+        })
+
+    def reload(self, new_cfg: Config) -> None:
+        self.cfg = new_cfg
+        tools.configure(new_cfg)
+        self.gate.timeout = float(new_cfg.get("workspace.confirm_timeout_s", 8))
+        self.executor = self._build()
+
+
+# ------------------------------------------------------------------ 隐式上下文
+
+_CTX = {"window": "unknown", "at": 0.0, "busy": False}
+_CTX_TTL = 3.0
+_CTX_LOCK = threading.Lock()
+
+
+def _context() -> dict[str, object]:
+    """立刻返回缓存值，同时在后台刷新 —— 绝不让 osascript 拖慢派发（实测 271ms）。"""
+    _warm_context()
+    return {"active_window": _CTX["window"], "recent_files": tools.RT.recent_files}
+
+
+def _warm_context() -> None:
+    with _CTX_LOCK:
+        if _CTX["busy"] or time.monotonic() - float(_CTX["at"]) < _CTX_TTL:
+            return
+        _CTX["busy"] = True
+    threading.Thread(target=_refresh_window, daemon=True).start()
+
+
+def _refresh_window() -> None:
+    try:
+        window = _frontmost_window()
+    except Exception:                      # 上下文是可选信息，取不到就算了
+        window = "unknown"
+    finally:
+        with _CTX_LOCK:
+            _CTX["at"] = time.monotonic()
+            _CTX["busy"] = False
+    if window != "unknown":
+        _CTX["window"] = window
+
+
+def _frontmost_window() -> str:
+    if not shutil.which("osascript"):
+        return "unknown"
+    try:
+        out = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to get name of first application process whose frontmost is true'],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return "unknown"
+    return (out.stdout or "").strip() or "unknown"
 
 
 # ------------------------------------------------------------------ 公共
@@ -29,46 +143,83 @@ def _bus(cfg: Config) -> ui.StatusBus:
     return ui.StatusBus(cfg.root / ".voxos" / "status.jsonl")
 
 
-def _context() -> dict[str, object]:
-    """把焦点窗口与最近文件作为隐式上下文注入（PRD §5）。"""
-    window = "unknown"
-    if shutil.which("osascript"):
-        try:
-            out = subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to get name of first application process whose frontmost is true'],
-                capture_output=True, text=True, timeout=2,
-            )
-            window = (out.stdout or "").strip() or "unknown"
-        except (subprocess.SubprocessError, OSError):
-            window = "unknown"
-    return {"active_window": window, "recent_files": tools.RT.recent_files}
+def _lock(cfg: Config) -> dsp.SpeakerLock:
+    embedder, threshold, _ = audio.make_embedder(cfg)
+    lock = dsp.SpeakerLock(threshold=threshold, embedder=embedder)
+    return lock.load(cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
 
 
-def _confirm(cfg: Config):
-    timeout = float(cfg.get("workspace.confirm_timeout_s", 8))
+def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]:
+    cfg = runtime.cfg
+    return {
+        "version": __version__,
+        "enrolled": bool(lock and lock.profiles),
+        "threshold": getattr(lock, "threshold", None),
+        "role": cfg.get("workspace.role"),
+        "dry_run": cfg.flag("workspace.dry_run"),
+        "llm": cfg.flag("llm.enabled"),
+        "stt": cfg.get("stt.backend"),
+        "uptime_s": round(time.time() - runtime.started),
+    }
 
-    def confirm(name: str, args: dict[str, object], verdict: core.Verdict) -> bool:
-        print(f"⚠️  需要二次确认：{verdict.reason}\n    参数：{args}\n    {timeout:.0f}s 内输入 y 确认：",
-              end="", flush=True)
-        box: dict[str, str] = {}
-        worker = threading.Thread(target=lambda: box.update(value=input().strip().lower()), daemon=True)
-        worker.start()
-        worker.join(timeout)
-        return box.get("value") in ("y", "yes", "确认")
 
-    return confirm
+def _enroll_now(cfg: Config, lock: dsp.SpeakerLock, seconds: float,
+                done: threading.Event | None = None) -> dict[str, object]:
+    """从麦克风录一段并写盘。失败也要给出人能看懂的原因。"""
+    try:
+        samples = _record(seconds)
+    except Exception as exc:                       # 无麦克风/无权限
+        return {"ok": False, "error": f"录音失败：{exc}"}
+    if not samples:
+        return {"ok": False, "error": "没有采集到音频"}
+    consistency = lock.enroll(samples)             # type: ignore[arg-type]
+    lock.save(cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
+    if done is not None:
+        done.set()
+    return {"ok": True, "consistency": round(float(consistency), 3), "samples": len(samples)}
 
 
-def _executor(cfg: Config, bus: ui.StatusBus) -> core.Executor:
-    return core.Executor(cfg=cfg, on_event=bus, confirm=_confirm(cfg))
+def _ui_context(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
+                enrolled: threading.Event | None = None) -> ui.UiContext:
+    def save(values: dict[str, object]) -> dict[str, object]:
+        new_cfg, errors = settings.apply(runtime.cfg, values)
+        if errors:
+            return {"ok": False, "errors": errors}
+        runtime.reload(new_cfg)
+        return {"ok": True, "groups": settings.describe(runtime.cfg)}
+
+    return ui.UiContext(
+        bus=runtime.bus,
+        pill_file=runtime.cfg.path("ui.pill_file", "web/pill.html"),
+        on_command=lambda text: _run_text(runtime, text),
+        settings_get=lambda: settings.describe(runtime.cfg),
+        settings_set=save,
+        status=lambda: _status(runtime, lock),
+        on_enroll=(lambda seconds: _enroll_now(runtime.cfg, lock, seconds, enrolled)) if lock else None,
+        on_confirm=runtime.gate.resolve,
+        history=lambda: list(runtime.recent),
+    )
+
+
+def _run_text(runtime: Runtime, text: str) -> str:
+    result = runtime.dispatch(text)
+    runtime.record(text, result)
+    return result.reply or "(无动作)"
+
+
+def _serve(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
+           enrolled: threading.Event | None = None) -> str:
+    cfg = runtime.cfg
+    host, port = str(cfg.get("ui.host", "127.0.0.1")), int(cfg.get("ui.port", 8765))
+    ui.serve(_ui_context(runtime, lock, enrolled), host, port, block=False)
+    return f"http://{host}:{port}/"
 
 
 # ------------------------------------------------------------------ 子命令
 
 def cmd_text(args: argparse.Namespace, cfg: Config) -> int:
-    bus = _bus(cfg)
-    result = core.dispatch(args.text, executor=_executor(cfg, bus), cfg=cfg, context=_context())
+    runtime = Runtime(cfg, _bus(cfg))
+    result = runtime.dispatch(args.text)
     print(f"[{result.route}] {result.reply or '(无动作)'}  {result.latency_ms:.1f}ms")
     return 0 if result.route != "ignore" else 2
 
@@ -83,7 +234,7 @@ def cmd_demo(args: argparse.Namespace, cfg: Config) -> int:
         })
         tools.configure(cfg)
         print(f"沙箱模式：日志写入 {demo / 'logs'}（--live 可写入真实目录）\n")
-    bus = _bus(cfg)
+    runtime = Runtime(cfg, _bus(cfg))
     root = cfg.root / ".voxos" / "corpus"
     manifest = corpus.ensure_corpus(root, force=args.refresh)
     embedder, threshold, kind = audio.make_embedder(cfg)
@@ -93,67 +244,84 @@ def cmd_demo(args: argparse.Namespace, cfg: Config) -> int:
     print(f"语料={manifest['kind']} 声纹后端={kind} 阈值={threshold} 录入一致性={consistency:.3f}\n")
 
     stt = audio.ScriptedStt([owner[2]["text"], owner[3]["text"]])
-    pipeline = audio.AudioPipeline(cfg=cfg, stt=stt, lock=lock, vad=audio.make_vad(cfg), on_event=bus)
+    pipeline = audio.AudioPipeline(cfg=cfg, stt=stt, lock=lock, vad=audio.make_vad(cfg),
+                                   on_event=runtime.bus)
     impostor = manifest["impostors"][0]["clips"][0]  # type: ignore[index]
     stream = audio.concat_with_silence(
         [corpus.load_clip(root, owner[2]), corpus.load_clip(root, impostor), corpus.load_clip(root, owner[3])]
     )
-    executor = _executor(cfg, bus)
-    print(f"{'#':<2} {'声纹':<6} {'音频':<8} {'路由':<8} 转写 / 结果")
-    print("-" * 78)
-    for index, utterance in enumerate(pipeline.run(audio.ArraySource(stream)), 1):
-        if not utterance.accepted:
-            print(f"{index:<2} {'拒绝':<6} {utterance.audio_ms:>5.0f}ms {utterance.reason}")
-            continue
-        result = core.dispatch(utterance.text, executor=executor, cfg=cfg, context=_context())
-        print(f"{index:<2} {utterance.score:<6.2f} {utterance.audio_ms:>5.0f}ms {result.route:<8} {utterance.text}")
-        print(f"   ↳ {result.reply}  ({result.latency_ms:.1f}ms)")
-    print("-" * 78)
+    _demo_table(pipeline, runtime, stream)
     print(f"管道统计：{pipeline.stats}")
     if args.open_pill:
         webbrowser.open(f"http://{cfg.get('ui.host')}:{cfg.get('ui.port')}/")
     return 0
 
 
+def _demo_table(pipeline: audio.AudioPipeline, runtime: Runtime, stream) -> None:
+    print(f"{'#':<2} {'声纹':<6} {'音频':<8} {'路由':<8} 转写 / 结果")
+    print("-" * 78)
+    for index, utterance in enumerate(pipeline.run(audio.ArraySource(stream)), 1):
+        if not utterance.accepted:
+            print(f"{index:<2} {'拒绝':<6} {utterance.audio_ms:>5.0f}ms {utterance.reason}")
+            continue
+        result = runtime.dispatch(utterance.text)
+        runtime.record(utterance.text, result)
+        print(f"{index:<2} {utterance.score:<6.2f} {utterance.audio_ms:>5.0f}ms {result.route:<8} {utterance.text}")
+        print(f"   ↳ {result.reply}  ({result.latency_ms:.1f}ms)")
+    print("-" * 78)
+
+
 def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
-    bus = _bus(cfg)
-    executor = _executor(cfg, bus)
-    ui.serve(
-        bus, str(cfg.get("ui.host", "127.0.0.1")), int(cfg.get("ui.port", 8765)),
-        cfg.path("ui.pill_file", "web/pill.html"),
-        on_command=lambda text: core.dispatch(text, executor=executor, cfg=cfg, context=_context()).reply,
-        block=False,
-    )
+    runtime = Runtime(cfg, _bus(cfg))
+    lock = _lock(cfg)
+    enrolled = threading.Event()
+    if lock.profiles:
+        enrolled.set()
+    url = _serve(runtime, lock, enrolled)
     sounds = ui.ensure_earcons(cfg.root / ".voxos" / "sounds")
     hotwords = audio.refresh_hotwords(cfg)
-    embedder, threshold, kind = audio.make_embedder(cfg)
-    lock = dsp.SpeakerLock(threshold=threshold, embedder=embedder).load(
-        cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
+    _, threshold, kind = audio.make_embedder(cfg)
+    print(f"VoxOS 已启动：声纹后端={kind} 阈值={threshold} 热词={len(hotwords)} 胶囊={url}")
     if not lock.profiles:
-        print("⚠️  尚未录入声纹，先运行：voxos enroll --record 3")
-        return 2
+        print("首次使用：在胶囊面板里点「录入声纹」（3 秒），或运行 voxos enroll --record 3")
+        runtime.bus.emit("onboard", "请先录入声纹", "点胶囊 → 录入声纹")
+        try:
+            enrolled.wait()
+        except KeyboardInterrupt:
+            return 0
+        runtime.bus.emit("idle", "待机", "")
+    return _listen(runtime, cfg, lock, sounds)
+
+
+def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[str, Path]) -> int:
+    """主循环：只做「取一句话 → 派发 → 回报」，别的都丢给线程。"""
+    hotwords = audio.refresh_hotwords(cfg)
     pipeline = audio.AudioPipeline(cfg=cfg, stt=audio.make_stt(cfg, hotwords), lock=lock,
-                                   vad=audio.make_vad(cfg), on_event=bus)
+                                   vad=audio.make_vad(cfg), on_event=runtime.bus)
     source = audio.SelfHealingSource(lambda: audio.MicSource(int(cfg.get("audio.chunk_size", 512))),
-                                     on_event=bus)
-    print(f"VoxOS 已启动：声纹后端={kind} 阈值={threshold} 热词={len(hotwords)} "
-          f"胶囊=http://{cfg.get('ui.host')}:{cfg.get('ui.port')}/")
-    bus.emit("idle", "待机", "")
+                                     on_event=runtime.bus)
+    _context()                             # 预热：把首次线程启动的开销挪到进循环之前
+    runtime.bus.emit("idle", "待机", "")
     for utterance in pipeline.run(source):
         if not utterance.accepted:
             continue
         if cfg.flag("ui.earcons", True):
             ui.play(sounds["listen"])
-        bus.emit("executing", "处理中…", utterance.text)
-        result = core.dispatch(utterance.text, executor=executor, cfg=cfg, context=_context())
-        bus.emit("done", "完成", result.reply)
-        if args.speak and result.reply:
-            _speak(result.reply, pipeline)
+        runtime.bus.emit("executing", "处理中…", utterance.text)
+        result = runtime.dispatch(utterance.text)
+        runtime.record(utterance.text, result)
+        runtime.bus.emit("done", "完成", result.reply)
+        if result.reply and cfg.flag("ui.speak", True):
+            _speak_async(result.reply, pipeline)
     return 0
 
 
+def _speak_async(text: str, pipeline: audio.AudioPipeline) -> None:
+    """TTS 放到后台：说 3 秒不能把麦克风采集卡住 3 秒。"""
+    threading.Thread(target=_speak, args=(text, pipeline), daemon=True).start()
+
+
 def _speak(text: str, pipeline: audio.AudioPipeline) -> None:
-    """TTS 播报，播报期间拉起回声门（防止 Agent 听到自己）。"""
     if not shutil.which("say"):
         return
     pipeline.echo.tts_start()
@@ -166,21 +334,18 @@ def _speak(text: str, pipeline: audio.AudioPipeline) -> None:
 
 
 def cmd_enroll(args: argparse.Namespace, cfg: Config) -> int:
-    embedder, threshold, kind = audio.make_embedder(cfg)
-    lock = dsp.SpeakerLock(threshold=threshold, embedder=embedder)
-    path = cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz")
-    lock.load(path)
-    samples: list[object] = []
+    lock = _lock(cfg)
     if args.wav:
-        samples = [audio.wav_to_array(Path(item).expanduser()) for item in args.wav]
+        samples: list[object] = [audio.wav_to_array(Path(item).expanduser()) for item in args.wav]
     else:
         samples = _record(args.record)
     if not samples:
         print("没有可用音频，录入失败")
         return 2
     consistency = lock.enroll(samples, args.mode)  # type: ignore[arg-type]
-    lock.save(path)
-    print(f"已录入 {len(samples)} 段（{args.mode}），一致性 {consistency:.3f}，阈值 {threshold} → {path}")
+    lock.save(cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
+    print(f"已录入 {len(samples)} 段（{args.mode}），一致性 {consistency:.3f} → "
+          f"{cfg.path('audio.voiceprint_profiles')}")
     if consistency < 0.8:
         print("⚠️  一致性偏低：建议在安静环境重录，或每段说满 3 秒")
     return 0
@@ -202,17 +367,39 @@ def _record(seconds: float) -> list[object]:
 
 
 def cmd_serve(args: argparse.Namespace, cfg: Config) -> int:
-    bus = _bus(cfg)
-    executor = _executor(cfg, bus)
-    url = f"http://{cfg.get('ui.host')}:{cfg.get('ui.port')}/"
-    ui.serve(bus, str(cfg.get("ui.host")), int(cfg.get("ui.port")),
-             cfg.path("ui.pill_file", "web/pill.html"),
-             on_command=lambda text: core.dispatch(text, executor=executor, cfg=cfg).reply, block=False)
+    runtime = Runtime(cfg, _bus(cfg))
+    url = _serve(runtime, _lock(cfg))
     print(f"胶囊界面：{url}（Ctrl-C 退出）")
     if not args.no_open:
         webbrowser.open(url)
     ui.wait_forever()
     return 0
+
+
+def cmd_pill(args: argparse.Namespace, cfg: Config) -> int:
+    url = f"http://{cfg.get('ui.host', '127.0.0.1')}:{cfg.get('ui.port', 8765)}/"
+    if not _open_app_window(url):
+        webbrowser.open(url)
+        print(f"已用默认浏览器打开 {url}（装 Chrome 可获得无边框胶囊窗口）")
+    return 0
+
+
+def _open_app_window(url: str) -> bool:
+    """用 Chromium 系浏览器的 --app 模式开一个无边框小窗，最接近「悬浮胶囊」。"""
+    for app in ("Google Chrome", "Microsoft Edge", "Brave Browser", "Chromium"):
+        if not Path(f"/Applications/{app}.app").exists():
+            continue
+        profile = Path.home() / ".voxos" / "pill-profile"
+        profile.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.Popen(["open", "-na", app, "--args", f"--app={url}",
+                              f"--user-data-dir={profile}", "--window-size=420,620",
+                              "--window-position=80,80"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            return False
+        return True
+    return False
 
 
 def cmd_tools(_: argparse.Namespace, cfg: Config) -> int:
@@ -266,8 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--open-pill", action="store_true")
     demo.set_defaults(func=cmd_demo)
 
-    run = sub.add_parser("run", help="守护进程（麦克风 + 胶囊）")
-    run.add_argument("--speak", action="store_true", help="用 TTS 播报结果")
+    run = sub.add_parser("run", help="守护进程（麦克风 + 胶囊 + 设置面板）")
     run.set_defaults(func=cmd_run)
 
     enroll = sub.add_parser("enroll", help="录入声纹")
@@ -276,9 +462,12 @@ def build_parser() -> argparse.ArgumentParser:
     enroll.add_argument("--mode", choices=["normal", "mask"], default="normal")
     enroll.set_defaults(func=cmd_enroll)
 
-    serve = sub.add_parser("serve", help="只启动胶囊状态服务")
+    serve = sub.add_parser("serve", help="只启动胶囊与设置面板")
     serve.add_argument("--no-open", action="store_true")
     serve.set_defaults(func=cmd_serve)
+
+    pill = sub.add_parser("pill", help="用无边框窗口打开胶囊（最接近悬浮）")
+    pill.set_defaults(func=cmd_pill)
 
     sub.add_parser("tools", help="列出已注册工具").set_defaults(func=cmd_tools)
     sub.add_parser("doctor", help="环境自检").set_defaults(func=cmd_doctor)
