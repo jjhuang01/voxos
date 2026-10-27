@@ -25,6 +25,7 @@ NO_ACTION = "没听懂，什么也没做"
 # 识别后端在界面上的人话名（配置里仍是英文标识，不为人机耦合让步）。
 STT_LABELS = {
     "scripted": "脚本回放（演示）",
+    "sense_voice": "本地 SenseVoice",
     "local_whisper": "本地 Whisper",
     "openai": "OpenAI 接口",
 }
@@ -201,12 +202,24 @@ def _ui_context(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
         runtime.reload(new_cfg)
         return {"ok": True, "groups": settings.describe(runtime.cfg)}
 
+    def undo() -> dict[str, object]:
+        try:
+            new_cfg = settings.restore(settings.target_of(runtime.cfg))
+        except FileNotFoundError as exc:            # 没备份：说清楚，别假装成功
+            return {"ok": False, "error": str(exc)}
+        except OSError as exc:
+            return {"ok": False, "error": f"撤销失败：{exc}"}
+        runtime.reload(new_cfg)
+        return {"ok": True, "groups": settings.describe(runtime.cfg)}
+
     return ui.UiContext(
         bus=runtime.bus,
         pill_file=runtime.cfg.path("ui.pill_file", "web/pill.html"),
         on_command=lambda text: _run_text(runtime, text),
         settings_get=lambda: settings.describe(runtime.cfg),
         settings_set=save,
+        settings_undo=undo,
+        settings_can_undo=lambda: settings.can_undo(runtime.cfg),
         status=lambda: _status(runtime, lock),
         on_enroll=(lambda seconds: _enroll_now(runtime.cfg, lock, seconds, enrolled)) if lock else None,
         on_confirm=runtime.gate.resolve,

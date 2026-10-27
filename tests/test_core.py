@@ -73,6 +73,32 @@ def test_offline_multi_intent_plan(cfg, executor):
     assert "负载" in result.reply
 
 
+def test_multi_intent_beats_fast_path(cfg, executor):
+    """快通道抢到第一件事就返回，会把后面那件悄悄吞掉——这条盯的就是它。"""
+    result = core.dispatch("记一下今天修了登录 bug，顺便看下服务器负载",
+                           executor=executor, cfg=cfg)
+    assert len(result.results) == 2, result.results
+    assert "日志已记录" in result.reply and "负载" in result.reply
+
+
+def test_multi_intent_route_label_tells_the_truth(cfg, executor):
+    """两段都命中快通道就说 fast；有一段落到启发式就说 offline。别冤枉快通道。"""
+    all_fast = core.dispatch("写日志 修完了登录接口，然后检查服务器", executor=executor, cfg=cfg)
+    assert all_fast.route == "fast", all_fast.route
+    assert len(all_fast.results) == 2
+    mixed = core.dispatch("写日志 修完了登录接口，顺便把 auth.py 的空值校验补上",
+                          executor=executor, cfg=cfg)
+    assert mixed.route == "offline", mixed.route
+    assert len(mixed.results) == 2
+
+
+def test_single_intent_with_inline_connector_is_not_split(cfg, executor):
+    """「顺便」出现在句子中间时不能切——切了会把文件名丢掉。"""
+    result = core.dispatch("把 auth.py 顺便重构一下", executor=executor, cfg=cfg)
+    assert len(result.results) == 1
+    assert result.tool == "delegate_to_coding_cli"
+
+
 def test_heuristic_plan_never_guesses(cfg):
     assert core.heuristic_plan("帮我写一首诗", cfg) == []
 

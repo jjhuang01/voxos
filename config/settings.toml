@@ -24,7 +24,9 @@ hotwords_max = 2000
 wake_words = ["siri", "jarvis", "小助手", "嘿 siri"]
 
 [stt]
-backend = "scripted"          # scripted | local_whisper | openai
+backend = "scripted"          # scripted | sense_voice | local_whisper | openai
+model_dir = ".voxos/models/sense-voice"   # sense_voice 用：model.int8.onnx + tokens.txt
+num_threads = 2               # sense_voice 推理线程数；2 核够跑实时，再多收益递减
 language = "zh"
 model = "small"
 api_base = ""

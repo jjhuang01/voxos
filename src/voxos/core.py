@@ -112,6 +112,11 @@ def dispatch(
     if not raw:
         return DispatchResult(route="ignore", text=raw, reply="")
 
+    if _segments(raw, cfg) > 1:
+        multi = _multi_intent(raw, cfg, executor, started)
+        if multi is not None:
+            return multi
+
     hit = _fast_route(raw, _wake_pattern(cfg))
     if hit:
         name, args = hit
@@ -130,6 +135,53 @@ def dispatch(
     results = [executor.execute_safely(name, args, text=raw) for name, args in plan]
     name, args = plan[0]
     return DispatchResult("offline", raw, name, args, "；".join(results), _ms(started), results)
+
+
+def _multi_intent(
+    text: str, cfg: Config, executor: Executor, started: float
+) -> DispatchResult | None:
+    """一句话里有好几件事：逐段规划，别让快通道抢到第一件就吃掉后面的。
+
+    只有一段能规划出来时返回 None，交回给正常路径（那样路由标签才准）。
+    """
+    plan, fast_only = _segment_plan(text, cfg)
+    if len(plan) < 2:
+        return None
+    results = [executor.execute_safely(name, args, text=text) for name, args in plan]
+    name, args = plan[0]
+    return DispatchResult("fast" if fast_only else "offline", text, name, args,
+                          "；".join(results), _ms(started), results)
+
+
+def _segments(text: str, cfg: Config | None = None) -> int:
+    """数一句话里有几段（唤醒词先剥掉再数）。"""
+    wake = _wake_pattern(cfg)
+    return sum(1 for piece in _SPLIT.split(text) if (wake.sub("", piece.strip()) if wake else piece.strip()))
+
+
+def _segment_plan(
+    text: str, cfg: Config | None = None
+) -> tuple[list[tuple[str, dict[str, Any]]], bool]:
+    """逐段规划：每段先试快通道正则，再落到离线启发式。
+
+    第二个返回值是「每一段都走了快通道」——用来给整句定路由标签，
+    否则两段都命中了正则、界面却显示「离线」，等于冤枉了快通道。
+    """
+    wake = _wake_pattern(cfg)
+    plan: list[tuple[str, dict[str, Any]]] = []
+    fast_only = True
+    for segment in _SPLIT.split(text):
+        piece = wake.sub("", segment.strip()) if wake else segment.strip()
+        piece = _LEAD.sub("", piece)
+        if not piece:
+            continue
+        hit = _fast_route(piece, wake)
+        if hit:
+            plan.append(hit)
+        else:
+            fast_only = False
+            plan.extend(heuristic_plan(piece, cfg))
+    return plan, fast_only
 
 
 def _fast_route(
@@ -215,7 +267,13 @@ def _llm_route(
     return DispatchResult("llm", text, first_tool, first_args, "；".join(results), _ms(started), results)
 
 
-_SPLIT = re.compile(r"(?:然后|接着|再然后|[，,;；]\s*然后|[;；])")
+_SPLIT = re.compile(
+    r"(?:然后|接着|再然后"
+    r"|[，,;；]\s*(?:然后|顺便|另外|同时|再说|还有)"
+    r"|[;；])")
+
+# 切段后常留下「同时 / 顺便」这类开头词，会让锚定的快通道正则全部失配。
+_LEAD = re.compile(r"^(?:同时|顺便|另外|还有|再说|然后|接着|再|也|并)[，,：:\s]*")
 
 # 「把 auth.py 的空值校验补上」——最自然的编程说法。文件名 + 变更动词才认，
 # 避免把「把日志改一下」误判成改代码。
@@ -234,6 +292,7 @@ def heuristic_plan(text: str, cfg: Config | None = None) -> list[tuple[str, dict
     plan: list[tuple[str, dict[str, Any]]] = []
     for segment in _SPLIT.split(text):
         piece = wake.sub("", segment.strip()) if wake else segment.strip()
+        piece = _LEAD.sub("", piece)
         if not piece:
             continue
         if re.search(r"日志|记录|记一下|记一条|记个", piece):
@@ -245,7 +304,7 @@ def heuristic_plan(text: str, cfg: Config | None = None) -> list[tuple[str, dict
             plan.append(("dispatch_code_session", {"instruction": piece}))
         elif re.search(r"写代码|改代码|改一下|加个|修复|续接", piece):
             plan.append(("dispatch_code_session", {"instruction": piece}))
-        elif re.search(r"服务器|负载|流量|巡检|磁盘|容器|线上", piece):
+        elif re.search(r"服务器|负载|流量|巡检|磁盘|容器|线上|监控", piece):
             plan.append(("inspect_server_ops", {"query": piece}))
         elif re.search(r"撤销|回滚|还原", piece):
             plan.append(("rollback_file", {}))

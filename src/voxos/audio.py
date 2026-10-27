@@ -11,6 +11,7 @@ dsp.py 负责纯计算，本模块负责副作用（设备、文件、网络）�
 from __future__ import annotations
 
 import os
+import re
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -354,6 +355,38 @@ class LocalWhisperStt:
         return "".join(segment.text for segment in segments).strip()
 
 
+class SenseVoiceStt:
+    """本地 SenseVoice（sherpa-onnx）：中英混说 + 代码术语，int8 在 CPU 上快于实时。
+
+    离线模型，`final` 参数被忽略——每次调用都是对整段音频重新解码。
+    因此管道里"边听边判是否说完"的复查点会真的花 CPU（3 秒音频约 150ms），
+    这是本地离线识别的固有代价，换来的是完全不出网。
+    """
+
+    _TAG = re.compile(r"<\|[^|]*\|>")          # <|zh|><|NEUTRAL|><|Speech|><|withitn|>
+
+    def __init__(self, model_dir: str | Path, num_threads: int = 2,
+                 language: str = "auto") -> None:
+        try:
+            import sherpa_onnx
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("需要 sherpa-onnx：pip install 'voxos[models]'") from exc
+        root = Path(os.path.expanduser(str(model_dir)))
+        model, tokens = root / "model.int8.onnx", root / "tokens.txt"
+        if not model.exists() or not tokens.exists():
+            raise FileNotFoundError(f"{root} 里缺 model.int8.onnx 或 tokens.txt")
+        self._recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+            model=str(model), tokens=str(tokens), num_threads=num_threads,
+            language=language, use_itn=True,
+        )
+
+    def transcribe(self, audio: np.ndarray, final: bool = False) -> str:
+        stream = self._recognizer.create_stream()
+        stream.accept_waveform(dsp.SR, dsp.as_float(audio))
+        self._recognizer.decode_stream(stream)
+        return self._TAG.sub("", stream.result.text).strip()
+
+
 def make_stt(cfg: Config, hotwords: list[str] | None = None) -> SttEngine:
     backend = str(cfg.get("stt.backend", "scripted"))
     if backend == "openai":
@@ -361,6 +394,9 @@ def make_stt(cfg: Config, hotwords: list[str] | None = None) -> SttEngine:
                          str(cfg.get("stt.model", "whisper-1")), hotwords)
     if backend == "local_whisper":
         return LocalWhisperStt(str(cfg.get("stt.model", "small")), hotwords)
+    if backend == "sense_voice":
+        return SenseVoiceStt(str(cfg.get("stt.model_dir", ".voxos/models/sense-voice")),
+                             int(cfg.get("stt.num_threads", 2)))
     return ScriptedStt([])
 
 

@@ -148,6 +148,8 @@ class UiContext:
     on_command: Callable[[str], str] | None = None
     settings_get: Callable[[], list[dict[str, object]]] | None = None
     settings_set: Callable[[dict[str, object]], dict[str, object]] | None = None
+    settings_undo: Callable[[], dict[str, object]] | None = None
+    settings_can_undo: Callable[[], bool] | None = None
     status: Callable[[], dict[str, object]] | None = None
     on_enroll: Callable[[float], dict[str, object]] | None = None
     on_confirm: Callable[[bool], None] | None = None
@@ -242,7 +244,7 @@ class _PillHandler(BaseHTTPRequestHandler):
             "/state": self.ctx.bus.snapshot,
             "/history": self.ctx.bus.history,
             "/api/status": self.ctx.status or (lambda: {}),
-            "/api/settings": lambda: {"groups": self.ctx.settings_get() if self.ctx.settings_get else []},
+            "/api/settings": self._read_settings,
             "/api/history": self.ctx.history or list,
         }
         if path == "/events":
@@ -257,6 +259,7 @@ class _PillHandler(BaseHTTPRequestHandler):
         routes: dict[str, Callable[[], None]] = {
             "/command": self._command,
             "/api/settings": self._save_settings,
+            "/api/settings/undo": self._undo_settings,
             "/api/enroll": self._enroll,
             "/api/confirm": self._confirm,
         }
@@ -274,12 +277,24 @@ class _PillHandler(BaseHTTPRequestHandler):
             reply = f"执行异常：{exc}"
         return self._json({"ok": True, "reply": reply})
 
+    def _read_settings(self) -> None:
+        """设置 + 还有没有一步可退。撤销按钮的存在与否由这里说了算，不由前端猜。"""
+        groups = self.ctx.settings_get() if self.ctx.settings_get else []
+        undo = bool(self.ctx.settings_can_undo and self.ctx.settings_can_undo())
+        return self._json({"groups": groups, "undo": undo})
+
     def _save_settings(self) -> None:
         body = self._body()
         if body is None or self.ctx.settings_set is None:
             return self._json({"ok": False, "errors": ["请求体需要 JSON"]}, 400)
         result = self.ctx.settings_set(dict(body.get("values") or {}))
         return self._json(result, 200 if result.get("ok") else 400)
+
+    def _undo_settings(self) -> None:
+        if self.ctx.settings_undo is None:
+            return self._json({"ok": False, "error": "未启用撤销"}, 400)
+        result = self.ctx.settings_undo()
+        return self._json(result, 200 if result.get("ok") else 409)
 
     def _enroll(self) -> None:
         body = self._body() or {}

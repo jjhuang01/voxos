@@ -30,7 +30,22 @@ MODELS = {
         "min_bytes": 500_000,
         "desc": "Silero VAD（512 定长窗口，实时率约 0.4%）",
     },
+    "sense-voice/model.int8.onnx": {
+        "url": "https://huggingface.co/csukuangfj/"
+               "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx",
+        "min_bytes": 200_000_000,
+        "desc": "SenseVoice 离线识别（int8，中英日韩粤，239MB）",
+    },
+    "sense-voice/tokens.txt": {
+        "url": "https://huggingface.co/csukuangfj/"
+               "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt",
+        "min_bytes": 200_000,
+        "desc": "SenseVoice 词表",
+    },
 }
+
+# 装不上也不影响核心功能，只是识别会退回脚本回放。
+OPTIONAL = {"sense-voice/model.int8.onnx", "sense-voice/tokens.txt"}
 
 
 def download(url: str, target: Path, proxy: str | None) -> bool:
@@ -55,12 +70,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--proxy", default=os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"))
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--no-asr", action="store_true",
+                        help="跳过 239MB 的识别模型（只要声纹与 VAD）")
     args = parser.parse_args()
 
     TARGET.mkdir(parents=True, exist_ok=True)
-    failed = []
+    failed, skipped = [], []
     for name, spec in MODELS.items():
+        if args.no_asr and name in OPTIONAL:
+            skipped.append(name)
+            continue
         target = TARGET / name
+        target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() and target.stat().st_size >= spec["min_bytes"] and not args.force:
             print(f"✓ {name} 已存在（{target.stat().st_size / 1e6:.1f}MB）")
             continue
@@ -70,8 +91,11 @@ def main() -> int:
             print(f"✓ {name}（{target.stat().st_size / 1e6:.1f}MB）")
         else:
             target.unlink(missing_ok=True)
-            failed.append(name)
+            (skipped if name in OPTIONAL else failed).append(name)
 
+    if skipped:
+        print(f"\n· 可选模型未下载：{', '.join(skipped)}")
+        print("  不影响核心功能，但 stt.backend=sense_voice 时会退回脚本回放。")
     if failed:
         print(f"\n⚠️ 下载失败：{', '.join(failed)}")
         print("  可手动下载后放入 .voxos/models/；缺失时系统会自动降级（能量 VAD + 频谱声纹），")

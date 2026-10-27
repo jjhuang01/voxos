@@ -198,6 +198,64 @@ def measure_confirm() -> dict[str, object]:
             "deny_cancels": "已取消" in denied, "allow_runs": "dry-run" in allowed}
 
 
+def measure_stt() -> dict[str, object]:
+    """真实识别率：用 `say` 合成的已知文本喂给本地 SenseVoice，量字符错误率与实时率。
+
+    没有模型或语料不是真人声时返回 available=False，由上层标成 SKIP——
+    宁可显示"跳过"，也不拿合成音假装通过。
+    """
+    model_dir = ROOT / ".voxos" / "models" / "sense-voice"
+    if not (model_dir / "model.int8.onnx").exists():
+        return {"available": False, "why": "未下载 SenseVoice 模型"}
+    manifest = corpus.ensure_corpus(ROOT / ".voxos" / "corpus")
+    if manifest.get("kind") != "tts":
+        return {"available": False, "why": "语料不是真实音色"}
+    cases = list(manifest["owner"]["clips"])  # type: ignore[index]
+    for entry in manifest["impostors"]:  # type: ignore[index]
+        cases.extend(entry["clips"])
+    engine = audio.SenseVoiceStt(model_dir)
+    root = ROOT / ".voxos" / "corpus"
+    tally = {key: [0, 0] for key in ("zh", "en")}      # [错字数, 总字数]
+    audio_s = 0.0
+    heard_samples: list[dict[str, object]] = []
+    started = time.perf_counter()
+    for entry in cases:
+        clip = corpus.load_clip(root, entry)
+        heard = engine.transcribe(clip)
+        want = _normalize(entry["text"])
+        errors = _edit_distance(_normalize(heard), want)
+        bucket = tally["zh" if re.search(r"[\u4e00-\u9fff]", want) else "en"]
+        bucket[0] += errors
+        bucket[1] += len(want)
+        audio_s += clip.size / dsp.SR
+        heard_samples.append({"want": entry["text"], "heard": heard})
+    wall = time.perf_counter() - started
+    errors = sum(item[0] for item in tally.values())
+    total = sum(item[1] for item in tally.values())
+    by_script = {key: round(hit / max(size, 1) * 100, 1) for key, (hit, size) in tally.items()}
+    return {"available": True, "cases": len(cases), "cer": round(errors / max(total, 1) * 100, 1),
+            "by_script": by_script, "chars": total,
+            "rtf": round(wall / max(audio_s, 1e-6), 3), "wall_s": round(wall, 1),
+            "samples": heard_samples[:4]}
+
+
+def _normalize(text: str) -> str:
+    """比对前统一口径：去掉标点与空白，英文小写。"""
+    return re.sub(r"[\s，。、？！：；,.?!:;\"'（）()《》]", "", str(text)).lower()
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """字符级编辑距离（中文按字算，就是 CER 的分子）。"""
+    previous = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, 1):
+        current = [i]
+        for j, char_b in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1,
+                               previous[j - 1] + (char_a != char_b)))
+        previous = current
+    return previous[-1]
+
+
 def measure_voiceprint(cfg, refresh: bool) -> dict[str, object]:
     """声纹语料上的 FRR/FAR：阈值不是拍的，是扫出来的。"""
     manifest = corpus.ensure_corpus(ROOT / ".voxos" / "corpus", force=refresh)
@@ -397,6 +455,8 @@ def build_report(refresh: bool = False) -> dict[str, object]:
     onboarding = measure_onboarding()
     print("→ 确认通道 …")
     confirm = measure_confirm()
+    print("→ 真实识别率 …")
+    stt = measure_stt()
     print("→ 代码度量 …")
     code = measure_code()
     print("→ 测试套件 …")
@@ -408,7 +468,7 @@ def build_report(refresh: bool = False) -> dict[str, object]:
         "fast_path": fast, "dispatch": dispatch, "voiceprint": voiceprint,
         "e2e": e2e, "redlines": redlines, "security": security, "standby": standby,
         "settings": settings_report, "onboarding": onboarding, "confirm": confirm,
-        "code": code, "tests": tests,
+        "stt": stt, "code": code, "tests": tests,
     }
 
 
@@ -456,6 +516,14 @@ def verdicts(report: dict[str, object]) -> list[dict[str, object]]:
                       and report["confirm"]["reason_is_human"]
                       and report["confirm"]["deny_cancels"]
                       and report["confirm"]["allow_runs"])},
+        {"item": "本地识别字符错误率 < 10%",
+         "measured": (f"{report['stt']['cer']}%（中文 {report['stt']['by_script']['zh']}%"
+                      f" / 英文 {report['stt']['by_script']['en']}%，{report['stt']['cases']} 句，"
+                      # 实时率单次会在 33–38× 之间抖，取下界才是个稳定的说法
+                      f"≥{int(1 / max(report['stt']['rtf'], 1e-6) // 10 * 10)}× 实时）")  # type: ignore[index]
+                     if report["stt"]["available"] else report["stt"].get("why", "跳过"),  # type: ignore[index]
+         "pass": report["stt"]["cer"] < 10 if report["stt"]["available"] else False,  # type: ignore[index]
+         "skipped": not report["stt"]["available"]},  # type: ignore[index]
         {"item": "静音待机 CPU < 1.5%", "measured": f"{report['standby']['cpu_percent']}%/秒音频",  # type: ignore[index]
          "pass": report["standby"]["cpu_percent"] < 1.5},  # type: ignore[index]
         {"item": "静音零误触发", "measured": f"{report['standby']['segments']} 段",  # type: ignore[index]
@@ -481,6 +549,7 @@ th{{color:var(--muted);font-weight:600;font-size:12px;letter-spacing:.04em;text-
 tr:last-child td{{border-bottom:0}}
 code{{background:#f3f4f6;border-radius:5px;padding:1px 6px;font-size:12.5px}}
 .pass{{color:var(--ok);font-weight:600}}.fail{{color:var(--bad);font-weight:600}}
+.skip{{color:var(--muted);font-weight:600}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}}
 .kpi{{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px 18px}}
 .kpi .n{{font-size:24px;font-weight:650;letter-spacing:-.02em}}
@@ -521,7 +590,8 @@ def render(report: dict[str, object], rows: list[dict[str, object]]) -> str:
     code = report["code"]  # type: ignore[index]
     verdict_rows = "\n".join(
         f"<tr><td>{row['item']}</td><td><code>{row['measured']}</code></td>"
-        f"<td class=\"{'pass' if row['pass'] else 'fail'}\">{'PASS' if row['pass'] else 'FAIL'}</td></tr>"
+        f"<td class=\"{'skip' if row.get('skipped') else ('pass' if row['pass'] else 'fail')}\">"
+        f"{_label(row)}</td></tr>"
         for row in rows
     )
     sweep_rows = "\n".join(
@@ -566,11 +636,20 @@ def main() -> int:
     print("\n验收项")
     print("-" * 62)
     for row in rows:
-        print(f"{'PASS' if row['pass'] else 'FAIL'}  {row['item']:<28} {row['measured']}")
-    failed = [row for row in rows if not row["pass"]]
+        print(f"{_label(row):<4}  {row['item']:<28} {row['measured']}")
+    failed = [row for row in rows if not row["pass"] and not row.get("skipped")]
+    skipped = [row for row in rows if row.get("skipped")]
     print("-" * 62)
-    print(f"{len(rows) - len(failed)}/{len(rows)} 通过 · 报告 docs/ACCEPTANCE.html")
+    tail = f" · {len(skipped)} 跳过（缺模型/缺素材）" if skipped else ""
+    print(f"{len(rows) - len(failed) - len(skipped)}/{len(rows) - len(skipped)} 通过{tail}"
+          f" · 报告 docs/ACCEPTANCE.html")
     return 1 if failed else 0
+
+
+def _label(row: dict[str, object]) -> str:
+    if row.get("skipped"):
+        return "SKIP"
+    return "PASS" if row["pass"] else "FAIL"
 
 
 if __name__ == "__main__":

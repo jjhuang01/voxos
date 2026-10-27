@@ -59,9 +59,15 @@ SCHEMA: tuple[Field, ...] = (
           "TTS 播报结束后忽略麦克风的时长，防止听到自己。", 0, 2000, 50, unit="ms"),
 
     Field("stt.backend", "识别后端", "enum", "stt",
-          "scripted 用于演示与测试；local_whisper / openai 为真实识别。",
-          options=("scripted", "local_whisper", "openai"), restart=True),
-    Field("stt.model", "识别模型", "str", "stt", "如 small / medium / large-v3。", restart=True),
+          "scripted 用于演示与测试；sense_voice 本地离线；local_whisper / openai 需额外依赖或 Key。",
+          options=("scripted", "sense_voice", "local_whisper", "openai"), restart=True),
+    Field("stt.model_dir", "本地模型目录", "str", "stt",
+          "sense_voice 后端用的模型目录，里面要有 model.int8.onnx 与 tokens.txt。",
+          restart=True),
+    Field("stt.num_threads", "识别线程数", "int", "stt",
+          "sense_voice 推理线程数。2 核就能跑实时，再往上收益递减还抢 CPU。",
+          1, 8, 1, restart=True),
+    Field("stt.model", "识别模型", "str", "stt", "whisper 的 small / medium / large-v3。", restart=True),
     Field("stt.language", "语言", "str", "stt", "zh / en / auto。", restart=True),
     Field("stt.api_key", "识别 API Key", "str", "stt", "openai 后端才需要。", secret=True),
 
@@ -169,6 +175,14 @@ def _cross_check(clean: dict[str, Any]) -> list[str]:
 
 # ------------------------------------------------------------------ 写回
 
+BACKUP_NAME = "settings.bak"
+
+
+def target_of(cfg: Config) -> Path:
+    """这份配置写回哪个文件：`--config` 指的那个，或仓库默认的那份。"""
+    return cfg.source or cfg.root / "config" / "settings.toml"
+
+
 def save(changes: dict[str, Any], path: Path) -> None:
     """就地改值：只替换等号右边，保留缩进、对齐与行尾注释。"""
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
@@ -176,6 +190,26 @@ def save(changes: dict[str, Any], path: Path) -> None:
         section, name = key.split(".", 1)
         lines = _write_value(lines, section, name, _literal(value))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def backup_path(target: Path) -> Path:
+    """备份放在配置同目录的 `.voxos/` 下，跟着 `--config` 走，不污染仓库根。"""
+    return target.parent / ".voxos" / BACKUP_NAME
+
+
+def restore(target: Path) -> Config:
+    """回到上一次保存之前。备份用掉就删掉——撤销只退一步，退完这一步就没得再退。"""
+    backup = backup_path(target)
+    if not backup.exists():
+        raise FileNotFoundError("没有可撤销的保存记录")
+    target.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
+    backup.unlink()                          # 写成功才消费，写失败备份还在
+    return load(target)
+
+
+def can_undo(cfg: Config) -> bool:
+    """有没有一步可退。界面据此决定要不要显示「撤销」。"""
+    return backup_path(target_of(cfg)).exists()
 
 
 def _literal(value: Any) -> str:
@@ -246,10 +280,14 @@ def _insert_line(lines: list[str], section: str, name: str, literal: str) -> lis
 
 
 def apply(cfg: Config, changes: dict[str, Any], path: Path | None = None) -> tuple[Config, list[str]]:
-    """校验 → 写盘 → 重新加载。校验失败时一个字节都不写。"""
+    """校验 → 备份 → 写盘 → 重新加载。校验失败时一个字节都不写。"""
     clean, errors = validate(changes)
     if errors or not clean:
         return cfg, errors
-    target = path or cfg.source or cfg.root / "config" / "settings.toml"
+    target = target_of(cfg) if path is None else path
+    if target.exists():                       # 留一份上一次的，供「撤销」用
+        backup = backup_path(target)
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
     save(clean, target)
     return load(target), []

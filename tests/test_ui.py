@@ -129,6 +129,40 @@ def test_settings_endpoints(server):
     assert status == 200 and payload["saved"] == 2
 
 
+def test_settings_undo_endpoint():
+    """撤销：有备份时 GET 说 true，POST 退一步，退完就变 false。"""
+    state = {"undo": True, "restored": 0}
+
+    def undo() -> dict:
+        if not state["undo"]:
+            return {"ok": False, "error": "没有可撤销的保存记录"}
+        state["undo"] = False
+        state["restored"] += 1
+        return {"ok": True, "groups": []}
+
+    ctx = ui.UiContext(bus=ui.StatusBus(None), token=TOKEN,
+                       settings_get=lambda: [], settings_undo=undo,
+                       settings_can_undo=lambda: state["undo"])
+    instance = ui.serve(ctx, "127.0.0.1", 0, block=False)
+    try:
+        assert json.loads(_get(instance, "/api/settings")[1])["undo"] is True
+        code, payload = _post(instance, "/api/settings/undo", {})
+        assert code == 200 and payload["ok"] is True and state["restored"] == 1
+        assert json.loads(_get(instance, "/api/settings")[1])["undo"] is False
+        code, payload = _post(instance, "/api/settings/undo", {})
+        assert code == 409 and "没有可撤销" in payload["error"]
+        assert state["restored"] == 1
+    finally:
+        instance.shutdown()
+        instance.server_close()
+
+
+def test_settings_undo_requires_token(server):
+    instance, _ = server                      # 这个上下文没接撤销，先验令牌门禁
+    code, payload = _post(instance, "/api/settings/undo", {}, token=None)
+    assert code == 401 and "令牌" in payload["error"]
+
+
 def test_status_and_history_endpoints(server):
     instance, _ = server
     assert json.loads(_get(instance, "/api/status")[1])["enrolled"] is False

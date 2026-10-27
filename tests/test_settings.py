@@ -153,6 +153,54 @@ def test_apply_writes_back_to_the_file_it_came_from(tmp_path: Path):
     assert new_cfg.source == source
 
 
+# ------------------------------------------------------------------ 撤销
+
+def test_apply_leaves_a_backup_of_the_previous_file(cfg, toml_file: Path):
+    """保存前留一份旧的：撤销靠它，所以必须写在新内容之前。"""
+    original = toml_file.read_text(encoding="utf-8")
+    settings.apply(cfg, {"audio.voiceprint_threshold": 0.91}, toml_file)
+    backup = settings.backup_path(toml_file)
+    assert backup.exists()
+    assert backup.read_text(encoding="utf-8") == original
+    assert "0.91" in toml_file.read_text(encoding="utf-8")
+
+
+def test_restore_puts_the_previous_file_back(cfg, toml_file: Path):
+    original = toml_file.read_text(encoding="utf-8")
+    settings.apply(cfg, {"audio.voiceprint_threshold": 0.91}, toml_file)
+    restored = settings.restore(toml_file)
+    assert toml_file.read_text(encoding="utf-8") == original
+    assert restored.get("audio.voiceprint_threshold") == 0.82
+
+
+def test_restore_consumes_the_backup(cfg, toml_file: Path):
+    """撤销只退一步：退完这一步，就没有下一步可退了。"""
+    settings.apply(cfg, {"audio.voiceprint_threshold": 0.91}, toml_file)
+    settings.restore(toml_file)
+    assert not settings.backup_path(toml_file).exists()
+    with pytest.raises(FileNotFoundError, match="没有可撤销"):
+        settings.restore(toml_file)
+
+
+def test_can_undo_follows_the_config_file(toml_file: Path):
+    cfg = load(toml_file)                     # source 指着这个文件，撤销就查它旁边
+    assert settings.can_undo(cfg) is False
+    settings.apply(cfg, {"audio.voiceprint_threshold": 0.91})
+    assert settings.can_undo(cfg) is True
+    settings.restore(toml_file)
+    assert settings.can_undo(cfg) is False
+
+
+def test_backup_lands_next_to_the_config_not_in_the_repo(tmp_path: Path):
+    """`--config /elsewhere/x.toml` 的备份要跟着它走，不能堆到仓库根目录。"""
+    source = tmp_path / "custom.toml"
+    source.write_text("[audio]\nvoiceprint_threshold = 0.80\n", encoding="utf-8")
+    cfg = load(source)
+    settings.apply(cfg, {"audio.voiceprint_threshold": 0.9})
+    assert settings.backup_path(source) == tmp_path / ".voxos" / "settings.bak"
+    assert settings.backup_path(source).exists()
+
+
 def test_save_roundtrip_all_fields(tmp_path: Path):
     """把模式里每个字段都写一遍，确认都能被 tomllib 读回同样的值。"""
     path = tmp_path / "s.toml"
