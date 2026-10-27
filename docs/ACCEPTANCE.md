@@ -111,19 +111,19 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 
 | 模块 | 行数 | 职责 |
 | :--- | ---: | :--- |
-| `main.py` | 532 | CLI 编排 / 守护循环 / 确认闸门 |
-| `audio.py` | 527 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
-| `ui.py` | 361 | 状态总线 / SSE / Earcon / 本地接口 |
-| `core.py` | 314 | 快慢双通道路由 / 多意图切分 / LLM 客户端 |
+| `main.py` | 543 | CLI 编排 / 守护循环 / 确认闸门 |
+| `audio.py` | 546 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
+| `ui.py` | 372 | 状态总线 / SSE / Earcon / 本地接口 |
+| `core.py` | 326 | 快慢双通道路由 / 多意图切分 / LLM 客户端 |
 | `settings.py` | 293 | 字段模式 / 范围校验 / 保留注释的 TOML 写回 / 撤销 |
 | `tools.py` | 290 | 10 个原子工具 |
 | `dsp.py` | 281 | 纯函数信号处理（零 I/O，可离线测） |
 | `safety.py` | 267 | 红线网关 / 快照 / 执行器 / 审计 |
 | `registry.py` | 144 | 工具契约 / `@tool` 自省 / 注册表 |
-| `corpus.py` | 142 | 验收语料生成 |
+| `corpus.py` | 173 | 验收语料生成 |
 | `config.py` | 102 | TOML + 环境变量 |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **3260** | 10 个工具 / 4 条快通道 / 157 项测试 |
+| **合计** | **3344** | 10 个工具 / 4 条快通道 / 161 项测试 |
 
 - 最长函数 **39 行**（`core.dispatch`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；
@@ -151,11 +151,13 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 | 项 | 为什么没测 | 风险 |
 | :--- | :--- | :--- |
 | 真人声纹标定 | 无真人录音样本 | TTS 音色的类内方差小于真人，真人 FRR 可能更高 |
-| 中英混说术语识别 | 语料里的英文是中文音色读的，词级错误率 12.5% | 代码术语必须靠热词注入补，声学模型自己扛不住 |
-| 真麦克风 8 小时长稳 | 需要授权与长时间占用设备 | CPU/内存长稳、蓝牙热插拔的真实行为未测 |
+| 中英混说的真人发音 | 语料是中文音色合成的，术语召回 29.4%（见第 19 项） | 真人口音介于中文音色与英文音色之间，无法用现有素材标定 |
+| 真麦克风 8 小时长稳 | 需要授权与长时间占用设备 | `scripts/soak.py` 跑了 25 分钟管道层：内存跨度 0.8MB、CPU 11.7%、无缓冲堆积（见 REVIEW §25）；设备热插拔/休眠唤醒未测 |
 | 面罩/低语模式 | 无硬件 | `mask_mode` 的 EQ/AGC 只做了信号级单测 |
 | LLM 慢通道 | 未接真实模型（无 Key） | 多轮 tool_calls 只在代码路径与错误兜底上测过 |
-| 拖拽 / 长按 / 动效逐帧 | 只覆盖静态与 hover/焦点状态 | 交互时序上的视觉问题看不出来 |
+
+> 「拖拽 / 长按 / 动效逐帧」这一项删掉了：界面里没有 `pointerdown`/`mousedown`/`touchstart`，
+> 既没有拖拽也没有长按，原来那条待办是对着不存在的交互写的（见 `docs/REVIEW.md §23`）。
 
 ---
 
@@ -166,9 +168,11 @@ cd voxos
 make setup                         # 首次：建 .venv 并装依赖（约 20s）
 python scripts/fetch_models.py     # 首次：CAM++ 与 Silero（约 28MB，必需）
                                    #       加 --all 连 SenseVoice（229MB，可选，缺了就退回 scripted）
-make test                          # 157 passed
-make verify                        # 18/18，产出 docs/acceptance.json + ACCEPTANCE.html
+make test                          # 161 passed
+make verify                        # 18/19（1 项 GAP：中英混说术语召回），产出 docs/acceptance.json
 make demo                          # 真实语音端到端（沙箱写盘）
+make audit-ui                      # 界面回归 12 条（需先 voxos serve）
+make soak MINUTES=30               # 长稳采样，产出 RSS/CPU 曲线
 ```
 
 **全新克隆实测**：把 `.voxos/models/` 整个挪走后再跑（等价于刚 clone 下来、还没下模型），

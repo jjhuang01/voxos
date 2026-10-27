@@ -21,8 +21,9 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 157 项测试
-make verify                                  # 工程验收，产出 docs/ACCEPTANCE.html
+make test                                    # 161 项测试
+make verify                                  # 工程验收（18 通过 + 1 项未达标）
+make audit-ui                                # 界面回归 12 条（需先 voxos serve）
 ```
 
 > `make` 会自动优先使用 `.venv/bin/python`；已有自己的环境就 `PY=/path/to/python make test`。
@@ -161,13 +162,15 @@ voxos/
 │   └── __init__.py
 ├── web/pill.html           # 36px 胶囊 + 展开式控制面板（状态/最近/设置）
 ├── scripts/
-│   ├── verify.py           # 工程验收：延迟/FRR/FAR/红线矩阵/代码度量 → HTML 报告
+│   ├── verify.py           # 工程验收：延迟/FRR/FAR/红线矩阵/混说召回/代码度量 → HTML 报告
+│   ├── audit_ui.py         # 界面回归：把审查里「量出来的数」变成 12 条断言
+│   ├── soak.py             # 长稳：实时节奏喂音频，采样 phys_footprint/CPU（RSS 会骗人）
 │   ├── fetch_models.py     # 模型下载（支持代理；--no-asr 跳过 239MB 识别模型）
 │   ├── shot.py             # 零依赖 CDP 客户端：截 10 个界面状态，也能当探针量尺寸
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 157 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端
+└── tests/                  # 161 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端
 ```
 
 ## 四条关键设计决策
@@ -200,7 +203,7 @@ JSON Schema 由类型注解自省生成（`registry.py`），正则快通道由�
 | :--- | :--- | :--- | :--- |
 | VAD | Silero ONNX（实时率 0.4%） | 能量 VAD（自适应底噪） | 嘈杂环境误触发率上升 |
 | 声纹 | CAM++ 192 维 | 频谱统计 + UBM | **FRR/FAR 不再满足 PRD**，仅保证链路可跑 |
-| STT | **SenseVoice int8（本地，239MB，≥30× 实时）** | faster-whisper / OpenAI 兼容接口 / 脚本化 | 本地识别不出网；脚本化仅用于测试与演示 |
+| STT | **SenseVoice int8（本地，239MB，20–38× 实时，视机器负载）** | faster-whisper / OpenAI 兼容接口 / 脚本化 | 本地识别不出网；脚本化仅用于测试与演示 |
 | LLM | 任意 OpenAI 兼容（Ollama/DeepSeek/Claude） | 离线启发式（4 条规则） | 只认三大高频场景，其余不执行 |
 | GUI | 无头 + SSE 胶囊 | CLI 状态行 | 无 |
 
@@ -242,9 +245,18 @@ python scripts/fetch_models.py # 声纹 + VAD + SenseVoice 识别模型（约 26
 | `.voxos/models/silero_vad.onnx` | 0.6MB | 退化成能量 VAD，嘈杂环境误触发变多 |
 | `.voxos/models/sense-voice/model.int8.onnx` + `tokens.txt` | 239MB | `stt.backend=sense_voice` 起不来；改成 `scripted` 仍可跑通链路 |
 
-识别率不是估的：24 句 TTS 语料 818 字，字符错误率 **2.8%**（中文 1.4%、英文 3.1%），
-**≥30× 实时**。中文那 1.4% 全是「十点→10点」这类数字规范化；英文按词算是 12.5%
-（`null`→`Ill`、`auth`→`Oth`），所以代码术语得靠热词表，不能指望声学模型自己扛。
+识别率不是估的：24 句 TTS 语料 818 字，字符错误率 **2.8%**（中文 1.4%、英文 3.1%）。
+中文那 1.4% 全是「十点→10点」这类数字规范化。
+
+速度别记成单个数：单次解码实测 3 秒音频 94ms（**32×**）、4.9 秒 138ms（**36×**）；
+机器上有别的进程抢 CPU 时会掉到 **20×** 上下。`make verify` 报的是当次的最差值。
+
+**但这不是中英混说的成绩。** 上面那组是英文句子用英文音色读，量的是英文识别。
+真实场景是中文句子里夹术语——「把 redis 的连接池调大一点」——同一批术语在这种念法下
+召回只有 **29.4%**（`docker`→`care`、`nginx`→`in`），中文本身没问题（字错 9.6%）。
+对照实验证明是发音而非模型：同一批句子交给英文音色，`docker`/`build`/`review` 全对。
+所以代码术语得靠热词表 + 更懂双语口音的模型，不能指望这个声学模型自己扛。
+详见 `docs/REVIEW.md §22`。
 
 识别后端在设置页切换（`stt.backend`），默认 `scripted`（不依赖模型，CI 与演示用）。
 换成 `sense_voice` 后完全离线，音频不出本机。
