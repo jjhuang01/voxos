@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voxos"
-version = "0.1.1"
+version = "0.1.2"
 description = "只听你一个人说话的语音操作系统 Agent：本地声纹锁 + 快慢双通道路由 + 极简胶囊"
 readme = "README.md"
 requires-python = ">=3.11"
