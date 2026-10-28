@@ -256,3 +256,34 @@ def test_enroll_warns_when_only_one_sentence_was_captured(monkeypatch):
     assert result["ok"] is True
     assert result["samples"] == 1
     assert "再说 2 句" in str(result["warning"]), result
+
+
+def test_stale_singleton_lock_is_cleared_only_when_nobody_is_using_it(tmp_path, monkeypatch):
+    """强杀胶囊窗口会留下指向死 pid 的 `SingletonLock`，Chrome 之后就不再弹窗——
+    `open -na` 还返回 0，于是「点了图标什么都没发生」。
+
+    但**只有在确认没人在用**时才清：反过来的话会同时起两个实例，
+    两个都以为自己独占，配置目录就真的坏了。
+    """
+    profile = tmp_path / "pill-profile"
+    profile.mkdir()
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        (profile / name).write_text("x")
+
+    monkeypatch.setattr(main, "_window_alive", lambda p, timeout=4.0: True)
+    main._drop_stale_lock(profile)
+    assert (profile / "SingletonLock").exists(), "有人在用的时候一个都不许动"
+
+    monkeypatch.setattr(main, "_window_alive", lambda p, timeout=4.0: False)
+    main._drop_stale_lock(profile)
+    assert not list(profile.iterdir()), "没人在用就该清干净"
+
+
+def test_pill_window_reports_failure_when_no_window_appears(monkeypatch):
+    """启动成功 ≠ 窗口出现。等不到窗口必须返回 False，让调用方回落到默认浏览器，
+    而不是让 `open` 的退出码 0 冒充成功。"""
+    monkeypatch.setattr(main, "_window_alive", lambda p, timeout=4.0: False)
+    monkeypatch.setattr(main, "_drop_stale_lock", lambda p: None)
+    monkeypatch.setattr(main.subprocess, "Popen", lambda *a, **k: None)
+    monkeypatch.setattr(main.Path, "exists", lambda self: True)
+    assert main._open_app_window("http://127.0.0.1:1/") is False

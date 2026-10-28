@@ -3,5 +3,5 @@
 分层：core（内核）→ tools（插件）→ audio/dsp（听）→ ui（反馈）→ main（编排）。
 """
 
-__version__ = "0.1.17"
+__version__ = "0.1.18"
 __all__ = ["__version__"]

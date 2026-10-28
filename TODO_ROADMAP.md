@@ -148,7 +148,7 @@
 
 ### Task 1.8 工程化
 
-- [x] 249 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
+- [x] 251 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
       `scripts/audit_ui.py` 12 项界面回归（`make audit-ui`），`scripts/soak.py` 长稳（`make soak`）。
 - [x] 全模块单函数 ≤ 40 行（最长 40 行，`core.dispatch`）、核心五模块共 8 个类、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README。
@@ -250,7 +250,7 @@
       合并为 `core.NO_ACTION` 一处。
 - [x] **豁免逻辑会误伤**：`--allow-gap` 的关键字如果因为「那一项这次达标了」而匹配不到，
       旧代码报错退出——谁把阈值调对了反而卡住发版。改成只有「一项都不匹配」才算写错。
-- *验收*：测试 +16（249 项）；真机 `VoxOS.app` 双击起来说「你好啊」→ `chat` 回「在。」，
+- *验收*：测试 +18（251 项）；真机 `VoxOS.app` 双击起来说「你好啊」→ `chat` 回「在。」，
       胶囊显示原话与回应；`/api/listen` 开关实测可停可续。
       遗留：声纹 FAR 1.67%（Task 2.5）。
 

@@ -741,12 +741,20 @@ def cmd_pill(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def _open_app_window(url: str) -> bool:
-    """用 Chromium 系浏览器的 --app 模式开一个无边框小窗，最接近「悬浮胶囊」。"""
+    """用 Chromium 系浏览器的 --app 模式开一个无边框小窗，最接近「悬浮胶囊」。
+
+    **启动成功不等于窗口出现**：`open -na` 会返回 0 却什么都不弹——配置目录被上次
+    强杀留下的单例锁占住（`SingletonLock` 指向一个已死的 pid）、Chrome 正在升级、
+    企业策略禁用多实例，都会这样。旧实现只要 Popen 没抛异常就 return True，
+    于是「点了图标什么都没发生」被静默吞掉。现在等窗口真的出现，等不到就让
+    调用方回落到默认浏览器。
+    """
+    profile = Path.home() / ".voxos" / "pill-profile"
+    profile.mkdir(parents=True, exist_ok=True)
+    _drop_stale_lock(profile)
     for app in ("Google Chrome", "Microsoft Edge", "Brave Browser", "Chromium"):
         if not Path(f"/Applications/{app}.app").exists():
             continue
-        profile = Path.home() / ".voxos" / "pill-profile"
-        profile.mkdir(parents=True, exist_ok=True)
         try:
             subprocess.Popen(["open", "-na", app, "--args", f"--app={url}",
                               f"--user-data-dir={profile}", "--window-size=420,620",
@@ -754,7 +762,40 @@ def _open_app_window(url: str) -> bool:
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError:
             return False
-        return True
+        if _window_alive(profile):
+            return True
+    return False
+
+
+def _drop_stale_lock(profile: Path) -> None:
+    """清掉指向已死进程的单例锁。
+
+    只在**确认没有进程在用这个配置目录**时才删：反过来的话会同时起两个实例，
+    两个都以为自己独占，配置目录就真的坏了。
+    """
+    if _window_alive(profile, timeout=0.5):
+        return
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        try:
+            (profile / name).unlink()
+        except OSError:
+            pass
+
+
+def _window_alive(profile: Path, timeout: float = 4.0) -> bool:
+    """有进程正在用这个配置目录，才算窗口真的起来了。"""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            found = subprocess.run(["pgrep", "-f", str(profile)],  # noqa: S603,S607
+                                   capture_output=True, timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            return True          # 判断不了的时候不要谎报失败
+        if found.returncode == 0 and found.stdout.strip():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.2)
     return False
 
 

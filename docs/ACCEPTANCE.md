@@ -22,7 +22,7 @@
 | 7 | 角色隔离（OPS 不可写文件） | 必须 | 拒绝并播报「当前角色 OPS 没有…的权限」 | ✅ |
 | 8 | 医疗草稿强制标记 | 必须 | 结果前缀`【未审核草稿】` | ✅ |
 | 9 | 单函数 ≤ 40 行 | 全部 | 最长 **40 行**（`core.dispatch`），贴着预算顶 | ✅ |
-| 10 | 测试全绿 | 100% | **249 项：248 passed + 1 skipped**（约 25s；skip 是缺 sherpa-onnx 时的互补分支） | ✅ |
+| 10 | 测试全绿 | 100% | **251 项：250 passed + 1 skipped**（约 25s；skip 是缺 sherpa-onnx 时的互补分支） | ✅ |
 | 11 | 跨站 / 无令牌请求被拦截 | 必须 | **401 / 403 / 200** 三个码全对，被拒请求一次都没执行 | ✅ |
 | 12 | 上下文注入不阻塞派发 | p95 < 5ms | **0.01ms**（修复前同步调 osascript 为 271ms） | ✅ |
 | 13 | 设置写回保住注释 | 必须 | 改值、保注释、写到 `--config` 指定文件、非法值零写入 | ✅ |
@@ -138,7 +138,7 @@ FRR = FAR = 0 的点，说明后端分得开，差的只是「一个阈值服务
 
 | 模块 | 行数 | 职责 |
 | :--- | ---: | :--- |
-| `main.py` | 923 | CLI 编排 / 守护循环 / 确认闸门 / 监听总开关 |
+| `main.py` | 964 | CLI 编排 / 守护循环 / 确认闸门 / 监听总开关 / 胶囊窗口 |
 | `audio.py` | 654 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
 | `ui.py` | 474 | 状态总线 / SSE / Earcon / 本地接口 |
 | `tools.py` | 425 | 12 个原子工具（含 `open_app` / `tell_time`） |
@@ -151,7 +151,7 @@ FRR = FAR = 0 的点，说明后端分得开，差的只是「一个阈值服务
 | `registry.py` | 191 | 工具契约 / `@tool` 自省 / 注册表 |
 | `models.py` | 158 | 模型下载 / 校验 / 原子替换（`voxos models`） |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **4631** | 12 个工具 / 6 条快通道 / 249 项测试 |
+| **合计** | **4672** | 12 个工具 / 6 条快通道 / 251 项测试 |
 
 - 最长函数 **40 行**（`src/voxos/core.py:dispatch`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；
@@ -226,7 +226,7 @@ cd voxos
 make setup                         # 首次：建 .venv 并装依赖（约 20s）
 python scripts/fetch_models.py     # 首次：CAM++ 与 Silero（约 28MB，必需）
                                    #       默认含 SenseVoice（229MB，可选）；--no-asr 只取声纹与 VAD
-make test                          # 248 passed
+make test                          # 250 passed
 make install-smoke                 # 构建 wheel 并装进临时 venv，验 6 项（源码跑看不到）
 make verify                        # 回归模式：17 通过 + 2 项 GAP
 make verify-release                # 发布门禁：GAP / SKIP 也算不通过
