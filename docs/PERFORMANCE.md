@@ -2,22 +2,25 @@
 
 这一页只回答三个问题：**为什么打开慢、跑起来占多少、要不要换 Rust**。
 所有数字都是本机（Apple Silicon / macOS 26 / Python 3.13 venv）实测，
-复现命令在第 6 节。数字会随机器变化，量级不会。
+复现命令在第 7 节。数字会随机器变化，量级不会。
 
 ## 0. 先给结论
 
 | 问题 | 实测 | 结论 |
 | :--- | :--- | :--- |
-| 服务多久能连 | **0.35–0.68s**（进程内到 HTTP 可连） | 我们的代码不是瓶颈 |
-| 双击到看见胶囊 | **2.91s** | 其中 **1.3s 是 Chrome 冷启动** |
+| 服务多久能连 | **0.39s**（进程内到 HTTP 可连） | 我们的代码不是瓶颈 |
+| 双击到看见胶囊 | **1.21s** | 已经是 WKWebView，Chrome 的 1.3s 没了 |
+| 窗口自己的开销 | **315–349ms**（spawn → 页面首个请求） | 换掉 Chrome 后省下的就是这 1 秒 |
+| 命令行启动 | **120ms**（`voxos --version`，含解释器） | 依赖层面已把 numpy 摘掉，见 §6 |
 | 常驻内存 | **548MB**（含 SenseVoice） | 大头是识别模型，不是 Python |
 | 空闲 CPU | **≈0.3–0.5% 单核**（VAD） | 一直在听，但不烧电 |
 | 识别一句 | **103ms / 3.7s 音频**（RTF 0.03） | 远快于实时 |
 | 一句话（快通道） | **0.4–1.9ms** | 打开应用 / 问时间这一档 |
 | 一句话（大模型） | **3.2–7.2s** | 含工具调用往返，见 §3 |
 
-一句话：「打开半天打不开」有两个真实原因，一个已经修掉（窗口根本起不来），
-一个是 Chrome——**和 Python、和 Rust 都无关**。
+一句话：「打开半天打不开」曾经有三个真实原因——窗口根本起不来、启动器多起
+一次解释器、窗口是 Chrome。前两个 0.1.19 修掉了，第三个本轮换成 WKWebView，
+2.91s → **1.21s**。**和 Python、和 Rust 都无关**。
 
 ## 1. 启动分段
 
@@ -25,10 +28,10 @@
 
 | 阶段 | 累计 | 增量 | 说明 |
 | :--- | ---: | ---: | :--- |
-| python 起来 → import 完成 | 74–108ms | 74–108ms | numpy + 全部模块 |
-| 读配置 + `Runtime` | +1ms | 1ms | 只读 TOML，不碰模型 |
+| python 起来 → import 完成 | 62–85ms | 62–85ms | 不再含 numpy，见 §6 |
+| 读配置 + `Runtime` | +1–11ms | 1–11ms | 只读 TOML，不碰模型 |
 | 声纹后端 CAM++ | 340–620ms | 273–500ms | onnxruntime 建 session，波动最大 |
-| **HTTP 服务可连** | **0.35–0.68s** | 9–22ms | 从这一刻起胶囊就能加载了 |
+| **HTTP 服务可连** | **0.39s** | 9–22ms | 从这一刻起胶囊就能加载了 |
 | 音效 / 热词 | +0ms | 0ms | 已合成过，命中缓存 |
 | 音频管道（VAD + STT） | 1.3–2.1s | 1.0–1.4s | SenseVoice 0.98–1.43s + Silero 11–44ms |
 
@@ -38,13 +41,13 @@
 `open -a VoxOS`（走 App 启动器）端到端：
 
 ```
-服务就绪   1.63s
-窗口出现   2.91s
+守护进程已在跑：窗口进程 1.21s
+守护进程没在跑：多一次 `voxos run` 冷启动（+0.3s），窗口不等模型
 ```
 
-差额去哪了：LaunchServices 拉起 App ~0.2s + 启动器 bash ~0.05s +
-`voxos port` 0.17s + `voxos run` 解释器冷启动 0.30s → 约 1.07s，与 1.63s 相符；
-之后 `voxos pill` 0.3s + **Chrome 冷启动 ~1.3s** → 2.91s。
+窗口那 1.21s 花在哪：LaunchServices 拉起 App ~0.2s + 启动器 bash ~0.05s +
+原生窗口 spawn → 页面首个请求 **315–349ms**（`python scripts/bench.py window`）+
+WKWebView 首帧。**没有 Chrome 的 1.3s**。
 
 ### 1.1 「半天打不开」的真实原因
 
@@ -55,14 +58,19 @@
 现在 `_drop_stale_lock()` 只在确认无人使用该 profile 时才删锁，
 `_window_alive()` 等到窗口真的出现才算成功，起不来就报错而不是假装成功。
 
-**原因二（本轮优化）**：启动器为了读一个端口号，额外起了一次完整解释器
-（`voxos port` 要 import numpy / sherpa / sounddevice）。0.1.19 改成用 `sed`
+**原因二（已修，0.1.19）**：启动器为了读一个端口号，额外起了一次完整解释器
+（`voxos port` 要 import numpy / sherpa / sounddevice）。改成用 `sed`
 只读 `[ui]` 段的 `port`，并把就绪轮询从 250ms 收到 100ms。
 
-**原因三（未做，收益最大）**：胶囊窗口是 **Chrome 的 `--app` 模式**。
+**原因三（本轮修掉，收益最大）**：胶囊窗口原来是 **Chrome 的 `--app` 模式**。
 冷启动一次 Chrome 要 1.2–1.5s、常驻 300MB+，这部分是「打开慢」和
-「常驻内存高」的共同主因。换系统 WebView（WKWebView）能一次解决两件事，
-但那是 macOS 原生代码，见 §5。
+「常驻内存高」的共同主因。本轮换成 `native/VoxOSWindow.swift`——几十行
+Swift + WKWebView，`swiftc -O -whole-module-optimization` 编出 83KB 二进制，
+spawn → 页面首个请求 315–349ms。**踩到的坑记在这里**：WKWebView 默认拒绝
+一切 `http://`，没有 `NSAppTransportSecurity → NSAllowsLocalNetworking` 时
+窗口起得来、进程在、窗口在，**内容永远白屏**——所以那份 plist 是被
+`-sectcreate __TEXT __info_plist` 编进二进制的，不是可有可无的装饰。
+
 
 ## 2. 常驻开销
 
@@ -110,7 +118,7 @@
 | 模型推理 | **onnxruntime**（可选依赖） | SenseVoice / CAM++ / Silero 都在 C++ 里跑 |
 | 音频 I/O | **sounddevice**（PortAudio） | 仅此一处必须的第三方依赖 |
 | 界面 | **单文件 HTML/CSS/JS** | 无框架、无构建步骤，`web/pill.html` 一个文件 |
-| 测试 | **pytest** | 273 项，含文档自洽与单函数行数预算 |
+| 测试 | **pytest** | 含文档自洽与单函数行数预算（数字只写在 ACCEPTANCE.md） |
 | CI | **GitHub Actions** | 三平台构建 wheel，打 tag 自动发 Release |
 
 核心链路（`registry` / `safety` / `core` / `config`）**零第三方依赖**：
@@ -128,19 +136,41 @@
    换成 Rust 要为 arm64 / x86_64 各出一个二进制，还要处理签名、公证、
    以及 TCC 麦克风授权归属——0.1.12 那个「模型配好了但升级后配置变回出厂值」
    的坑，本质就是分发形态带来的，不是语言带来的。
-3. **真正的瓶颈与语言无关。** 「打开慢」的 1.3s 是 Chrome 冷启动，
-   「内存高」的 380MB 是识别模型权重。Rust 一行都省不掉。
+3. **真正的瓶颈与语言无关。** 「打开慢」的 1.3s 曾是 Chrome 冷启动——本轮用
+   几十行 Swift 就换掉了（§1.1 原因三），没写一行 Rust；「内存高」的 380MB
+   是识别模型权重。Rust 一行都省不掉。
 
 **值得做的，按性价比排序：**
 
-1. **把胶囊从 Chrome 换成 WKWebView**（约 1.2s 启动 + 300MB 内存，一次解决）。
-   这是唯一能显著改变「打开半天打不开」的动作，且和语言选择无关。
+1. ~~把胶囊从 Chrome 换成 WKWebView~~ **本轮已完成**（2.91s → 1.21s，
+   省掉 300MB）。结论复述一遍：这件事的收益比「整体重写成 Rust」大得多，
+   而代价只有几十行 Swift。
 2. **`voxos run` 常驻**（登录即启动，双击只开窗口）：服务本来 0.35s 就绪，
    只要进程一直在，第二次双击就是「开个窗口」而已。`scripts/install_launchd.sh` 已具备基础。
 3. 音频管道写成 PyO3 扩展：CPU 从 0.4% 降到 ~0，**不值得做**。
 4. 真要单二进制分发（比如发给别人用）时，再整体考虑 Rust；那时动机是分发，不是性能。
 
-## 6. 怎么复现这些数字
+## 6. 依赖层面：把 numpy 从命令行路径上摘掉
+
+`import numpy` 在本机要 **58ms**，而它是**音频**的依赖，不是「听懂一句话」的依赖。
+`main.py` 原来在顶层 `from . import audio, corpus, dsp`，于是
+`voxos --version`、`voxos text`、`voxos schedule` 这些根本不碰音频的命令，
+每条都要先付这 58ms。
+
+改成「谁用谁在里面导」（`audio` / `corpus` / `dsp` 只在真要出声、真要听声的
+函数里 import）：
+
+| 指标 | 改之前 | 改之后 |
+| :--- | ---: | ---: |
+| `import voxos.main` | 106.6ms | **83.9ms** |
+| `voxos --version` | 160–190ms | **120ms** |
+| 命令行路径上 import numpy | 是 | **否** |
+
+守护进程不受影响（它本来就要音频），但 `voxos text` 这种「问一句就走」的
+用法省掉了一次没人受益的导入。这就是依赖层面能拿到的全部收益——**不是 10 倍，
+是 40ms**。老实写在这里，比编一个「性能提升 300%」有用。
+
+## 7. 怎么复现这些数字
 
 ```bash
 # 启动分段（进程内真实路径，只是不起浏览器）
@@ -152,12 +182,15 @@ python scripts/bench.py mem
 # VAD / 识别成本
 python scripts/bench.py audio
 
-# 端到端（双击到窗口出现）
-voxos stop; pkill -f pill-profile; rm -f ~/.voxos/pill-profile/Singleton*
-open -a VoxOS
+# 原生窗口自己的开销（spawn → 页面首个请求）
+python scripts/bench.py window
 
-# 解释器冷启动本身
+# 端到端（双击到窗口进程出现）
+voxos stop; pkill -f VoxOSWindow; open -a VoxOS
+
+# 解释器冷启动本身 + 导入明细
 /usr/bin/time -p voxos --version
+python -X importtime -c "import voxos.main" 2>&1 | grep voxos.main
 ```
 
 > 沙箱里 `ps` / `top` 会被拦，所以常驻内存用进程自己的 `ru_maxrss`，

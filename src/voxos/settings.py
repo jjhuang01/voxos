@@ -105,6 +105,14 @@ SCHEMA: tuple[Field, ...] = (
           "开启时不真的派发 tmux / IDE / 浏览器，只打印将执行的命令。"),
     Field("workspace.confirm_timeout_s", "确认超时", "int", "workspace",
           "危险操作等待确认的秒数，超时按拒绝处理。", 3, 60, 1, unit="s"),
+    Field("workspace.sandbox", "命令沙箱", "enum", "workspace",
+          "read-only 一条命令都不跑；workspace-write 只允许写工作区和临时目录（默认）；"
+          "danger-full-access 不限制。由 macOS 自带的 seatbelt 执行，不靠字符串校验。",
+          options=("read-only", "workspace-write", "danger-full-access")),
+    Field("workspace.network", "沙箱允许联网", "bool", "workspace",
+          "默认关闭。命令在沙箱里跑时不能往外发请求，git push / curl 会被拒绝。"),
+    Field("workspace.command_timeout_s", "命令超时", "int", "workspace",
+          "单条 shell 命令最多跑多久，超时即放弃。", 5, 600, 5, unit="s"),
 
     Field("ui.earcons", "提示音", "bool", "ui", "开始与结束时各一声轻响。"),
     Field("ui.speak", "语音播报", "bool", "ui", "完成后用系统 TTS 念一遍结果。"),

@@ -65,11 +65,31 @@ cat > "$BUILD/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key><false/>
   <key>NSHighResolutionCapable</key><true/>
   <!-- 没有这一条，App 一碰麦克风就被系统杀掉，而且不给任何提示 -->
+  <!-- WKWebView 默认按 ATS 拒绝 http://，而界面就在 http://127.0.0.1 上。
+       少了这条：窗口起得来、但永远白屏——最难查的那种失败 -->
+  <key>NSAppTransportSecurity</key>
+  <dict><key>NSAllowsLocalNetworking</key><true/></dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>VoxOS 需要麦克风来听你说话：声纹比对与语音识别都在本机完成，音频不上传。</string>
 </dict>
 </plist>
 PLIST
+
+# ---- 2.5 原生胶囊窗口：Swift + WKWebView ---------------------------------
+# 为什么不用 Chrome 的 --app：冷启动 1.2–1.5s、常驻 300MB+，而这两件事正是
+# 「打开半天打不开」和「内存高」的主因。原生窗口 ~0.32s、~60MB（实测见
+# docs/PERFORMANCE.md §1）。没有 swiftc 就跳过，启动器会自动退回 Chrome。
+step "编译原生窗口（Swift / WKWebView）"
+if command -v swiftc >/dev/null 2>&1; then
+    swiftc -O -whole-module-optimization -o "$BUILD/Contents/MacOS/VoxOSWindow" \
+        "$ROOT/native/VoxOSWindow.swift" \
+        -framework Cocoa -framework WebKit \
+        -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+        -Xlinker "$ROOT/native/ats.plist" \
+        || die "Swift 编译失败（没有命令行工具？xcode-select --install）"
+else
+    warn "没有 swiftc，跳过原生窗口：启动器会退回 Chrome（慢 1 秒、多 300MB）"
+fi
 
 # ---- 3. 启动器：起守护进程 → 开胶囊 → 前台守着 -------------------------
 cat > "$BUILD/Contents/MacOS/$APP_NAME" <<LAUNCHER
@@ -99,15 +119,43 @@ mkdir -p "\$(dirname "\$LOG")"
 
 alive() { curl -fsS --max-time 1 "http://127.0.0.1:\$PORT/" 2>/dev/null | grep -q "$APP_NAME"; }
 
+# 原生窗口就在同目录（Contents/MacOS/VoxOSWindow）。没有它才退回 Chrome：
+# 源码布局 / 老 bundle 里可能还没有这个二进制。
+DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+WINDOW="\$DIR/VoxOSWindow"
+WINDOW_PID=""
+
+open_window() {
+    if [ -x "\$WINDOW" ]; then
+        "\$WINDOW" --url "http://127.0.0.1:\$PORT/" >/dev/null 2>&1 &
+        WINDOW_PID=\$!
+    else
+        "\$BIN" pill
+    fi
+}
+
+if [ -n "\$WINDOW" ] && [ -x "\$WINDOW" ] && pgrep -f "\$WINDOW" >/dev/null 2>&1; then
+    # 窗口已经在屏幕上了（右上角，可能被别的窗口挡住）。再开一个会出现两个胶囊
+    # 抢同一条状态流——用户看到的是「点了没反应 + 两个一样的窗口」。
+    exit 0
+fi
+
 if alive; then
-    "\$BIN" pill
+    # 服务已经在跑：双击 = 开个窗口，0.3 秒的事。
+    open_window
+    [ -n "\$WINDOW_PID" ] && wait "\$WINDOW_PID"
     exit 0
 fi
 
 echo "=== \$(date '+%F %T') 启动 VoxOS ===" >>"\$LOG"
 "\$BIN" run >>"\$LOG" 2>&1 &
 CHILD=\$!
-trap 'kill "\$CHILD" 2>/dev/null' EXIT INT TERM
+trap 'kill "\$CHILD" \${WINDOW_PID:-} 2>/dev/null' EXIT INT TERM
+
+# 窗口先出来，内容后到：原生窗口自己会重试连服务，并先画一行「正在启动…」。
+# 用户感知的是「点了就有东西出现」，不是「数据到了」——这两件事差 0.5 秒，
+# 而 0.5 秒就是「秒开」和「半天打不开」的分界。
+open_window
 
 # 100ms 一探：服务本身 0.35s 就绪，250ms 的步长等于白等最多 0.25s
 for _ in \$(seq 1 200); do
@@ -123,8 +171,12 @@ if ! alive; then
     exit 1
 fi
 
-"\$BIN" pill
-wait "\$CHILD"
+if [ -n "\$WINDOW_PID" ]; then
+    # 关窗口 = 用完即走：窗口进程退出后，trap 会把守护进程一起带走。
+    wait "\$WINDOW_PID"
+else
+    wait "\$CHILD"
+fi
 LAUNCHER
 chmod +x "$BUILD/Contents/MacOS/$APP_NAME"
 

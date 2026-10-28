@@ -111,13 +111,17 @@ def test_big_change_does_not_steal_small_edits():
 
 
 def test_unrecognized_speech_says_the_same_thing_everywhere(cfg):
-    """接口返回与历史记录不能各说各话（曾经一处「(无动作)」一处「没听懂」）。"""
+    """接口返回与历史记录不能各说各话（曾经一处「(无动作)」一处「没听懂」）。
+
+    并且这句话必须点出**下一步**：没配大模型时说「还没学会」，等于把系统的
+    配置问题说成用户的表达问题——他会换个说法再失败一次。
+    """
     from voxos import main, ui
 
     runtime = main.Runtime(cfg, ui.StatusBus())
     reply = main._run_text(runtime, "今天天气不错")
-    assert reply == main.NO_ACTION
-    assert runtime.recent[0]["reply"] == main.NO_ACTION
+    assert reply == runtime.recent[0]["reply"]
+    assert "大模型" in reply and "voxos llm" in reply
 
 
 @pytest.mark.parametrize("text", ["你好啊", "你好", "在吗", "嗨～", "谢谢啦", "你是谁呀"])

@@ -323,6 +323,12 @@ def _label(name: str) -> str:
         "search_notes": "查笔记…",
         "read_file_head": "读文件…",
         "open_in_ide": "打开 IDE…",
+        "open_path": "打开…",
+        "run_command": "执行命令…",
+        "send_message": "发消息…",
+        "schedule_task": "排定时…",
+        "list_schedules": "看定时…",
+        "cancel_schedule": "取消定时…",
     }.get(name, f"{name}…")
 
 

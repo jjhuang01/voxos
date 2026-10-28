@@ -14,6 +14,24 @@
 它说：日志已记录
 ```
 
+### 现在能做什么
+
+18 个工具，**都是真的会执行**，不是「已为您准备好」：
+
+| 你说 | 它做 | 风险 |
+| :--- | :--- | :--- |
+| 打开微信 / 打开下载文件夹 | 启动应用；用系统默认程序打开文件或文件夹 | 绿 |
+| 执行命令 `git status` | 在本机跑 shell，**关在 macOS 沙箱里**（只允许写工作区与临时目录，默认断网） | 黄 |
+| 给张三发消息说我晚点到 | 在微信 / 企业微信 / 信息里真的发出去（要辅助功能权限，缺权限时告诉你去哪个开关） | 需确认 |
+| 明天九点提醒我给张三发消息 | 落一条定时任务，进程重启不丢；`daily` = 每天同一时刻 | 需确认 |
+| 看看定时任务 / 取消定时任务 | 列出、按关键词或全部取消 | 绿 / 黄 |
+| 记一条日志 / 几点了 / 查一下负载 | 写 Markdown 日志、答时间、只读巡检 | 绿 |
+
+沙箱三档抄的是 codex 的 `sandbox_mode`（`read-only` / `workspace-write` /
+`danger-full-access`），执行器是 macOS 自带的 seatbelt，不是「命令里有没有
+`rm -rf`」这种字符串判断。发消息那件事只能模拟按键（微信没有 AppleScript
+字典），这条路是抄社区的，代价（需要辅助功能权限、会抢焦点）写在返回值里。
+
 ## 安装（不用源码）
 
 **语言与产物**：Python 3.11+，打出来是 `py3-none-any` 的纯 Python wheel——
@@ -99,7 +117,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 277 项测试
+make test                                    # 304 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
@@ -239,6 +257,8 @@ voxos/
 ├── DESIGN_SYSTEM.md        # 胶囊四态、Earcon、声学补偿、无障碍
 ├── TODO_ROADMAP.md         # 分阶段验收清单（含真实完成状态）
 ├── docs/ACCEPTANCE.md      # 实测验收报告（数字来自 scripts/verify.py）
+├── docs/PERFORMANCE.md     # 启动/内存/依赖的实测数字与复现命令
+├── docs/PRODUCT.md         # 产品决定与它们的代价（乔布斯/张小龙/Apple HIG）
 ├── config/
 │   ├── settings.toml       # 全局配置（TOML，标准库解析）
 │   ├── redlines.toml       # 红线正则 + 工具风险等级 + 角色白名单
@@ -249,14 +269,17 @@ voxos/
 │   ├── safety.py           # 安全边界：红线网关 / 快照回滚 / 单飞执行器 / 审计
 │   ├── core.py             # 路由：快慢双通道 + LLM 客户端（网关信封 / 渠道私有字段）
 │   ├── prompts.py          # 提示词系统：三层来源 / 角色叠加 / 按 mtime 热更新
-│   ├── tools.py            # 12 个原子工具，每个 ≤ 15 行
+│   ├── tools.py            # 18 个原子工具，每个 ≤ 40 行
+│   ├── sandbox.py          # 命令沙箱：seatbelt 三档（抄 codex 的 sandbox_mode）
+│   ├── scheduler.py        # 定时任务：落 JSON + 5 秒轮询，存那句话本身
+│   ├── messaging.py        # 发消息：微信没有 AppleScript 字典，只能生成按键脚本
 │   ├── dsp.py              # 纯函数：AGC / 高架滤波 / VAD / 端点 / 回声门 / 声纹
 │   ├── audio.py            # 设备源、自愈重连、Silero/Sherpa 适配、STT、管道
 │   ├── ui.py               # 状态总线 + SSE 服务 + Earcon 合成
 │   ├── corpus.py           # 验收语料生成（say 合成 / 合成音降级）
 │   ├── config.py           # TOML 加载 + 环境变量覆盖
 │   ├── settings.py         # 设置层：字段模式 / 校验 / 保留注释的写回 / 撤销
-│   ├── main.py             # CLI：text / demo / run / enroll / serve / tools / doctor
+│   ├── main.py             # CLI：text / demo / run / enroll / serve / tools / schedule / doctor
 │   └── __init__.py
 ├── web/pill.html           # 36px 胶囊 + 展开式控制面板（状态/最近/设置）
 ├── scripts/
@@ -269,7 +292,7 @@ voxos/
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 277 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/文档自洽
+└── tests/                  # 304 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/命令沙箱/定时/文档自洽
 ```
 
 ## 四条关键设计决策

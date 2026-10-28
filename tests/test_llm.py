@@ -99,7 +99,8 @@ def test_missing_key_skips_the_llm_entirely(cfg, executor, monkeypatch):
 
     monkeypatch.setattr(core, "chat", explode)
     result = core.dispatch("帮我订一张去上海的机票", cfg=armed, executor=executor)
-    assert result.route == "ignore" and result.reply == core.NO_ACTION
+    assert result.route == "ignore"
+    assert "缺 API Key" in result.reply          # 说清缺什么，而不是「还没学会」
 
 
 def test_key_file_is_read_when_config_is_silent(tmp_path):

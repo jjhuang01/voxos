@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  原生胶囊窗口的 Info.plist。它不作为一个 .app 分发，而是被 `-sectcreate`
+  直接嵌进二进制（见 scripts/build_app.sh）。
+
+  为什么必须有这一条：WKWebView 默认按 ATS 拒绝一切 http://，而我们的界面
+  就在 http://127.0.0.1:8766 上。没有 NSAllowsLocalNetworking，窗口会起来、
+  但永远白屏——最难查的那种失败（进程在、窗口在、内容没有）。
+  NSAllowsLocalNetworking 只放开本地回环，不放开公网 http。
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>com.voxos.window</string>
+    <key>CFBundleName</key><string>VoxOSWindow</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key><true/>
+    </dict>
+</dict>
+</plist>

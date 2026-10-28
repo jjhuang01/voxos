@@ -6,6 +6,77 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 
 格式约定：`## [x.y.z] - YYYY-MM-DD`，一个版本一段，从新到旧。
 
+## [0.1.20] - 2026-10-29
+
+这一版解决三件事：**打开慢**、**只能听懂不会动手**、**「听不懂」其实没告诉用户缺什么**。
+用户的原话：「我对性能有极致要求……我希望有终端命令能力，打开文件能力，写入内容能力，
+有类似 Computer use 能力，比如我让打开微信并发送信息给某人，定时给某人发信息……
+不要自己虚构，猜测，而是直接抄作业，能抄先抄」。
+
+### 新增
+
+- **胶囊窗口换成原生 Swift + WKWebView**（`native/VoxOSWindow.swift`，79 行）。
+  双击到窗口出现 **2.91s → 1.21s**，少 300MB 内存。`swiftc -O -whole-module-optimization`
+  编出 83KB 二进制，`NSApplication.setActivationPolicy(.accessory)` 不占 Dock，
+  `canJoinAllSpaces` 跟着你换桌面，关窗即退、不留看不见的常驻。
+  **踩到的坑**：WKWebView 默认拒绝一切 `http://`，没有
+  `NSAppTransportSecurity → NSAllowsLocalNetworking` 时窗口起得来、进程在、**内容永远白屏**——
+  所以那份 plist 用 `-sectcreate __TEXT __info_plist` 编进二进制，不是装饰。
+- **命令沙箱（`src/voxos/sandbox.py`）**，三档对齐 codex 的 `sandbox_mode`：
+  `read-only` / `workspace-write`（默认，只能写工作区与临时目录，**默认断网**）/
+  `danger-full-access`。执行器是 macOS 自带的 seatbelt，**不是**「命令里有没有 `rm -rf`」——
+  shell 是一棵树，`$IFS`、变量拼接、`sh -c`、`python -c` 绕过字符串匹配的方式无穷。
+  沙箱应用不起来时**照跑但说出来**（返回文本第一句就是「沙箱没能应用」），
+  不静默降级：用户以为有沙箱、实际没有，比一开始就说清楚危险得多。
+- **`run_command`**：真的执行 shell。配置拼错（`workspace_write` / `disabled`）一律按
+  `read-only` 处理——拼错不能等于「全开」。
+- **`open_path`**：用系统默认程序打开文件/文件夹，或在访达里定位。这是「打开文件」
+  和「在 IDE 里打开」之间的那个缺口。
+- **`send_message`（微信 / 企业微信 / 信息）**。微信 Mac 版**没有 AppleScript 字典**
+  （`sdef` 返回空），拿不到 `send message to buddy`，所以只能 System Events 模拟按键：
+  激活 → ⌘⇧F 搜索 → 输入联系人 → 回车进会话 → 输入正文 → 回车。
+  这条路是抄社区 wechat-auto-sender 那类脚本的，代价也照实说：
+  缺权限时返回「系统设置 → 隐私与安全性 → 辅助功能」，而不是一句「已发送」。
+  （`-10004 权限违例` 是中文系统上的原话，一并认。）
+- **定时任务（`src/voxos/scheduler.py` + `schedule_task` / `list_schedules` /
+  `cancel_schedule` / `voxos schedule`）**。不用 cron / launchd（要写系统配置、要权限、
+  改完要重载），也不用 `threading.Timer`（进程一重启就没了）。落一个 JSON + 5 秒轮询，
+  删掉文件等于清空。存的是**那句话本身**而不是「工具名 + 参数」：到点重新走一遍派发，
+  路由、提示词、新加的工具全都自动生效。确认只认「创建任务时点过头」——
+  否则一次「每天早上发消息」会在半夜弹一张没人看的确认卡，超时按拒绝，
+  用户永远不知道它没发出去。
+
+### 修复
+
+- **`workspace.dry_run` 默认改成 `false`**。出厂默认 `true` 意味着第一次双击后
+  说「打开微信」只得到一句「（dry-run）会打开微信」——演示模式是给开发者的，
+  不该是给用户的默认值。
+- **「听不懂」不再把系统问题说成用户问题**。正则快通道只认十来种说法，复杂句子全靠
+  慢通道；没配大模型时，用户说一句复杂的话只会听到「还没学会这句」，然后换个说法再失败一次。
+  现在这句话是：能力清单 **+** 「复杂句子要先接大模型（现在缺 API Key）：voxos llm --set-key」。
+- **`rm -rf <目录>` 现在会先问一句**。原来的不可逆词表只认中文（删掉/清空/格式化），
+  有了 shell 之后 `rm -rf build` 是一条**不经过任何确认**的删除。词表补上
+  `rm -r/-rf/-f` 与 `git clean -f`。
+- **`parse_at` 的两个坑**：`09:30` 原来会算出「今年 1 月 1 日 09:30」（拿 `%H:%M`
+  解析出来的月日是 1 月 1 日）然后永远判成过去；`10-29 09:00` 在 Python 3.13 上会触发
+  「缺年份」弃用警告，3.15 起直接报错。前者改成补今天日期并顺延到明天，后者补当年再解析。
+
+### 性能
+
+- **`import numpy` 从命令行路径上摘掉**。`main.py` 原来在顶层导入 `audio` / `corpus` / `dsp`，
+  于是 `voxos --version`、`voxos text`、`voxos schedule` 这些根本不碰音频的命令，
+  每条都要先付 58ms 的 numpy。改成谁用谁在里面导：
+  `import voxos.main` 106.6ms → **83.9ms**，`voxos --version` 160–190ms → **120ms**。
+  老实说：这一项的全部收益是 40ms，不是 10 倍。
+
+### 文档
+
+- `docs/PERFORMANCE.md` 补 §6「依赖层面」与窗口实测；`docs/PRODUCT.md` 新增，
+  把这一轮的产品决定连同**代价**逐条写下来（含还没做的诚实清单）。
+- 新增测试：命令沙箱档位与失败降级、`run_command`、`open_path`、AppleScript 转义、
+  权限错误映射、定时任务的解析/持久化/顺延/取消、调度线程真的会跑、
+  以及「每个注册的工具都必须在 `redlines.toml` 登记风险等级」（双向，删了工具忘了删登记也会红）。
+
 ## [0.1.19] - 2026-10-29
 
 这一版接上了大模型，并把「提示词」从代码里搬了出来。用户的原话：

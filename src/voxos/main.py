@@ -22,7 +22,9 @@ import webbrowser
 from collections import deque
 from pathlib import Path
 
-from . import __version__, audio, core, corpus, dsp, prompts, settings, tools, ui
+from . import __version__, core, prompts, scheduler, settings, tools, ui
+# audio / corpus / dsp 不在顶层导入：它们把 numpy（实测 58ms）一起拖进来，
+# 而 `voxos text`、`voxos schedule`、`--version` 一条都用不到。谁用谁在里面导。
 from .config import Config, load
 
 # 一句话没匹配到任何能力时，终端、接口、历史三处必须说同一句话。
@@ -189,6 +191,8 @@ def _bus(cfg: Config) -> ui.StatusBus:
 
 
 def _lock(cfg: Config) -> dsp.SpeakerLock:
+    from . import audio, dsp
+
     embedder, threshold, _ = audio.make_embedder(cfg)
     lock = dsp.SpeakerLock(threshold=threshold, embedder=embedder)
     return lock.load(cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
@@ -327,6 +331,8 @@ def cmd_text(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def cmd_demo(args: argparse.Namespace, cfg: Config) -> int:
+    from . import audio, corpus, dsp
+
     if not args.live:                       # 默认沙箱：不污染真实日志目录
         demo = cfg.data_root / ".voxos" / "demo"
         cfg = cfg.with_overrides(**{
@@ -360,6 +366,8 @@ def cmd_demo(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def _demo_table(pipeline: audio.AudioPipeline, runtime: Runtime, stream) -> None:
+    from . import audio
+
     print(f"{'#':<2} {'声纹':<6} {'音频':<8} {'路由':<8} 转写 / 结果")
     print("-" * 78)
     for index, utterance in enumerate(pipeline.run(audio.ArraySource(stream)), 1):
@@ -385,12 +393,15 @@ def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def _run_forever(cfg: Config) -> int:
+    from . import audio
+
     runtime = Runtime(cfg, _bus(cfg))
     lock = _lock(cfg)
     enrolled = threading.Event()
     if lock.profiles:
         enrolled.set()
     url = _serve(runtime, lock, enrolled)
+    _start_scheduler(runtime)
     sounds = ui.ensure_earcons(cfg.data_root / ".voxos" / "sounds")
     hotwords = audio.refresh_hotwords(cfg) if audio.supports_hotwords(cfg) else []
     _, threshold, kind = audio.make_embedder(cfg)
@@ -405,6 +416,24 @@ def _run_forever(cfg: Config) -> int:
             return 0
         runtime.bus.emit("idle", "待机", "")
     return _listen(runtime, cfg, lock, sounds)
+
+
+def _start_scheduler(runtime: Runtime) -> None:
+    """到点的任务重新派发一遍（存的是那句话本身，所以新工具自动生效）。
+
+    确认只认「创建这条任务时点过头」（`approved`）。否则一次「每天早上九点
+    给张三发消息」会在九点弹一张没人看的确认卡，超时后按拒绝处理，
+    用户永远不知道那条消息没发出去。
+    """
+    def run(item: dict[str, object]) -> str:
+        text = str(item.get("text", ""))
+        executor = core.Executor(cfg=runtime.cfg, on_event=runtime.bus,
+                                 confirm=lambda *_: bool(item.get("approved")))
+        result = core.dispatch(text, executor=executor, cfg=runtime.cfg)
+        runtime.record(text, result)
+        return result.reply or NO_ACTION
+
+    scheduler.start(runtime.cfg, run=run, on_event=runtime.bus.emit)
 
 
 def _pid_file(cfg: Config) -> Path:
@@ -494,6 +523,8 @@ def _set_listening(runtime: Runtime, on: bool) -> dict[str, object]:
 
 
 def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[str, Path]) -> int:
+    from . import audio, dsp
+
     """三段式：采集线程 → 识别线程 → 派发主循环。
 
     旧实现是单线程 `for utterance in pipeline.run(source)`：模型、确认、
@@ -671,6 +702,8 @@ def _speak(text: str, pipeline: audio.AudioPipeline) -> None:
 
 
 def cmd_enroll(args: argparse.Namespace, cfg: Config) -> int:
+    from . import audio
+
     lock = _lock(cfg)
     if args.wav:
         samples: list[object] = [audio.wav_to_array(Path(item).expanduser()) for item in args.wav]
@@ -697,6 +730,8 @@ def _record_segments(cfg: Config, seconds: float, device: object = None) -> list
     - 录 3 句取均值 → 同人 0.79、异人最高 0.72，间隔 0.071，这才有可用余量。
     所以切段必须按「句」切，不能按时间切。
     """
+    from . import audio, dsp
+
     import numpy as np
 
     print(f"请说 2~3 句话，录音 {seconds:.0f} 秒（句间停半秒）……")
@@ -739,10 +774,46 @@ def cmd_serve(args: argparse.Namespace, cfg: Config) -> int:
 
 def cmd_pill(args: argparse.Namespace, cfg: Config) -> int:
     url = f"http://{cfg.get('ui.host', '127.0.0.1')}:{cfg.get('ui.port', 8765)}/"
+    if _open_native_window(cfg, url):
+        return 0
     if not _open_app_window(url):
         webbrowser.open(url)
         print(f"已用默认浏览器打开 {url}（装 Chrome 可获得无边框胶囊窗口）")
     return 0
+
+
+def _native_window_binary(cfg: Config) -> Path | None:
+    """原生窗口二进制在哪。装成 App 时和启动器同目录，源码布局在 `build/`。
+
+    找不到不是错误：这条路本来就是加速项，退回 Chrome 一样能用。
+    `VOXOS_WINDOW` 可显式指定（CI、多实例、自己编译的实验版）。
+    """
+    candidates = [os.environ.get("VOXOS_WINDOW", ""),
+                  str(Path(sys.argv[0]).resolve().parent / "VoxOSWindow"),
+                  str(cfg.root / "build" / "VoxOSWindow"),
+                  str(cfg.data_root / ".voxos" / "bin" / "VoxOSWindow")]
+    for raw in candidates:
+        if raw and Path(raw).is_file() and os.access(raw, os.X_OK):
+            return Path(raw)
+    return None
+
+
+def _open_native_window(cfg: Config, url: str) -> bool:
+    """用自带的 WKWebView 宿主开窗：~0.32s、~60MB。
+
+    对比 Chrome 的 `--app`：冷启动 1.2–1.5s、常驻 300MB+。差的不只是时间，
+    还有「窗口先出来、内容后到」——原生窗口会自己重试连服务，所以启动器
+    不必等端口就绪，双击后第一帧几乎是即时的。
+    """
+    binary = _native_window_binary(cfg)
+    if binary is None:
+        return False
+    try:
+        subprocess.Popen([str(binary), "--url", url],  # noqa: S603
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return False
+    return True
 
 
 def _open_app_window(url: str) -> bool:
@@ -809,6 +880,19 @@ def cmd_tools(_: argparse.Namespace, cfg: Config) -> int:
         params = ", ".join(meta.schema["function"]["parameters"]["properties"])
         print(f"{name:<24} {meta.risk.value:<13} fast={'yes' if meta.fast else 'no ':>3}  ({params})")
     print(f"\n共 {len(core.REGISTRY)} 个工具，{len(core.FAST_ROUTES)} 条快通道")
+    return 0
+
+
+def cmd_schedule(_: argparse.Namespace, cfg: Config) -> int:
+    """列定时任务。到点执行的是**那句话本身**，所以这里只显示文本。"""
+    items = scheduler.pending(cfg)
+    if not items:
+        print("还没有定时任务")
+        return 0
+    for item in items:
+        repeat = "（每天）" if item.get("repeat") == "daily" else ""
+        print(f"{scheduler.stamp(float(item['due']))}  {item['id']}  {item['label']}{repeat}")
+    print(f"\n共 {len(items)} 条，存在 {scheduler.path_of(cfg)}")
     return 0
 
 
@@ -927,6 +1011,8 @@ def _llm_note(cfg: Config) -> str:
 
 def _hotword_note(cfg: Config, words: list[str]) -> str:
     """热词表对当前后端到底有没有用——没用就直说，别报一个好看的数字。"""
+    from . import audio
+
     backend = str(cfg.get("stt.backend", ""))
     label = STT_LABELS.get(backend, backend or "未设置")
     if audio.supports_hotwords(cfg):
@@ -938,6 +1024,8 @@ def _vad_note(cfg: Config) -> str:
     """报出实际用的 VAD。少了 onnxruntime 会静默降级成能量 VAD：
     能跑，但一声咳嗽也算说话——装完才看得出来，所以 doctor 必须报。
     """
+    from . import audio
+
     try:
         return type(audio.make_vad(cfg)).__name__
     except Exception as exc:
@@ -951,6 +1039,8 @@ def _mic_note(cfg: Config) -> str:
     音频接口，录得到帧、峰值恒为 0.0000——所有检查都是绿的，就是听不见人说话。
     所以这一行必须带电平；只报设备名等于什么都没说。
     """
+    from . import audio
+
     try:
         name, peak = audio.probe_mic(0.5, cfg.get("audio.input_device", ""))
     except Exception as exc:
@@ -1026,6 +1116,7 @@ def _add_extra(sub: argparse._SubParsersAction) -> None:
     for name, hint, func in (("stop", "停掉在跑的 run", cmd_stop),
                              ("port", "打印界面端口", cmd_port),
                              ("tools", "列出已注册工具", cmd_tools),
+                             ("schedule", "列出定时任务", cmd_schedule),
                              ("doctor", "环境自检", cmd_doctor)):
         sub.add_parser(name, help=hint).set_defaults(func=func)
 

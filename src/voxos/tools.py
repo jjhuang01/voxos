@@ -1,4 +1,4 @@
-"""业务插件层：每个能力都是一个带 `@tool` 的普通函数，不超过 15 行。
+"""业务插件层：每个能力都是一个带 `@tool` 的普通函数。
 
 新增能力只需在此追加一个函数（见 CODING_PHILOSOPHY.md §3「函数即插件」），
 不需要改 core.py、不需要手写 JSON Schema、不需要改 Prompt。
@@ -10,19 +10,22 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from . import messaging, sandbox, scheduler
 from .config import Config, load
 from .core import REGISTRY, restore_latest, tool
 
 __all__ = ["RT", "configure", "append_structured_log", "dispatch_code_session",
            "inspect_server_ops", "write_code", "rollback_file", "read_file_head",
            "open_in_ide", "search_notes", "list_tools", "delegate_to_coding_cli",
-           "open_app", "tell_time"]
+           "open_app", "tell_time", "run_command", "open_path", "send_message",
+           "schedule_task", "list_schedules", "cancel_schedule"]
 
 
 @dataclass
@@ -423,3 +426,147 @@ def tell_time(what: str = "几点") -> str:
     if "号" in what:
         return f"今天是 {now.year} 年 {now.month} 月 {now.day} 日"
     return f"现在是 {now.hour} 点 {now.minute:02d} 分"
+
+
+# ------------------------------------------------------- 命令 / 文件 / 消息
+# 这一组是「能真的替你动手」的部分：跑命令、打开文件、发消息、定时。
+# 边界不靠自己写正则判断（shell 是一棵树，绕法无穷），而是交给 macOS 自带的
+# seatbelt；发消息这种只能模拟按键的事，照抄社区跑通的做法并如实说清代价。
+
+@tool(fast=r"^(?:执行|运行|跑)(?:一下)?(?:终端)?命令[：:\s]+(.+)$", risk="yellow")
+def run_command(command: str, timeout: int = 0) -> str:
+    """在本机执行一条 shell 命令（默认关在 macOS 沙箱里，只能写工作区和临时目录）。
+
+    Args:
+        command: 要执行的命令，如 `git status`、`ls -la ~/Projects`
+        timeout: 超时秒数，0 表示用配置里的 workspace.command_timeout_s
+    """
+    limit = _timeout(RT.cfg, timeout)
+    if sandbox.mode(RT.cfg) == "read-only":
+        return "当前是只读沙箱（workspace.sandbox = read-only），一条命令都不执行"
+    try:
+        done, note = _shell(RT.cfg, command, limit)
+    except subprocess.TimeoutExpired:
+        return f"{limit} 秒没跑完，已放弃：{command}"
+    except OSError as exc:
+        return f"命令起不来：{exc}"
+    return note + _brief(done)
+
+
+def _timeout(cfg: Config, raw: int) -> int:
+    """超时上限：调用方给的优先，但都要落在 5~600 秒之间。"""
+    default = int(cfg.get("workspace.command_timeout_s", 60))
+    return max(5, min(int(raw) or default, 600))
+
+
+def _shell(cfg: Config, command: str, limit: int) -> tuple[subprocess.CompletedProcess, str]:
+    """跑一次；沙箱没起来就退回裸跑，并把这件事写进返回文本。
+
+    不静默降级：用户以为有沙箱、实际没有，比一开始就说清楚危险得多。
+    """
+    argv, profile = sandbox.wrap(cfg, ["/bin/sh", "-lc", command])
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=limit)
+    finally:
+        if profile is not None:
+            profile.unlink(missing_ok=True)
+    if done.returncode == 0 or not sandbox.failed_by_sandbox(done.stderr):
+        return done, ""
+    bare = subprocess.run(["/bin/sh", "-lc", command], capture_output=True, text=True, timeout=limit)
+    return bare, "（沙箱没能应用，这次是直接执行的）"
+
+
+def _brief(done: subprocess.CompletedProcess) -> str:
+    """命令结果说人话：成功回正文，失败带退出码与 stderr 首行。"""
+    out = (done.stdout or "").strip()
+    if len(out) > 2000:
+        out = out[:2000] + "\n…（输出太长，已截断）"
+    if done.returncode == 0:
+        return out or "（命令没有输出）"
+    err = (done.stderr or "").strip()[:500]
+    return f"退出码 {done.returncode}：{out or '（无输出）'}" + (f"\n{err}" if err else "")
+
+
+@tool(fast=r"^(?:帮我|请)?(?:打开|显示|定位)(?:一下)?(?:这个)?(?:文件|文件夹|目录|路径)[：:\s]+(.+)$",
+      risk="green")
+def open_path(path: str, reveal: bool = False) -> str:
+    """用系统默认程序打开文件/文件夹，或在访达里定位它（只读，不改任何东西）。
+
+    Args:
+        path: 文件或文件夹路径，支持 ~ 展开
+        reveal: True 时在访达里选中它，而不是打开
+    """
+    target = Path(os.path.expanduser(str(path).strip().strip("\"'"))).resolve()
+    if not target.exists():
+        return f"路径不存在：{target}"
+    if RT.dry_run:
+        return f"（dry-run）将执行：open {'-R ' if reveal else ''}{target}"
+    args = ["open", "-R", str(target)] if reveal else ["open", str(target)]
+    if subprocess.run(args, capture_output=True).returncode != 0:
+        return f"系统没能打开 {target.name}"
+    return f"已{'在访达中定位' if reveal else '打开'} {target.name}"
+
+
+@tool(risk="red_confirm")
+def send_message(contact: str, text: str, app: str = "微信") -> str:
+    """在微信 / 企业微信 / 信息里给某个联系人发一条消息（需要辅助功能权限）。
+
+    Args:
+        contact: 联系人备注名，如「张三」
+        text: 要发出去的内容
+        app: 微信 / 企业微信 / 信息
+    """
+    target = messaging.app_of(app)
+    if target is None:
+        return f"还不支持在「{app}」里发消息，现在能发的是：微信、企业微信、信息"
+    if RT.dry_run:
+        return f"（dry-run）将在 {target[0]} 给「{contact}」发送：{text}"
+    if not shutil.which("osascript"):
+        return "这台机器没有 osascript，没法模拟按键"
+    done = subprocess.run(["osascript", "-e", messaging.script(*target, contact, text)],
+                          capture_output=True, text=True, timeout=40)
+    if done.returncode != 0:
+        return f"没能发送：{messaging.permission_hint(done.stderr) or (done.stderr or '').strip()[:160]}"
+    return f"已在{app}给「{contact}」发出：{text}"
+
+
+@tool(risk="red_confirm")
+def schedule_task(text: str, at: str, repeat: str = "", label: str = "") -> str:
+    """在指定时间重新执行一句话，进程重启也不丢；`repeat=daily` 每天同一时刻。
+
+    Args:
+        text: 到点要执行的那句话，如「给张三发消息说我晚点到」
+        at: `09:30`（今天或明天）、`2026-10-29 09:00`、或 `+600`（600 秒后）
+        repeat: 留空只执行一次；daily 每天同一时刻
+        label: 一句话说明，便于以后查看与取消
+    """
+    when = scheduler.parse_at(at)
+    if not when:
+        return f"看不懂这个时间：{at}（可以写「09:30」或「2026-10-29 09:00」）"
+    if when <= time.time() + 1:
+        return f"这个时间已经过去了：{at}"
+    # approved=True 是因为**这次调用本身**是 red_confirm：用户刚点过头。
+    item = scheduler.add(RT.cfg, text, when, label=label or text,
+                         repeat=repeat.strip().lower(), approved=True)
+    return f"已排好：{scheduler.stamp(when)} {item['label']}"
+
+
+@tool(fast=r"^(?:看看|查看|有哪些|列出)?(?:定时任务|计划任务)(?:列表)?[？?]?$", risk="green")
+def list_schedules() -> str:
+    """列出还没到点的定时任务。"""
+    items = scheduler.pending(RT.cfg)
+    if not items:
+        return "还没有定时任务"
+    rows = [f"{scheduler.stamp(float(item['due']))} {item['label']}" for item in items[:10]]
+    return f"{len(items)} 条定时任务：" + "；".join(rows)
+
+
+@tool(fast=r"^(?:取消|删掉|清空)(?:所有|全部)?(?:的)?(?:定时任务|计划任务)$", risk="yellow")
+def cancel_schedule(target: str = "") -> str:
+    """取消定时任务：给关键词删一条，留空删全部。
+
+    Args:
+        target: 任务编号或说明里的关键词；留空表示全部取消
+    """
+    count = scheduler.clear(RT.cfg, str(target).strip())
+    return f"已取消 {count} 条定时任务" if count else "没找到匹配的定时任务"

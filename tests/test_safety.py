@@ -48,6 +48,35 @@ def test_unknown_tool_is_rejected(cfg, executor):
     assert "未知工具" in executor.execute_safely("rm_rf_everything", {})
 
 
+def test_every_tool_is_declared_in_redlines():
+    """注册了工具却没登记风险等级，等于悄悄变成 RED_CONFIRM。
+
+    反过来也要管：删了工具却留着登记，会让「登记表是不是真的」慢慢失真。
+    """
+    core.ensure_tools()
+    declared = set(load_redlines()["risk"])
+    registered = set(core.REGISTRY)
+    assert declared == registered, (
+        f"没登记：{sorted(registered - declared)}；多余：{sorted(declared - registered)}")
+
+
+def test_declared_risk_matches_the_decorator():
+    """两处都写着风险等级，写岔了就是「代码说 YELLOW、网关说 RED」。"""
+    core.ensure_tools()
+    declared = load_redlines()["risk"]
+    wrong = [f"{name}: 代码 {core.REGISTRY[name].risk.value.lower()} / 配置 {declared[name]}"
+             for name in core.REGISTRY
+             if core.REGISTRY[name].risk.value.lower() != str(declared[name]).lower()]
+    assert not wrong, "风险等级两处不一致：\n" + "\n".join(wrong)
+
+
+def test_ops_role_cannot_run_commands(cfg, bus):
+    """OPS 的承诺是「只看不写」，一条 shell 命令能不能写取决于沙箱，不取决于角色。"""
+    ops = core.Executor(cfg=cfg.with_overrides(**{"workspace.role": "OPS"}), on_event=bus)
+    result = ops.execute_safely("run_command", {"command": "echo hi"})
+    assert "OPS" in result and "权限" in result
+
+
 def test_red_confirm_requires_approval(cfg, bus):
     denied = core.Executor(cfg=cfg, on_event=bus, confirm=lambda *_: False)
     result = denied.execute_safely("delegate_to_coding_cli", {"prompt": "重构登录模块"})

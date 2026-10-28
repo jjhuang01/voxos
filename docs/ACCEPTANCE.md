@@ -22,7 +22,7 @@
 | 7 | 角色隔离（OPS 不可写文件） | 必须 | 拒绝并播报「当前角色 OPS 没有…的权限」 | ✅ |
 | 8 | 医疗草稿强制标记 | 必须 | 结果前缀`【未审核草稿】` | ✅ |
 | 9 | 单函数 ≤ 40 行 | 全部 | 最长 **40 行**（`core.dispatch`），贴着预算顶 | ✅ |
-| 10 | 测试全绿 | 100% | **277 项：276 passed + 1 skipped**（约 24s；skip 是缺 sherpa-onnx 时的互补分支） | ✅ |
+| 10 | 测试全绿 | 100% | **304 项：303 passed + 1 skipped**（约 24s；skip 是缺 sherpa-onnx 时的互补分支） | ✅ |
 | 11 | 跨站 / 无令牌请求被拦截 | 必须 | **401 / 403 / 200** 三个码全对，被拒请求一次都没执行 | ✅ |
 | 12 | 上下文注入不阻塞派发 | p95 < 5ms | **0.01ms**（修复前同步调 osascript 为 271ms） | ✅ |
 | 13 | 设置写回保住注释 | 必须 | 改值、保注释、写到 `--config` 指定文件、非法值零写入 | ✅ |
@@ -138,21 +138,24 @@ FRR = FAR = 0 的点，说明后端分得开，差的只是「一个阈值服务
 
 | 模块 | 行数 | 职责 |
 | :--- | ---: | :--- |
-| `main.py` | 1041 | CLI 编排 / 守护循环 / 确认闸门 / 监听总开关 / 胶囊窗口 / `llm`·`prompts` 子命令 |
+| `main.py` | 1132 | CLI 编排 / 守护循环 / 确认闸门 / 监听总开关 / 胶囊窗口 / 定时任务线程 / `llm`·`prompts`·`schedule` 子命令 |
 | `audio.py` | 654 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
+| `tools.py` | 572 | 18 个原子工具（含 `run_command` / `open_path` / `send_message` / `schedule_task`） |
+| `core.py` | 502 | 快慢双通道路由 / 多意图切分 / 闲聊 / LLM 客户端（网关信封·渠道私有字段） |
 | `ui.py` | 474 | 状态总线 / SSE / Earcon / 本地接口 |
-| `tools.py` | 425 | 12 个原子工具（含 `open_app` / `tell_time`） |
-| `core.py` | 486 | 快慢双通道路由 / 多意图切分 / 闲聊 / LLM 客户端（网关信封·渠道私有字段） |
-| `settings.py` | 360 | 字段模式 / 范围校验 / 保留注释的 TOML 写回 / 撤销 |
-| `safety.py` | 345 | 红线网关 / 快照 / 执行器 / 审计 |
+| `settings.py` | 368 | 字段模式 / 范围校验 / 保留注释的 TOML 写回 / 撤销 |
+| `safety.py` | 351 | 红线网关 / 快照 / 执行器 / 审计 |
 | `dsp.py` | 281 | 纯函数信号处理（零 I/O，可离线测） |
-| `corpus.py` | 224 | 验收语料生成 |
 | `config.py` | 229 | TOML + 环境变量 + 资源根/数据根分离 + 密钥文件 |
-| `prompts.py` | 123 | 内置提示词系统：三层来源 / 角色叠加 / 按 mtime 热更新 |
+| `corpus.py` | 224 | 验收语料生成 |
 | `registry.py` | 191 | 工具契约 / `@tool` 自省 / 注册表 |
 | `models.py` | 158 | 模型下载 / 校验 / 原子替换（`voxos models`） |
+| `scheduler.py` | 154 | 定时任务：落 JSON + 5 秒轮询线程，存那句话本身 |
+| `prompts.py` | 123 | 内置提示词系统：三层来源 / 角色叠加 / 按 mtime 热更新 |
+| `sandbox.py` | 93 | 命令沙箱：抄 codex 的 seatbelt 三档（`read-only` / `workspace-write` / `danger-full-access`） |
+| `messaging.py` | 91 | 发消息：微信没有 AppleScript 字典，只能生成 System Events 按键脚本 |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **4998** | 12 个工具 / 6 条快通道 / 277 项测试 |
+| **合计** | **5604** | 18 个工具 / 10 条快通道 / 304 项测试 |
 
 - 最长函数 **40 行**（`src/voxos/core.py:dispatch`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；

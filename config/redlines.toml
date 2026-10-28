@@ -29,26 +29,42 @@ forbidden = [
 '清空' = "清空"
 '格式化' = "格式化"
 '覆盖(掉|原|文件)' = "覆盖"
+'rm\s+-[a-zA-Z]*[rf]' = "删除"
+'git\s+clean\s+-[a-zA-Z]*f' = "清空"
 'git\s+push' = "推送到远端"
 'reset\s+--hard' = "硬重置"
 '强(制)?(推送|覆盖|删除)' = "强制改动"
 
 # 工具风险等级。新增工具必须在此登记，否则 tests/test_safety.py 会失败。
+#
+# run_command 为什么是 YELLOW 而不是 RED_CONFIRM：边界交给沙箱（seatbelt），
+# 不是交给「每次点一下允许」。每句话都弹确认的结果是确认卡变成仪式，
+# 人闭着眼睛点允许——那时它就不再是防线了。真正不可逆的措辞
+# （删掉 / 清空 / 格式化）由上面的 [confirm] 词表升级成二次确认。
 [risk]
 append_structured_log = "green"
 inspect_server_ops = "green"
 read_file_head = "green"
 search_notes = "green"
 open_in_ide = "green"
+open_path = "green"
+list_schedules = "green"
 list_tools = "green"
 open_app = "green"
 tell_time = "green"
 write_code = "yellow"
 dispatch_code_session = "yellow"
 rollback_file = "yellow"
+run_command = "yellow"
+cancel_schedule = "yellow"
+send_message = "red_confirm"
+schedule_task = "red_confirm"
 delegate_to_coding_cli = "red_confirm"
 
 # 角色白名单（"*" 表示全部）。未在白名单内 -> RED_FORBIDDEN。
+#
+# OPS 故意不给 run_command：那个角色的承诺是「只看不写」，而一条 shell 命令
+# 能不能写文件取决于沙箱档位，不取决于角色。要动手就用 DEVELOPER。
 [roles.DEVELOPER]
 allow = ["*"]
 draft = false
@@ -56,7 +72,7 @@ draft = false
 [roles.OPS]
 allow = [
   "append_structured_log", "inspect_server_ops", "read_file_head",
-  "search_notes", "open_in_ide", "list_tools",
+  "search_notes", "open_in_ide", "list_tools", "open_path", "list_schedules",
 ]
 draft = false
 

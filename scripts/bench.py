@@ -143,11 +143,70 @@ def _utterance():
     return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0, seconds
 
 
+# ------------------------------------------------------------------ 窗口
+
+def window() -> None:
+    """原生胶囊窗口：从 spawn 到「页面发出第一个请求」多久。
+
+    为什么量这个而不是量「窗口可见」：看得见要截图比对，而窗口在 load 之前
+    就已经 makeKeyAndOrderFront 了，所以「第一个请求到达」是它的上界，且完全
+    可测。用它对比 Chrome 的 1.2–1.5s 才有意义。
+    """
+    binary = ROOT / "build" / "VoxOSWindow"
+    if not binary.exists():
+        raise SystemExit("先编译窗口：bash scripts/build_app.sh")
+    first: dict[str, float] = {}
+    server = _probe_server(first)
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    try:
+        for run in range(3):
+            first.clear()
+            _one_launch(binary, url, first, run)
+            time.sleep(0.3)
+    finally:
+        server.shutdown()
+
+
+def _probe_server(first: dict[str, float]):
+    """一个只会回 "ok" 的服务器：它的用途是被请求，不是被看。"""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):                      # noqa: N802
+            first.setdefault("t", time.perf_counter())
+            body = b"<html><body>ok</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.allow_reuse_address = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _one_launch(binary: Path, url: str, first: dict[str, float], run: int) -> None:
+    start = time.perf_counter()
+    proc = subprocess.Popen([str(binary), "--url", url],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    while "t" not in first and time.perf_counter() - start < 10:
+        time.sleep(0.005)
+    took = (first["t"] - start) * 1000 if "t" in first else float("nan")
+    print(f"第 {run + 1} 次：spawn → 页面请求 {took:.0f} ms")
+    proc.terminate()
+    proc.wait(timeout=5)
+
+
 # ------------------------------------------------------------------ 入口
 
 def main(argv: list[str]) -> int:
     which = (argv[0] if argv else "all").lower()
-    jobs = {"boot": [boot], "mem": [mem], "audio": [audio_cost]}
+    jobs = {"boot": [boot], "mem": [mem], "audio": [audio_cost], "window": [window]}
     jobs["all"] = jobs["boot"] + jobs["mem"] + jobs["audio"]
     if which not in jobs:
         print(f"不认识的项：{which}（可用：{' / '.join(jobs)}）")
