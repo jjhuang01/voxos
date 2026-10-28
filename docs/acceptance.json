@@ -3,13 +3,13 @@
     "fast_path": {
       "p50": 0.0007,
       "p95": 0.0008,
-      "p99": 0.0009,
+      "p99": 0.0008,
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 0.202,
-      "p95": 0.821,
-      "context_p95": 0.006,
+      "p50": 0.4,
+      "p95": 1.006,
+      "context_p95": 0.014,
       "rounds": 30
     },
     "voiceprint": {
@@ -91,11 +91,11 @@
       "backend": "sherpa-cam++",
       "threshold": 0.82,
       "dispatch_ms": [
-        0.42,
-        123.27
+        0.45,
+        124.4
       ],
-      "wall_ms": 332.7,
-      "realtime_factor": 0.018
+      "wall_ms": 339.9,
+      "realtime_factor": 0.019
     },
     "redlines": {
       "forbidden_cases": 8,
@@ -292,11 +292,11 @@
         },
         {
           "file": "src/voxos/ui.py",
-          "lines": 449,
-          "code_lines": 375
+          "lines": 461,
+          "code_lines": 386
         }
       ],
-      "total_lines": 5813,
+      "total_lines": 5825,
       "max_function": {
         "name": "scripts/verify.py:measure_stt",
         "lines": 39
@@ -308,10 +308,10 @@
     },
     "tests": {
       "returncode": 0,
-      "summary": "205 passed in 19.14s",
-      "seconds": 19.6
+      "summary": "207 passed in 20.32s",
+      "seconds": 20.8
     },
-    "generated_at": "2026-10-28T13:55:12",
+    "generated_at": "2026-10-28T14:00:15",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -327,7 +327,7 @@
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "0.821ms",
+      "measured": "1.006ms",
       "pass": true
     },
     {
@@ -387,12 +387,12 @@
     },
     {
       "item": "测试全绿",
-      "measured": "205 passed in 19.14s",
+      "measured": "207 passed in 20.32s",
       "pass": true
     },
     {
       "item": "上下文注入不阻塞派发",
-      "measured": "0.006ms",
+      "measured": "0.014ms",
       "pass": true
     },
     {
