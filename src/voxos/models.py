@@ -107,7 +107,11 @@ def download(url: str, target: Path, proxy: str | None, spec: dict) -> bool:
 
 def fetch(target: Path | None = None, *, proxy: str | None = None,
           force: bool = False, with_asr: bool = True) -> int:
-    """下载全部模型。返回 0 表示必需项齐了。"""
+    """下载全部模型。返回 0 表示必需项齐了。
+
+    proxy 为空时自己看环境变量：调用方（CLI）不该为了一个兜底值去 import os。
+    """
+    proxy = proxy or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     base = Path(target) if target else default_dir()
     base.mkdir(parents=True, exist_ok=True)
     failed: list[str] = []

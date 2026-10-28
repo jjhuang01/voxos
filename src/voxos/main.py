@@ -600,8 +600,7 @@ def cmd_models(args: argparse.Namespace, cfg: Config) -> int:
     from .models import default_dir, fetch
 
     target = Path(args.dir) if args.dir else default_dir()
-    proxy = args.proxy or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-    return fetch(target, proxy=proxy, force=args.force, with_asr=not args.no_asr)
+    return fetch(target, proxy=args.proxy, force=args.force, with_asr=not args.no_asr)
 
 
 def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:

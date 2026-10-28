@@ -75,3 +75,37 @@ def test_model_manifest_entries_are_complete():
 def test_optional_models_are_known(name: str):
     """OPTIONAL 里写的名字必须真的在清单里，否则 `--no-asr` 会静默不生效。"""
     assert name in models.MODELS
+
+
+def test_models_command_actually_runs(monkeypatch, tmp_path):
+    """`voxos models` 曾经能解析但一调就 NameError（main.py 里没有 import os）。
+
+    「参数解析得出来」和「跑得起来」是两件事，所以这里真的调一次 cmd_models，
+    只把下载动作换成假的——不然一条单测要拖 28MB 流量。
+    """
+    calls: list[dict] = []
+
+    def fake_fetch(target, *, proxy=None, force=False, with_asr=True):
+        calls.append({"target": target, "proxy": proxy, "force": force, "with_asr": with_asr})
+        return 0
+
+    monkeypatch.setattr(models, "fetch", fake_fetch)
+    parser = main.build_parser()
+    args = parser.parse_args(["models", "--dir", str(tmp_path), "--no-asr"])
+    assert main.cmd_models(args, config.Config({})) == 0
+    assert calls == [{"target": tmp_path, "proxy": None, "force": False, "with_asr": False}]
+
+
+def test_fetch_reads_proxy_from_environment(monkeypatch, tmp_path):
+    """代理兜底放在 fetch 里：调用方不该为一个默认值去 import os。"""
+    seen: list[str | None] = []
+
+    def fake_download(url, target, proxy, spec):
+        seen.append(proxy)
+        return False
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setattr(models, "download", fake_download)
+    monkeypatch.setattr(models, "verify", lambda *_: False)
+    models.fetch(tmp_path, with_asr=False)
+    assert seen and seen[0] == "http://127.0.0.1:7890", f"没读到代理：{seen[:3]}"
