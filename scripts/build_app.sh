@@ -134,21 +134,37 @@ open_window() {
     fi
 }
 
-if [ -n "\$WINDOW" ] && [ -x "\$WINDOW" ] && pgrep -f "\$WINDOW" >/dev/null 2>&1; then
-    # 窗口已经在屏幕上了（右上角，可能被别的窗口挡住）。再开一个会出现两个胶囊
-    # 抢同一条状态流——用户看到的是「点了没反应 + 两个一样的窗口」。
-    exit 0
-fi
+window_running() {
+    [ -n "\$WINDOW" ] && [ -x "\$WINDOW" ] && pgrep -f "\$WINDOW" >/dev/null 2>&1
+}
 
 if alive; then
-    # 服务已经在跑：双击 = 开个窗口，0.3 秒的事。
+    if window_running; then
+        # 服务和窗口都在（窗口可能被别的窗口挡住）。再开一个会出现两个胶囊
+        # 抢同一条状态流——用户看到的是「点了没反应 + 两个一样的窗口」。
+        exit 0
+    fi
+    # 服务在跑但窗口没了（用户关了窗口，守护进程被 ⌘Q 之外的路径留下来了）：
+    # 双击 = 开个窗口，0.3 秒的事。
     open_window
     [ -n "\$WINDOW_PID" ] && wait "\$WINDOW_PID"
     exit 0
 fi
 
+# 服务没在跑，窗口却还在：那是一个**孤儿窗口**，页面连的是一个已经死掉的服务。
+# 以前这里直接 exit 0，症状是「双击 App 什么都不发生」——用户没法自救，
+# 因为窗口可能被别的窗口挡住，看起来就是没反应。现在清掉它，重新起。
+if window_running; then
+    pkill -f "\$WINDOW" 2>/dev/null
+    sleep 0.3
+fi
+
 echo "=== \$(date '+%F %T') 启动 VoxOS ===" >>"\$LOG"
-"\$BIN" run >>"\$LOG" 2>&1 &
+# PYTHONUNBUFFERED：stdout 重定向到文件时 Python 会改成块缓冲，启动横幅
+# （含「命令沙箱=… 生效/不生效」那行）会卡在缓冲区里，进程活多久就憋多久——
+# 日志看着像「起来了但什么都没说」，其实说了，只是还没吐出来。
+# 同一件事也让 traceback 立即落盘：App 没终端，日志是唯一能事后看的地方。
+PYTHONUNBUFFERED=1 "\$BIN" run >>"\$LOG" 2>&1 &
 CHILD=\$!
 trap 'kill "\$CHILD" \${WINDOW_PID:-} 2>/dev/null' EXIT INT TERM
 
@@ -165,18 +181,27 @@ for _ in \$(seq 1 200); do
 done
 
 if ! alive; then
-    # App 没有终端，失败必须弹出来，否则用户只看到图标跳一下就没了
-    osascript -e 'display alert "VoxOS 没能启动" message "日志：~/.voxos/logs/app.log" as critical' >/dev/null 2>&1
-    tail -5 "\$LOG" >/dev/null 2>&1
+    # App 没有终端，失败必须弹出来，否则用户只看到图标跳一下就没了。
+    # 弹窗里要带上**最后一行错误**：只说「日志在 ~/.voxos/logs/app.log」等于
+    # 让用户自己去找，而他此刻还不知道「日志」是什么东西。
+    WHY=\$(grep -E '^(RuntimeError|ModuleNotFoundError|PermissionError|OSError|ImportError)' "\$LOG" | tail -1)
+    [ -n "\$WHY" ] || WHY=\$(tail -1 "\$LOG")
+    osascript -e "display alert \\"VoxOS 没能启动\\" message \\"\${WHY:-未知原因}（日志：~/.voxos/logs/app.log）\\" as critical" >/dev/null 2>&1
     exit 1
 fi
 
-if [ -n "\$WINDOW_PID" ]; then
-    # 关窗口 = 用完即走：窗口进程退出后，trap 会把守护进程一起带走。
-    wait "\$WINDOW_PID"
-else
-    wait "\$CHILD"
-fi
+# 等**任意一个**先死，然后把另一个带走。
+#
+# 原来写的是 `wait "\$WINDOW_PID"`（只等窗口）：守护进程先死的时候，启动器
+# 一动不动，窗口还挂着一个已经死掉的页面。更糟的是 App 的可执行文件就是这个
+# 启动器，LaunchServices 认为它还在运行，所以**再双击只会「激活」它，不会起新的**
+# ——用户看到的就是「点了没反应」，而且没法自救。
+#
+# 不能用 `wait -n`：macOS 自带的是 bash 3.2，没有这个选项。
+while kill -0 "\$CHILD" 2>/dev/null \
+      && { [ -z "\$WINDOW_PID" ] || kill -0 "\$WINDOW_PID" 2>/dev/null; }; do
+    sleep 0.5
+done
 LAUNCHER
 chmod +x "$BUILD/Contents/MacOS/$APP_NAME"
 

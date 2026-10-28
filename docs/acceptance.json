@@ -7,8 +7,8 @@
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 0.206,
-      "p95": 0.917,
+      "p50": 0.176,
+      "p95": 0.402,
       "context_p95": 0.005,
       "rounds": 30
     },
@@ -91,11 +91,11 @@
       "backend": "sherpa-cam++",
       "threshold": 0.75,
       "dispatch_ms": [
-        0.51,
-        230.11
+        0.56,
+        199.69
       ],
-      "wall_ms": 577.1,
-      "realtime_factor": 0.032
+      "wall_ms": 631.9,
+      "realtime_factor": 0.035
     },
     "redlines": {
       "forbidden_cases": 8,
@@ -108,8 +108,8 @@
       "seconds": 30,
       "segments": 0,
       "vad": "SileroVad",
-      "cpu_percent": 0.38,
-      "realtime_factor": 0.004
+      "cpu_percent": 0.5,
+      "realtime_factor": 0.006
     },
     "security": {
       "codes": {
@@ -150,8 +150,8 @@
         "en": 3.1
       },
       "chars": 818,
-      "rtf": 0.037,
-      "wall_s": 3.0,
+      "rtf": 0.035,
+      "wall_s": 2.8,
       "samples": [
         {
           "want": "把刚才登录模块的报错原因记到今天的开发日志里",
@@ -282,7 +282,7 @@
         },
         {
           "file": "src/voxos/main.py",
-          "lines": 1158,
+          "lines": 1162,
           "code_lines": 941
         },
         {
@@ -336,7 +336,7 @@
           "code_lines": 398
         }
       ],
-      "total_lines": 7971,
+      "total_lines": 7975,
       "max_function": {
         "name": "src/voxos/core.py:dispatch",
         "lines": 40
@@ -348,10 +348,10 @@
     },
     "tests": {
       "returncode": 0,
-      "summary": "310 passed, 1 skipped, 2 warnings in 26.67s",
-      "seconds": 27.5
+      "summary": "310 passed, 1 skipped, 2 warnings in 29.04s",
+      "seconds": 29.9
     },
-    "generated_at": "2026-10-29T01:56:14",
+    "generated_at": "2026-10-29T02:24:03",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -367,12 +367,12 @@
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "0.917ms",
+      "measured": "0.402ms",
       "pass": true
     },
     {
       "item": "静音待机 CPU < 1.5%",
-      "measured": "0.38%/秒音频",
+      "measured": "0.5%/秒音频",
       "pass": true
     },
     {
@@ -428,7 +428,7 @@
     },
     {
       "item": "测试全绿",
-      "measured": "310 passed, 1 skipped, 2 warnings in 26.67s",
+      "measured": "310 passed, 1 skipped, 2 warnings in 29.04s",
       "pass": true
     },
     {

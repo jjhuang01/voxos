@@ -138,7 +138,7 @@ FRR = FAR = 0 的点，说明后端分得开，差的只是「一个阈值服务
 
 | 模块 | 行数 | 职责 |
 | :--- | ---: | :--- |
-| `main.py` | 1158 | CLI 编排 / 守护循环 / 确认闸门 / 监听总开关 / 胶囊窗口 / 定时任务线程 / `llm`·`prompts`·`schedule` 子命令 |
+| `main.py` | 1162 | CLI 编排 / 守护循环 / 确认闸门 / 监听总开关 / 胶囊窗口 / 定时任务线程 / `llm`·`prompts`·`schedule` 子命令 |
 | `audio.py` | 654 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
 | `tools.py` | 581 | 18 个原子工具（含 `run_command` / `open_path` / `send_message` / `schedule_task`） |
 | `core.py` | 502 | 快慢双通道路由 / 多意图切分 / 闲聊 / LLM 客户端（网关信封·渠道私有字段） |
@@ -155,7 +155,7 @@ FRR = FAR = 0 的点，说明后端分得开，差的只是「一个阈值服务
 | `sandbox.py` | 201 | 命令沙箱：抄 codex 的 seatbelt 三档（`read-only` / `workspace-write` / `danger-full-access`） |
 | `messaging.py` | 91 | 发消息：微信没有 AppleScript 字典，只能生成 System Events 按键脚本 |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **5747** | 18 个工具 / 10 条快通道 / 311 项测试 |
+| **合计** | **5751** | 18 个工具 / 10 条快通道 / 311 项测试 |
 
 - 最长函数 **40 行**（`src/voxos/core.py:dispatch`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；

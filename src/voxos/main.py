@@ -402,11 +402,15 @@ def _run_forever(cfg: Config) -> int:
         enrolled.set()
     url = _serve(runtime, lock, enrolled)
     _start_scheduler(runtime)
+    # 先报「已经能用了」和沙箱结论：这两件事**不依赖模型**。
+    # 以前整条横幅押在模型加载之后，而模型加载 + 麦克风授权可能阻塞几十秒
+    # （第一次还会弹系统授权框等人点）。日志看起来就是「服务在跑，但什么都没说」，
+    # 而「命令沙箱到底生不生效」正是最不该等的那一条。
+    print(f"VoxOS 已启动：胶囊={url} 命令沙箱={_sandbox_note(cfg)}", flush=True)
     sounds = ui.ensure_earcons(cfg.data_root / ".voxos" / "sounds")
     hotwords = audio.refresh_hotwords(cfg) if audio.supports_hotwords(cfg) else []
     _, threshold, kind = audio.make_embedder(cfg)
-    print(f"VoxOS 已启动：声纹后端={kind} 阈值={threshold} "
-          f"识别={_hotword_note(cfg, hotwords)} 命令沙箱={_sandbox_note(cfg)} 胶囊={url}")
+    print(f"声纹后端={kind} 阈值={threshold} 识别={_hotword_note(cfg, hotwords)}", flush=True)
     if not lock.profiles:
         print("首次使用：在胶囊面板里点「录入声纹」（3 秒），或运行 voxos enroll --record 3")
         runtime.bus.emit("onboard", "请先录入声纹", "点胶囊 → 录入声纹")
