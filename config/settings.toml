@@ -4,6 +4,9 @@
 [audio]
 sample_rate = 16000
 chunk_size = 512              # 32ms @16kHz
+input_device = ""             # "" = 系统默认；也可写设备名片段（如 "MacBook"）或索引（如 "1"）
+                              # 本机的默认输入可能是个没插东西的音频接口：录得到帧、峰值恒 0。
+                              # `voxos doctor` 的「输入设备」那行会报设备名和实测电平。
 vad_threshold = 0.5
 vad_backend = "auto"          # auto | silero | energy（auto：有模型用 silero，否则能量 VAD）
 silero_model = ".voxos/models/silero_vad.onnx"
@@ -11,8 +14,9 @@ speaker_model = ".voxos/models/campplus.onnx"   # CAM++ 声纹模型；缺失则
 silence_duration_ms = 800     # 停顿超过此值判定一句话结束
 max_utterance_ms = 12000      # 单句硬上限，防止一直说不停
 min_speech_ms = 200           # 低于此人声时长视为噪音
-voiceprint_threshold = 0.82   # 实测标定：同人最小 0.849 / 异人最大 0.782，取中点 0.82（两侧余量各约 0.03）
-                              # 对照：0.76 时 FAR 1.67%，0.86 时 FRR 8.3%（见 docs/ACCEPTANCE.md）
+voiceprint_threshold = 0.75   # 真麦克风实测：录 3 句取均值后，同人最低 0.786 / 异人最高 0.715，取中点 0.75
+                              # 旧值 0.82 的问题：只录 1 句时同人换句话只有 0.751，等于录完就被自己拒
+                              # 对照：合成语料下 0.76 时 FAR 1.67%，0.86 时 FRR 8.3%（见 docs/ACCEPTANCE.md）
 voiceprint_threshold_fallback = 0.45   # 降级频谱声纹的独立阈值（尺度不同）
 voiceprint_profiles = ".voxos/voiceprint_profiles.npz"
 mask_mode = false             # 静音面罩/低语补偿

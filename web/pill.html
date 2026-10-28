@@ -604,10 +604,10 @@ $('ask').addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 $('enroll').addEventListener('click', async () => {
   const button = $('enroll');
   button.disabled = true;
-  button.textContent = '录音中… 请说话';
+  button.textContent = '请说 3 句话（句间停半秒）';
   try {
-    const result = await api('/api/enroll', {method:'POST', body: JSON.stringify({seconds: 3})});
-    toast(`录入完成，一致性 ${result.consistency}`);
+    const result = await api('/api/enroll', {method:'POST', body: JSON.stringify({seconds: 10})});
+    toast(result.warning || `录入完成：${result.samples} 句，一致性 ${result.consistency}`);
     setOnboard(false);
     await loadStatus();
   } catch (error) {

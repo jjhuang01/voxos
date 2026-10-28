@@ -52,6 +52,10 @@ class Field:
 
 
 SCHEMA: tuple[Field, ...] = (
+    Field("audio.input_device", "输入设备", "str", "audio",
+          "留空用系统默认。默认设备可能是个没插东西的音频接口——录得到帧、峰值恒 0，"
+          "看上去一切正常却听不见人说话。这里可填设备名片段（如 MacBook）或索引，"
+          "`voxos doctor` 的「输入设备」会报当前设备与实测电平。", restart=True),
     Field("audio.voiceprint_threshold", "声纹阈值", "float", "audio",
           "同人相似度超过此值才接受。0.82 为实测标定值，调低更容易通过也更危险。",
           0.50, 0.99, 0.01, restart=False),

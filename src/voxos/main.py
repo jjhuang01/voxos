@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import math
 import os
 import queue
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -214,10 +216,10 @@ def _enroll_now(cfg: Config, lock: dsp.SpeakerLock, seconds: float,
     先把新声纹算在副本上，保存成功后才提交到运行态；保存失败不能出现
     「内存里已经是新身份、重启后又变回旧身份」的分裂。
     """
-    if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 1 <= seconds <= 10:
-        return {"ok": False, "error": "录音时长需在 1~10 秒之间"}
+    if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 1 <= seconds <= 15:
+        return {"ok": False, "error": "录音时长需在 1~15 秒之间"}
     try:
-        samples = _record(float(seconds))
+        samples = _record_segments(cfg, float(seconds), cfg.get("audio.input_device", ""))
     except Exception as exc:                       # 无麦克风/无权限
         return {"ok": False, "error": f"录音失败：{exc}"}
     if not samples:
@@ -231,7 +233,10 @@ def _enroll_now(cfg: Config, lock: dsp.SpeakerLock, seconds: float,
         return {"ok": False, "error": f"声纹保存失败：{exc}"}
     if done is not None:
         done.set()
-    return {"ok": True, "consistency": round(float(consistency), 3), "samples": len(samples)}
+    warning = "" if len(samples) >= 2 else \
+        "只切出 1 句：模板不稳，建议再说 2 句（句间停半秒），否则可能被自己拒之门外"
+    return {"ok": True, "consistency": round(float(consistency), 3),
+            "samples": len(samples), "warning": warning}
 
 
 def _ui_context(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
@@ -278,8 +283,30 @@ def _serve(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
            enrolled: threading.Event | None = None) -> str:
     cfg = runtime.cfg
     host, port = str(cfg.get("ui.host", "127.0.0.1")), int(cfg.get("ui.port", 8765))
-    ui.serve(_ui_context(runtime, lock, enrolled), host, port, block=False)
+    try:
+        ui.serve(_ui_context(runtime, lock, enrolled), host, port, block=False)
+    except OSError as exc:
+        # 端口被别的程序占用时，原始 traceback 只会让人以为 VoxOS 坏了。
+        # 说清楚是谁占的、改哪个配置，比堆栈有用。
+        if exc.errno in (errno.EADDRINUSE, errno.EACCES):
+            holder = _port_holder(port)
+            raise SystemExit(
+                f"端口 {port} 被占用了{'（' + holder + '）' if holder else ''}。\n"
+                f"两种办法：关掉占用它的程序，或把 ~/.voxos/settings.toml 里的 ui.port 改成别的值。"
+            ) from exc
+        raise
     return f"http://{host}:{port}/"
+
+
+def _port_holder(port: int) -> str:
+    """谁占着这个端口。查不到就返回空串——这条信息是锦上添花，不能反过来报错。"""
+    try:
+        done = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-F", "cn"],
+                              capture_output=True, text=True, timeout=3)
+        names = [line[1:] for line in done.stdout.splitlines() if line.startswith("c")]
+        return "、".join(dict.fromkeys(names))
+    except Exception:
+        return ""
 
 
 # ------------------------------------------------------------------ 子命令
@@ -339,6 +366,17 @@ def _demo_table(pipeline: audio.AudioPipeline, runtime: Runtime, stream) -> None
 
 
 def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
+    pid_file = _claim_pid(cfg)
+    if pid_file is None:
+        print("已经在跑了。要重启先 `voxos stop`（双开会让两个进程抢同一个端口）")
+        return 0
+    try:
+        return _run_forever(cfg)
+    finally:
+        pid_file.unlink(missing_ok=True)
+
+
+def _run_forever(cfg: Config) -> int:
     runtime = Runtime(cfg, _bus(cfg))
     lock = _lock(cfg)
     enrolled = threading.Event()
@@ -361,6 +399,72 @@ def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
     return _listen(runtime, cfg, lock, sounds)
 
 
+def _pid_file(cfg: Config) -> Path:
+    return cfg.data_root / ".voxos" / "voxos.pid"
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _claim_pid(cfg: Config) -> Path | None:
+    """占位：写 pid 文件；已有实例在跑就返回 None。
+
+    .app 双击两次、或 App 和终端各起一个，会撞同一个端口。与其让第二个进程
+    抛一个 EADDRINUSE 堆栈，不如在这里说人话。
+    """
+    path = _pid_file(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            other = int(path.read_text(encoding="utf-8").strip() or 0)
+        except ValueError:
+            other = 0
+        if other and other != os.getpid() and _alive(other):
+            return None
+    path.write_text(str(os.getpid()), encoding="utf-8")
+    return path
+
+
+def cmd_stop(_: argparse.Namespace, cfg: Config) -> int:
+    """停掉 `voxos run`。App 里没有终端窗口，退出必须有个正经入口。"""
+    path = _pid_file(cfg)
+    if not path.exists():
+        print("没有在跑（找不到 pid 文件）")
+        return 0
+    try:
+        pid = int(path.read_text(encoding="utf-8").strip() or 0)
+    except ValueError:
+        pid = 0
+    if pid <= 0 or not _alive(pid):
+        path.unlink(missing_ok=True)
+        print("没有在跑（pid 文件是上次崩溃留下的，已清理）")
+        return 0
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        if not _alive(pid):
+            path.unlink(missing_ok=True)
+            print(f"已停止（pid {pid}）")
+            return 0
+        time.sleep(0.1)
+    os.kill(pid, signal.SIGKILL)
+    path.unlink(missing_ok=True)
+    print(f"已强制停止（pid {pid}）")
+    return 0
+
+
+def cmd_port(_: argparse.Namespace, cfg: Config) -> int:
+    """只打印端口。App 启动器拿它判断「服务起来了没」——写死 8765 会在端口
+    被别的程序占用时永远等不到，然后弹一个「没能启动」的框，而真实原因在日志里。
+    """
+    print(int(cfg.get("ui.port", 8765)))
+    return 0
+
+
 def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[str, Path]) -> int:
     """三段式：采集线程 → 识别线程 → 派发主循环。
 
@@ -373,7 +477,9 @@ def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[s
         cfg=cfg, stt=audio.make_stt(cfg, hotwords), lock=lock,
         vad=audio.make_vad(cfg), on_event=runtime.bus,
         echo=dsp.EchoGate(decay_ms=float(cfg.get("audio.echo_decay_ms", 300))))
-    source = audio.SelfHealingSource(lambda: audio.MicSource(int(cfg.get("audio.chunk_size", 512))),
+    chunk = int(cfg.get("audio.chunk_size", 512))
+    device = cfg.get("audio.input_device", "")
+    source = audio.SelfHealingSource(lambda: audio.MicSource(chunk, device=device),
                                      on_event=runtime.bus, on_reset=pipeline.reset)
     _context()                             # 预热：把首次线程启动的开销挪到进循环之前
     runtime.bus.emit("idle", "待机", "")
@@ -524,7 +630,7 @@ def cmd_enroll(args: argparse.Namespace, cfg: Config) -> int:
     if args.wav:
         samples: list[object] = [audio.wav_to_array(Path(item).expanduser()) for item in args.wav]
     else:
-        samples = _record(args.record)
+        samples = _record_segments(cfg, args.record, cfg.get("audio.input_device", ""))
     if not samples:
         print("没有可用音频，录入失败")
         return 2
@@ -537,19 +643,43 @@ def cmd_enroll(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
-def _record(seconds: float) -> list[object]:
+def _record_segments(cfg: Config, seconds: float, device: object = None) -> list[object]:
+    """录一段时间，按 VAD 切成「多句」——声纹模板必须多句取均值才稳。
+
+    实测（真麦克风 + CAM++，阈值量纲为余弦相似度）：
+    - 只录 1 句 → 同一个人的另一句话只有 0.75，而默认阈值 0.82，用户录完就被自己拒了；
+    - 把**一次**录音切成 2~3 段 → 同人 0.70~0.72、异人 0.66~0.72，间隔 0.05 以内，分不开；
+    - 录 3 句取均值 → 同人 0.79、异人最高 0.72，间隔 0.071，这才有可用余量。
+    所以切段必须按「句」切，不能按时间切。
+    """
     import numpy as np
 
-    print(f"请说话，录音 {seconds:.0f} 秒……")
-    source = audio.MicSource()
+    print(f"请说 2~3 句话，录音 {seconds:.0f} 秒（句间停半秒）……")
+    vad = audio.make_vad(cfg)
+    detector = dsp.EndpointDetector(
+        silence_ms=float(cfg.get("audio.silence_duration_ms", 800)),
+        max_ms=float(cfg.get("audio.max_utterance_ms", 12000)),
+        min_speech_ms=float(cfg.get("audio.min_speech_ms", 200)),
+    )
+    segments: list[object] = []
+    buffer: list[object] = []
+    source = audio.MicSource(device=device)
     with source:
-        chunks = []
         start = time.time()
         for chunk in source:
-            chunks.append(chunk)
+            state = detector.push(bool(vad.is_speech(chunk)), chunk.size)  # type: ignore[attr-defined]
+            if state != "idle":
+                buffer.append(chunk)
+            if state in ("candidate", "force_end"):
+                segments.append(np.concatenate(buffer))
+                buffer.clear()
+                detector.reset()
             if time.time() - start >= seconds:
                 break
-    return [np.concatenate(chunks)] if chunks else []
+    if buffer:
+        segments.append(np.concatenate(buffer))
+    usable = [s for s in segments if s.size >= 1600]
+    return usable
 
 
 def cmd_serve(args: argparse.Namespace, cfg: Config) -> int:
@@ -616,6 +746,7 @@ def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
         ("声纹档案", "已录入" if cfg.path("audio.voiceprint_profiles").exists() else "未录入"),
         ("LLM", f"{cfg.get('llm.model')} @ {cfg.get('llm.base_url')}" if cfg.flag("llm.enabled") else "未启用（走快通道+离线兜底）"),
         ("识别后端", _hotword_note(cfg, [])),
+        ("输入设备", _mic_note(cfg)),
         ("资源根", str(cfg.root)),
         ("数据根", str(cfg.data_root)),
         ("配置文件", _config_note(cfg)),
@@ -655,6 +786,21 @@ def _hotword_note(cfg: Config, words: list[str]) -> str:
     return f"{label}（无热词接口，热词表不生效）"
 
 
+def _mic_note(cfg: Config) -> str:
+    """报出实际用的输入设备，并采 0.5 秒看有没有信号。
+
+    「设备能打开但收到全零」是本机踩过的坑：系统默认输入是一个没插东西的
+    音频接口，录得到帧、峰值恒为 0.0000——所有检查都是绿的，就是听不见人说话。
+    所以这一行必须带电平；只报设备名等于什么都没说。
+    """
+    try:
+        name, peak = audio.probe_mic(0.5, cfg.get("audio.input_device", ""))
+    except Exception as exc:
+        return f"不可用（{exc}）"
+    hint = "  ← 几乎无声：换个设备，或检查静音键/输入音量" if peak < 1e-4 else ""
+    return f"{name}  峰值 {peak:.4f}{hint}"
+
+
 def _version(module: str) -> str:
     try:
         return __import__(module).__version__  # type: ignore[no-any-return]
@@ -686,7 +832,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     enroll = sub.add_parser("enroll", help="录入声纹")
     enroll.add_argument("--wav", action="append", help="用现成 wav 录入（可多次）")
-    enroll.add_argument("--record", type=float, default=3.0, help="麦克风录制秒数")
+    enroll.add_argument("--record", type=float, default=10.0,
+                        help="麦克风录制秒数（期间说 2~3 句，句间停半秒）")
     enroll.add_argument("--mode", choices=["normal", "mask"], default="normal")
     enroll.set_defaults(func=cmd_enroll)
 
@@ -694,10 +841,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--no-open", action="store_true")
     serve.set_defaults(func=cmd_serve)
 
-    pill = sub.add_parser("pill", help="用无边框窗口打开胶囊（最接近悬浮）")
-    pill.set_defaults(func=cmd_pill)
+    sub.add_parser("pill", help="无边框胶囊窗口").set_defaults(func=cmd_pill)
 
     _add_models(sub)
+    sub.add_parser("stop", help="停掉在跑的 run").set_defaults(func=cmd_stop)
+    sub.add_parser("port", help="打印界面端口").set_defaults(func=cmd_port)
     sub.add_parser("tools", help="列出已注册工具").set_defaults(func=cmd_tools)
     sub.add_parser("doctor", help="环境自检").set_defaults(func=cmd_doctor)
     return parser

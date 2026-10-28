@@ -27,13 +27,13 @@ curl -fsSL https://raw.githubusercontent.com/jjhuang01/voxos/main/scripts/instal
 
 ```bash
 gh release download --repo jjhuang01/voxos --pattern '*.whl'   # 仓库公开，不需要登录
-bash install.sh ./voxos-0.1.14-py3-none-any.whl                # 或 curl 下 scripts/install.sh
+bash install.sh ./voxos-0.1.15-py3-none-any.whl                # 或 curl 下 scripts/install.sh
 ```
 
 脚本里做的事，想手动做也可以：
 
 ```bash
-pipx install ./voxos-0.1.14-py3-none-any.whl   # 独立 venv，不污染你的环境
+pipx install ./voxos-0.1.15-py3-none-any.whl   # 独立 venv，不污染你的环境
 pipx inject voxos sherpa-onnx sounddevice      # 音频依赖；跳过则降级为能量 VAD + 脚本回放
 voxos models --no-asr                          # 28MB 声纹 + VAD；去掉 --no-asr 是 267MB
 voxos doctor
@@ -50,10 +50,32 @@ voxos doctor
 voxos --version           # 打印版本（和安装包一致，不是手写的另一个数）
 voxos models              # 下载/校验模型（先写 .part，校验通过才原子替换）
 voxos doctor              # 环境自检（含「配置文件在哪、能不能写」）
-voxos enroll --record 3   # 录声纹
+voxos enroll              # 录声纹：说 2~3 句，句间停半秒（默认录 10 秒）
 voxos run                 # 守护进程 + 胶囊
 voxos text "Siri，检查一下服务器负载"   # 不打字说话，直接打字
 ```
+
+### macOS：装成 App，双击就用
+
+```bash
+bash scripts/build_app.sh --install     # 构建 VoxOS.app 并装进 /Applications
+```
+
+之后 Finder → 应用程序 → VoxOS，双击即可。启动器会起守护进程、等端口真正就绪、
+再打开胶囊窗口；退出（⌘Q）时把守护进程一起带走。App 没有终端，所以启动失败会弹窗，
+而不是静默退出——日志在 `~/.voxos/logs/app.log`。
+
+App 用的是 ad-hoc 签名，不是公证过的分发包：第一次启动 macOS 会问麦克风权限，
+点「允许」。签名的作用是让系统把这项授权记在 `com.voxos.agent` 上；换版本重装后
+签名会变，权限可能要再给一次。
+
+**两个装完最容易踩的点**（都能在 `voxos doctor` 里当场看出来）：
+
+- **输入设备**：`audio.input_device` 可以写索引或名字片段（如 `MacBook Pro麦克风`）。
+  系统默认输入如果是一个没插东西的音频接口，录得到帧、峰值恒为 0.0000——
+  一切"正常"，就是听不见人说话。doctor 会把设备名和实测峰值打出来。
+- **声纹录入要说 2~3 句**：只录一句时模板不稳，实测同一个人的另一句话相似度只有
+  0.75，容易被自己拒之门外。默认录 10 秒，VAD 自动按句切段取均值。
 
 **数据落在哪**：模型、声纹、日志、快照、状态都在 `~/.voxos/`
 （`VOXOS_HOME` 换的是**家目录**，默认 `$HOME`，设成 `/data/u` 就落到 `/data/u/.voxos/`），
@@ -75,7 +97,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 229 项测试
+make test                                    # 232 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）

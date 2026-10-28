@@ -198,3 +198,61 @@ def test_ci_runs_the_install_smoke_not_a_weaker_one():
     workflow = (root / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
     assert "scripts/install_smoke.sh" in workflow, "CI 没跑安装冒烟"
 
+
+
+# ---------------------------------------------------------------- App 启动链路
+
+def test_port_command_prints_the_configured_port(capsys):
+    """App 启动器靠 `voxos port` 判断服务就绪。写死 8765 会在端口被占时永远等不到。"""
+    cfg = config.Config({"ui": {"port": 9123}})
+    assert main.cmd_port(None, cfg) == 0  # type: ignore[arg-type]
+    assert capsys.readouterr().out.strip() == "9123"
+
+
+def test_busy_port_says_who_holds_it_instead_of_a_traceback(monkeypatch):
+    """端口被别的程序占用时，用户看到的不该是一屏 traceback。
+
+    本机实测：8765 被一个 Xcode 自带 Python 起的目录服务占着，
+    原始报错只有 `OSError: [Errno 48] Address already in use`，
+    既不说谁占的，也不说该改哪个配置。
+    """
+    import errno as _errno
+    from types import SimpleNamespace
+
+    def boom(*_args, **_kwargs):
+        raise OSError(_errno.EADDRINUSE, "Address already in use")
+
+    monkeypatch.setattr(main.ui, "serve", boom)
+    monkeypatch.setattr(main, "_port_holder", lambda port: "Python")
+    monkeypatch.setattr(main, "_ui_context", lambda *a, **k: None)
+    runtime = SimpleNamespace(cfg=config.Config({"ui": {"port": 8766}}))
+    with pytest.raises(SystemExit) as caught:
+        main._serve(runtime)  # type: ignore[arg-type]
+    message = str(caught.value)
+    assert "8766" in message and "ui.port" in message, message
+    assert "Python" in message, "没说清楚是谁占着"
+
+
+def test_enroll_warns_when_only_one_sentence_was_captured(monkeypatch):
+    """只切出 1 句时模板不稳，必须当场说，而不是等用户被自己拒之门外。
+
+    实测：单句模板下同人跨句子只有 0.751，阈值 0.82 时 100% 误拒。
+    """
+    import numpy as np
+
+    monkeypatch.setattr(main, "_record_segments", lambda *a, **k: [np.zeros(3200, dtype="float32")])
+
+    class FakeLock:
+        profiles: dict = {}
+
+        def enroll(self, samples):
+            self.profiles["normal"] = np.ones(192, dtype="float32")
+            return 1.0
+
+        def save(self, path):
+            return None
+
+    result = main._enroll_now(config.Config({"audio": {}}), FakeLock(), 10.0)  # type: ignore[arg-type]
+    assert result["ok"] is True
+    assert result["samples"] == 1
+    assert "再说 2 句" in str(result["warning"]), result

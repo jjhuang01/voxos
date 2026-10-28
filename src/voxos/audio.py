@@ -24,6 +24,7 @@ from .config import Config
 
 __all__ = [
     "wav_to_array", "ArraySource", "MicSource", "SelfHealingSource", "concat_with_silence",
+    "input_devices", "resolve_device", "probe_mic",
     "ScriptedStt", "OpenAiStt", "LocalWhisperStt", "make_stt", "refresh_hotwords",
     "SileroVad", "make_vad", "SherpaEmbedder", "SpectralEmbedder", "make_embedder",
     "Utterance", "AudioPipeline",
@@ -61,15 +62,75 @@ class ArraySource:
         return None
 
 
+def input_devices() -> list[tuple[int, str, float]]:
+    """(索引, 名字, 默认采样率)。查不到就返回空列表——doctor 要能说「没有设备」而不是崩。"""
+    try:
+        import sounddevice as sd  # noqa: PLC0415
+        return [(index, str(info["name"]), float(info["default_samplerate"]))
+                for index, info in enumerate(sd.query_devices())
+                if info["max_input_channels"] > 0]
+    except Exception:  # 没装 PortAudio / 无设备 / 被沙箱拦住
+        return []
+
+
+def _device_list() -> str:
+    return "、".join(f"[{index}] {name}" for index, name, _ in input_devices()) or "（一个都没有）"
+
+
+def resolve_device(spec: object) -> int | None:
+    """把 `audio.input_device` 的写法变成 sounddevice 的索引。空值 = 系统默认。
+
+    为什么需要这个开关：本机的系统默认输入是一个没插东西的音频接口，
+    录得到帧、峰值恒为 0.0000——一切"正常"，就是听不见人说话。
+    所以设备必须能指定；写错时列出可选设备，而不是悄悄回落到默认值假装没事。
+    """
+    text = str(spec or "").strip()
+    if not text:
+        return None
+    if text.lstrip("-").isdigit():
+        return int(text)
+    hits = [(index, name) for index, name, _ in input_devices() if text.lower() in name.lower()]
+    if len(hits) == 1:
+        return hits[0][0]
+    if not hits:
+        raise RuntimeError(f"audio.input_device = {text!r} 没匹配到输入设备。可选：{_device_list()}")
+    detail = "、".join(f"[{index}] {name}" for index, name in hits)
+    raise RuntimeError(f"audio.input_device = {text!r} 匹配到多个设备，写详细一点：{detail}")
+
+
+def probe_mic(seconds: float = 0.5, device: object = None) -> tuple[str, float]:
+    """采一小段，返回 (设备名, 峰值)。打不开就抛 RuntimeError。
+
+    只回答一个问题：**现在这个配置能不能听到人声**。doctor 报这一行，
+    是为了让「设备选错了」当场可见，而不是等用户说十句话都没反应。
+    """
+    try:
+        import sounddevice as sd  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover - 依赖缺失分支
+        raise RuntimeError("需要 sounddevice 才能用麦克风：pipx inject voxos sounddevice") from exc
+    index = resolve_device(device)
+    with sd.InputStream(samplerate=dsp.SR, channels=1, dtype="float32", device=index) as stream:
+        name = str(sd.query_devices(stream.device, kind="input")["name"])
+        block, _ = stream.read(max(1, int(seconds * dsp.SR)))
+    return name, float(np.abs(block).max())
+
+
 class MicSource:
     """真实麦克风（需 sounddevice）；缺依赖时抛出可读错误而不是静默失败。"""
 
-    def __init__(self, chunk: int = 512, sr: int = dsp.SR) -> None:
+    def __init__(self, chunk: int = 512, sr: int = dsp.SR, device: object = None) -> None:
         try:
             import sounddevice as sd  # noqa: PLC0415
         except ImportError as exc:  # pragma: no cover - 依赖缺失分支
             raise RuntimeError("需要 sounddevice 才能用麦克风：pip install 'voxos[audio]'") from exc
-        self._stream = sd.InputStream(samplerate=sr, channels=1, dtype="float32", blocksize=chunk)
+        index = resolve_device(device)
+        try:
+            self._stream = sd.InputStream(samplerate=sr, channels=1, dtype="float32",
+                                          blocksize=chunk, device=index)
+        except Exception as exc:
+            raise RuntimeError(
+                f"打不开输入设备（audio.input_device={device!r}）：{exc}。可选：{_device_list()}"
+            ) from exc
 
     def __enter__(self) -> "MicSource":
         self._stream.start()
@@ -290,7 +351,7 @@ class SpectralEmbedder:
 def make_embedder(cfg: Config) -> tuple[Callable[[np.ndarray], np.ndarray], float, str]:
     """返回 (embedder, threshold, 说明)。优先真实模型，失败则降级并显式告知。"""
     model_path = cfg.path("audio.speaker_model", "")
-    threshold = float(cfg.get("audio.voiceprint_threshold", 0.84))
+    threshold = float(cfg.get("audio.voiceprint_threshold", 0.75))
     if model_path and model_path.exists():
         try:
             return SherpaEmbedder(model_path), threshold, "sherpa-cam++"
