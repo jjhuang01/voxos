@@ -5,7 +5,7 @@
 
 **结论：17 项通过，2 项未达标（声纹 FAR 标定边界 / 中英混说术语召回），均已显式豁免至 2027-03-31。**
 
-生成时间：2026-10-29｜环境：macOS (darwin) / Python 3.13.12 / numpy 2.5.4 / sherpa-onnx 2.0.1
+生成时间：2026-10-28｜环境：macOS (darwin) / Python 3.13.12 / numpy 2.5.4 / sherpa-onnx 2.0.1
 
 ---
 
