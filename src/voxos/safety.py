@@ -41,6 +41,8 @@ class Guard:
         redlines = redlines if redlines is not None else load_redlines()
         self.role = role
         self.forbidden = [re.compile(p, re.IGNORECASE) for p in redlines.get("forbidden", [])]
+        self.irreversible = [(re.compile(p, re.IGNORECASE), label)
+                             for p, label in redlines.get("confirm", {}).items()]
         self.risk = {k: RiskLevel(str(v).upper()) for k, v in redlines.get("risk", {}).items()}
         self.policy = dict(redlines.get("roles", {}).get(role, {"allow": ["*"], "draft": False}))
 
@@ -55,11 +57,24 @@ class Guard:
             return Verdict(RiskLevel.RED_FORBIDDEN,
                            f"当前角色 {self.role} 没有「{human_name(name)}」的权限")
         level = self.risk.get(name, RiskLevel.RED_CONFIRM)  # 未登记 → 保守处理
+        if level is RiskLevel.YELLOW:
+            label = self._irreversible(payload)
+            if label:
+                return Verdict(RiskLevel.RED_CONFIRM,
+                               f"这次要{label}，不可撤销，需要你点头",
+                               draft=bool(self.policy.get("draft")))
         if level is RiskLevel.RED_CONFIRM:
             reason = f"「{human_name(name)}」会真的改动东西，需要你点头"
         else:
             reason = f"{level.value} · {name}"
         return Verdict(level, reason, draft=bool(self.policy.get("draft")))
+
+    def _irreversible(self, payload: str) -> str:
+        """参数里有没有「删掉/清空」这类不可逆动作，有就返回它的中文名。"""
+        for pattern, label in self.irreversible:
+            if pattern.search(payload):
+                return label
+        return ""
 
 
 def human_name(name: str) -> str:

@@ -57,6 +57,45 @@ def test_red_confirm_requires_approval(cfg, bus):
     assert "dry-run" in approved.execute_safely("delegate_to_coding_cli", {"prompt": "重构登录模块"})
 
 
+def test_destructive_wording_upgrades_yellow_to_confirm(cfg, bus):
+    """「删掉 auth.py」走的是写代码通道（YELLOW），必须先问一句。
+
+    修复前：这句话会被直接送进正在运行的 coding CLI，没有任何确认。
+    `forbidden` 里只有 `rm -rf` 这类**命令式**写法，语音用户说的「删掉/清空」
+    一条都没覆盖——等于安全网关对中文不可逆动作完全失明。
+    """
+    asked: list[str] = []
+    denied = core.Executor(cfg=cfg, on_event=bus,
+                           confirm=lambda name, args, verdict: asked.append(verdict.reason) or False)
+    result = denied.execute_safely("dispatch_code_session", {"instruction": "删掉 auth.py"})
+    assert asked, "删除类指令没有走确认通道"
+    assert "已取消" in result
+    assert "删除" in asked[0], asked[0]
+
+
+def test_plain_edit_does_not_ask_again(cfg, bus):
+    """普通修改不该多问一次——确认卡问多了就没人看了。"""
+    asked: list[str] = []
+    executor = core.Executor(cfg=cfg, on_event=bus,
+                             confirm=lambda name, args, verdict: asked.append(name) or True)
+    executor.execute_safely("dispatch_code_session", {"instruction": "把 auth.py 的空值校验补上"})
+    assert not asked
+
+
+def test_green_tools_ignore_destructive_wording(cfg, bus):
+    """「今天删了旧接口」是写日志，不是删东西。
+
+    不可逆词表只作用于 YELLOW。要是连 GREEN 也拦，那每记一条提到「删除」的
+    开发日志都要点一次确认，确认卡很快就会变成无脑点「允许」的仪式。
+    """
+    asked: list[str] = []
+    executor = core.Executor(cfg=cfg, on_event=bus,
+                             confirm=lambda name, args, verdict: asked.append(name) or True)
+    result = executor.execute_safely("append_structured_log", {"content": "今天删了旧接口"})
+    assert not asked
+    assert not result.startswith("⛔")
+
+
 def test_confirm_channel_exception_fails_closed(cfg, bus):
     def boom(*_: object) -> bool:
         raise RuntimeError("确认通道炸了")
