@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import shutil
 import wave
 from pathlib import Path
@@ -20,6 +21,7 @@ REPO = Path(__file__).resolve().parents[1]
 MODEL_DIR = REPO / ".voxos" / "models" / "sense-voice"
 HAS_MODEL = (MODEL_DIR / "model.int8.onnx").exists() and (MODEL_DIR / "tokens.txt").exists()
 HAS_SAY = bool(shutil.which("say") and shutil.which("afconvert"))
+HAS_SHERPA = importlib.util.find_spec("sherpa_onnx") is not None
 needs_model = pytest.mark.skipif(not (HAS_MODEL and HAS_SAY), reason="缺 SenseVoice 模型或 say")
 
 
@@ -30,15 +32,30 @@ def _read_wav(path: Path) -> np.ndarray:
 
 
 def test_missing_model_files_fail_loudly(tmp_path: Path):
-    """模型不在时要立刻说清缺哪个文件，而不是让识别默默返回空串。"""
+    """模型不在时要立刻说清缺哪个文件，而不是让识别默默返回空串。
+
+    这一条测的是「依赖在、文件不在」。没装 sherpa-onnx 时它根本走不到文件检查，
+    那是下一条的事——跳过，不拿别的失败冒充这一条通过。
+    """
+    if not HAS_SHERPA:
+        pytest.skip("缺 sherpa-onnx：这条测的是「有依赖但缺模型文件」")
     with pytest.raises(FileNotFoundError, match="model.int8.onnx"):
+        audio.SenseVoiceStt(tmp_path)
+
+
+def test_missing_sherpa_says_what_to_install(tmp_path: Path):
+    """缺依赖时的报错必须带上安装命令，不能只丢一个裸 ImportError。"""
+    if HAS_SHERPA:
+        pytest.skip("已装 sherpa-onnx，这条测不到缺依赖分支")
+    with pytest.raises(RuntimeError, match=r"voxos\[models\]"):
         audio.SenseVoiceStt(tmp_path)
 
 
 def test_backend_sense_voice_is_wired(tmp_path: Path):
     """配置里写 sense_voice 就得真的走到这个后端（用空目录触发它的报错来证明）。"""
     cfg = load().with_overrides(**{"stt.backend": "sense_voice", "stt.model_dir": str(tmp_path)})
-    with pytest.raises(FileNotFoundError):
+    # 两种「拒绝」都算接线成功：缺依赖报 RuntimeError，缺文件报 FileNotFoundError。
+    with pytest.raises(FileNotFoundError if HAS_SHERPA else RuntimeError):
         audio.make_stt(cfg)
 
 

@@ -46,10 +46,31 @@ jobs:
           cd /tmp
           /tmp/voxos-smoke/bin/voxos tools
           /tmp/voxos-smoke/bin/python -c "from voxos.config import load; c=load(); assert c.get('audio.chunk_size')"
-      - name: 上传安装包
-        uses: actions/upload-artifact@v4
+
+  # 产物走 release 资产，不走 upload-artifact：免费额度的 artifact 存储会被占满
+  # （本项目第一次跑 CI 就撞上了），而 release 资产不占那个配额，也不会 90 天过期。
+  # 代价是 release job 自己再构建一次——几秒钟，换掉一类长期的配额故障。
+  release:
+    needs: [test, package]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          name: voxos-dist
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 90
+          python-version: "3.13"
+      - run: python -m pip install build
+      - name: 重新构建（可重复构建是前提）
+        run: python -m build
+      - name: 发布到 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          gh release create "$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$VERSION" \
+            --notes "安装：pipx install voxos-${VERSION#v}-py3-none-any.whl" \
+            --verify-tag

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ version = "0.1.7"
 description = "只听你一个人说话的语音操作系统 Agent：本地声纹锁 + 快慢双通道路由 + 极简胶囊"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]

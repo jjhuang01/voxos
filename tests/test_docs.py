@@ -49,21 +49,33 @@ def _explain(label: str, claims: dict[int, list[str]]) -> str:
 
 
 def test_test_count_is_the_same_everywhere():
-    claims = _claims(r"(\d+)\s*(?:项测试|passed)")
+    claims = _claims(r"(\d+)\s*项测试")
     assert claims, "一个测试数都没找到，说明措辞变了，改这条测试"
     assert len(claims) == 1, _explain("测试数", claims)
 
 
 def test_test_count_matches_pytest_collection():
-    """文档说多少，就真的有多少——上面那条只保证「到处一样」。"""
+    """文档说多少，就真的有多少——上面那条只保证「到处一样」。
+
+    并且**跳过不等于通过**：以前这条只比「收集数」，于是「207 passed」写在
+    「208 项」旁边也过得去，等于默许把 skip 算成 pass。现在拆开比。
+    """
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "tests", "--collect-only", "-q", "-p", "no:cacheprovider"],
         cwd=ROOT, capture_output=True, text=True, timeout=120,
     )
     match = re.search(r"(\d+) tests? collected", result.stdout)
     assert match, (result.stdout[-500:] + result.stderr[-500:])
-    claimed = next(iter(_claims(r"(\d+)\s*(?:项测试|passed)")))
-    assert int(match.group(1)) == claimed, f"文档写 {claimed} 项，实际收集到 {match.group(1)} 项"
+    collected = int(match.group(1))
+    claimed = next(iter(_claims(r"(\d+)\s*项测试")))
+    assert collected == claimed, f"文档写 {claimed} 项，实际收集到 {collected} 项"
+
+    text = (ROOT / "docs/ACCEPTANCE.md").read_text(encoding="utf-8")
+    run = re.search(r"(\d+) passed \+ (\d+) skipped", text)
+    assert run, "验收表里没写「N passed + M skipped」，无法核对跳过数"
+    passed, skipped = int(run.group(1)), int(run.group(2))
+    assert passed + skipped == collected, (
+        f"文档写 {passed} passed + {skipped} skipped = {passed + skipped}，收集到 {collected}")
 
 
 def test_audit_count_matches_the_script():

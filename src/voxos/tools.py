@@ -109,10 +109,22 @@ def dispatch_code_session(
     project = RT.cfg.path("workspace.default_code_dir", "~/Projects")
     cli = str(RT.cfg.get("workspace.code_cli", "claude"))
     inner = [cli, "-c", "-p", instruction] if cli == "claude" else [cli, "--message", instruction]
+    if RT.dry_run:
+        return _preview_code_session(inner, session_name)
     if not shutil.which("tmux"):
         return f"未安装 tmux，无法派发。手动执行：{' '.join(inner)}"
-    if RT.dry_run:
-        return f"（dry-run）将在 {session_name} 会话执行：{' '.join(inner)}"
+    return _send_to_tmux(inner, session_name, project, new_session)
+
+
+def _preview_code_session(inner: list[str], session_name: str) -> str:
+    """演练模式先于依赖检查：它的用途就是「先看看会执行什么」，
+    而一台还没装 tmux 的机器恰恰最需要先看。真派发才要求 tmux 在。
+    """
+    missing = "" if shutil.which("tmux") else "（注意：本机没有 tmux，真派发会失败）"
+    return f"（dry-run）将在 {session_name} 会话执行：{' '.join(inner)}{missing}"
+
+
+def _send_to_tmux(inner: list[str], session_name: str, project: Path, new_session: bool) -> str:
     # tmux 的 send-keys 是把文本送进一个**活着的 shell**，外层 subprocess 用 argv
     # 不等于最终执行安全。这里先按 shell 规则引用每个参数，再以 -l 原样发送；
     # 否则一句带空格的话就会被拆成多个参数，`$(...)` 也会被 shell 展开。
