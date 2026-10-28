@@ -22,7 +22,7 @@
 | 7 | 角色隔离（OPS 不可写文件） | 必须 | 拒绝并播报「当前角色 OPS 没有…的权限」 | ✅ |
 | 8 | 医疗草稿强制标记 | 必须 | 结果前缀`【未审核草稿】` | ✅ |
 | 9 | 单函数 ≤ 40 行 | 全部 | 最长 **39 行**（`core.dispatch`） | ✅ |
-| 10 | 测试全绿 | 100% | **221 项：220 passed + 1 skipped**（约 25s；skip 是缺 sherpa-onnx 时的互补分支） | ✅ |
+| 10 | 测试全绿 | 100% | **226 项：225 passed + 1 skipped**（约 25s；skip 是缺 sherpa-onnx 时的互补分支） | ✅ |
 | 11 | 跨站 / 无令牌请求被拦截 | 必须 | **401 / 403 / 200** 三个码全对，被拒请求一次都没执行 | ✅ |
 | 12 | 上下文注入不阻塞派发 | p95 < 5ms | **0.01ms**（修复前同步调 osascript 为 271ms） | ✅ |
 | 13 | 设置写回保住注释 | 必须 | 改值、保注释、写到 `--config` 指定文件、非法值零写入 | ✅ |
@@ -116,7 +116,7 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 
 | 模块 | 行数 | 职责 |
 | :--- | ---: | :--- |
-| `main.py` | 699 | CLI 编排 / 守护循环 / 确认闸门 |
+| `main.py` | 724 | CLI 编排 / 守护循环 / 确认闸门 |
 | `audio.py` | 593 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
 | `ui.py` | 461 | 状态总线 / SSE / Earcon / 本地接口 |
 | `core.py` | 369 | 快慢双通道路由 / 多意图切分 / LLM 客户端 |
@@ -129,7 +129,7 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 | `config.py` | 203 | TOML + 环境变量 + 资源根/数据根分离 |
 | `models.py` | 158 | 模型下载 / 校验 / 原子替换（`voxos models`） |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **4219** | 10 个工具 / 4 条快通道 / 221 项测试 |
+| **合计** | **4244** | 10 个工具 / 4 条快通道 / 226 项测试 |
 
 - 最长函数 **39 行**（`scripts/verify.py:measure_stt`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；
@@ -158,7 +158,7 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 - UI 视觉：`scripts/shot.py` 驱动真实页面截 10 个状态，并用 `getBoundingClientRect` 当探针
 - 界面回归：`scripts/audit_ui.py` **12/12 通过**（真实 `voxos serve` + headless Chrome）
 - `voxos demo` 端到端：2 条接受、1 条声纹拒绝，日志与运维工具正常
-- wheel 脱源安装：`dist/voxos-0.1.12-py3-none-any.whl` 装进空 venv，资源根解析到
+- wheel 脱源安装：`dist/voxos-0.1.13-py3-none-any.whl` 装进空 venv，资源根解析到
   `<prefix>/share/voxos`，`redlines 11`、页面 200 且令牌已注入、错令牌 401
 - 模型完整性：CAM++ / Silero / SenseVoice / tokens 四个文件已按实测值填入 SHA256，下载走 `.part` + 校验后原子替换
 - Silero VAD 真实推理：真实语音检出率 92%，静音误报 0%，算力 3.9ms / 秒音频
@@ -169,6 +169,10 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
   在**任意工作目录**下都能找到模型并转写（87ms / 3.01s 音频 = 34.5×；这条测出了一个真 bug）
 - 安装布局下配置可写且升级不丢：首次启动 seed `~/.voxos/settings.toml`，
   设置页/`--config` 改的是它，`<venv>/share/voxos/config` 只当出厂默认值
+- **安装冒烟 6/6**（`scripts/install_smoke.sh`，CI 的 package job 跑同一份）：
+  临时 venv + 临时 HOME、在仓库外的工作目录里跑 `--version` / `doctor` /
+  seed 配置 / 资源根与数据根分家 / `make_stt` 相对路径 / 改配置后安装目录那份
+  一字节没动。两个历史 bug 都做过注入回归，退回去精确变红（见路线图 Task 1.9）
 
 **未验证（不要当成已实现）**
 | 项 | 为什么没测 | 风险 |
@@ -193,7 +197,8 @@ cd voxos
 make setup                         # 首次：建 .venv 并装依赖（约 20s）
 python scripts/fetch_models.py     # 首次：CAM++ 与 Silero（约 28MB，必需）
                                    #       默认含 SenseVoice（229MB，可选）；--no-asr 只取声纹与 VAD
-make test                          # 221 passed
+make test                          # 226 passed
+make install-smoke                 # 构建 wheel 并装进临时 venv，验 6 项（源码跑看不到）
 make verify                        # 回归模式：18 通过 + 1 项 GAP
 make verify-release                # 发布门禁：GAP / SKIP 也算不通过
 make demo                          # 真实语音端到端（沙箱写盘）

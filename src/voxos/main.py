@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import queue
 import secrets
 import shutil
@@ -615,12 +616,34 @@ def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
         ("声纹档案", "已录入" if cfg.path("audio.voiceprint_profiles").exists() else "未录入"),
         ("LLM", f"{cfg.get('llm.model')} @ {cfg.get('llm.base_url')}" if cfg.flag("llm.enabled") else "未启用（走快通道+离线兜底）"),
         ("识别后端", _hotword_note(cfg, [])),
+        ("资源根", str(cfg.root)),
+        ("数据根", str(cfg.data_root)),
+        ("配置文件", _config_note(cfg)),
         ("dry_run", str(cfg.flag("workspace.dry_run"))),
         ("角色", str(cfg.get("workspace.role"))),
     ]
     for name, value in checks:
         print(f"{name:<12} {value}")
     return 0
+
+
+def _config_note(cfg: Config) -> str:
+    """配置在哪、能不能写、会不会被升级冲掉。
+
+    这一行是 0.1.12 那个 bug 的「可观测性」补丁：当时 doctor 只报依赖和模型，
+    看不出自己改的是 `<venv>/share/voxos` 里那份只读资源——于是 268MB 模型配好的
+    `stt.backend` 在 `pipx upgrade` 之后悄悄变回出厂值，没人会怀疑到这儿。
+    所以这里必须报**路径本身**，而不是一个「正常」。
+    """
+    target = cfg.source
+    if target is None:
+        return "未指定（内置默认值，改不了也存不住）"
+    resolved = Path(target).expanduser().resolve()
+    if Path(sys.prefix).resolve() in resolved.parents:
+        return f"{resolved}（在安装目录里，升级会被整份替换）"
+    probe = resolved if resolved.exists() else resolved.parent
+    writable = os.access(probe, os.W_OK)
+    return f"{resolved}（{'可写' if writable else '只读，改配置会失败'}）"
 
 
 def _hotword_note(cfg: Config, words: list[str]) -> str:
@@ -644,6 +667,8 @@ def _version(module: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="voxos", description="VoxOS：只听你一个人说话的语音 Agent")
     parser.add_argument("--config", default=None, help="配置文件路径（默认 config/settings.toml）")
+    parser.add_argument("--version", action="version", version=f"voxos {__version__}",
+                        help="打印版本后退出")
     sub = parser.add_subparsers(dest="command", required=True)
 
     text = sub.add_parser("text", help="用一句话触发（无需麦克风）")

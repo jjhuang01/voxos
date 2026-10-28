@@ -148,10 +148,43 @@
 
 ### Task 1.8 工程化
 
-- [x] 221 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
+- [x] 226 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
       `scripts/audit_ui.py` 12 项界面回归（`make audit-ui`），`scripts/soak.py` 长稳（`make soak`）。
 - [x] 全模块单函数 ≤ 40 行（最长 39 行）、核心五模块共 8 个类、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README / BUSINESS。
+
+### Task 1.9 把「装完就坏」变成 CI 能拦的东西（0.1.13）
+
+起因：0.1.11 和 0.1.12 两个 bug 都属于「源码跑正常、装完就坏」，而 CI 的 package job
+当时只跑 `voxos tools` + `config.load()`——**那一关对这两个 bug 都是绿的**。
+守着一个不会红的绿灯，比没有守卫更糟。
+
+- [x] **真实安装冒烟** `scripts/install_smoke.sh`：临时 venv + 临时 HOME → 在仓库外
+      （`elsewhere/`）跑 `--version` / `doctor` / seed 配置 / 资源根与数据根分家 /
+      `make_stt` 相对路径 / 改配置后安装目录那份一字节没动。CI 与本地跑同一份
+      （`make install-smoke`）。
+- [x] **注入回归（两个都做了）**：把 `_settings_path` 退回「永远用安装目录那份」→ 第 3 步红；
+      把 `make_stt` 退回 `cfg.get` → 第 5 步红，报的路径正是 `elsewhere/.voxos/models/sense-voice`
+      ——精确复现 0.1.11 的病征，不是「反正失败了」。
+- [x] **`voxos --version`**：以前直接报 `arguments are required: command`。加的同时
+      发现 `__init__.py` 的 `__version__` 还停在 **0.1.10**（pyproject 已是 0.1.12），
+      两个 tag 发出去都没人发现——因为界面上没人看。现在有测试钉住两者一致。
+- [x] **`doctor` 报出配置路径本身**：`配置文件  ~/.voxos/settings.toml（可写）`，
+      落在安装目录里则直接写「升级会被整份替换」。0.1.12 难发现就是因为缺这一行。
+- [x] **CI 降本**：macOS runner 按 10 倍计费，平时只跑 3.13，推 tag 时才补 3.11/3.12。
+      一次 push 从 ~120 分钟额度降到 ~40 分钟。
+- [x] **发版门禁补一条**：release job 里校验 tag == pyproject 版本，不一致直接退出
+      （`--verify-tag` 只验证 tag 存在，不验证版本号）。
+- [x] **一个自己写出来的坑**：脚本里 `"$SEEDED（…"` 这种「变量紧跟全角括号」，
+      某些 locale 下 bash 会把全角字节算进变量名，报 `SEEDED<乱码>: unbound variable`。
+      只有走到报错分支才暴露，成功路径永远看不见——所以全改成 `${SEEDED}`。
+- [x] **第二个坑：`make` 会让冒烟假失败**。Makefile 里 `export PYTHONPATH := src`，
+      而仓库里留着可编辑安装的 `src/voxos.egg-info`；pip 顺着 PYTHONPATH 看见它，
+      就认定「voxos 已装了同样的版本」，**静默跳过 wheel 安装**，最后报的是
+      `venv/bin/voxos: No such file or directory`——看上去像路径写错，实际是没装。
+      修法：建 venv 之前就 `unset PYTHONPATH`。这条只在本地跑 `make install-smoke` 时出现，
+      CI 里没有 PYTHONPATH，所以**如果只跑 CI，这个坑会一直藏着**。
+- *验收*：测试 +5（226 项），验收指标不变（安装冒烟是 CI 门禁，不进 `verify.py` 的 19 项）。
 
 ---
 
@@ -187,6 +220,7 @@
 | 降级声纹（无 CAM++ 时）精度不足 | 仅能区分明显不同音色 | 强制引导下载模型，或降级为"仅日志模式" |
 | 无手机端 | 只能在电脑旁说话 | Phase 2 |
 | 多意图的语义切分仅靠连接词 | "记日志，顺便看下负载" 可切分，"帮我搞定" 不行 | 慢通道兜底 + 语料扩充 |
+| `doctor` 的「numpy 缺失」分支不可达 | `audio.py` 在模块顶层 `import numpy`，`main.py` 又导入 audio，所以没装 numpy 时连 `--version` 都跑不出来，`_version("numpy")` 那句「缺失」永远打印不到（装冒烟时实测到的） | 要么把 numpy 改成惰性导入（牵动 audio/dsp/corpus 三处），要么承认它是硬依赖、把那行兜底换成更诚实的说法 |
 
 > 已关闭：「面板未做像素级走查」（`scripts/shot.py` + 10 张真实截图 + `audit_ui.py` 12 条断言）、
 > 「没有打断词」（回声门 + 打断词白名单 + `stop_speaking()`，见 `tests/test_barge.py`）、

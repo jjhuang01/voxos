@@ -13,6 +13,11 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         python: ["3.11", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
+    # macOS runner 按 10 倍计费：三个版本全跑，一次 push 就是 ~120 分钟额度，
+    # 免费额度撑不了几轮（第一次撞上的是 artifact 存储，这次是分钟数）。
+    # 平时只跑 macOS 的 3.13，推 tag 时才把三个版本补齐——平台覆盖没丢，
+    # 只是把贵的那个放到真正要发版的时候花。
+    if: matrix.os != 'macos-latest' || matrix.python == '3.13' || startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,13 +44,12 @@ jobs:
       - run: python -m pip install build
       - name: 构建 wheel 与 sdist
         run: python -m build
-      - name: 脱离源码目录做安装冒烟
-        run: |
-          python -m venv /tmp/voxos-smoke
-          /tmp/voxos-smoke/bin/pip install dist/*.whl
-          cd /tmp
-          /tmp/voxos-smoke/bin/voxos tools
-          /tmp/voxos-smoke/bin/python -c "from voxos.config import load; c=load(); assert c.get('audio.chunk_size')"
+      # 以前这里只跑 `voxos tools` + `config.load()`，而 0.1.11（STT 相对路径按 cwd
+      # 解析）和 0.1.12（设置写回只读的安装资源）两个 bug 都能过那一关——
+      # 守的是一个不会红的绿灯。现在换成真的装进干净 venv、在仓库外跑 doctor、
+      # 改配置、并比对安装目录那份一个字节没动。
+      - name: 安装冒烟（装完才验得出来的 6 项）
+        run: bash scripts/install_smoke.sh dist/*.whl
 
   # 产物走 release 资产，不走 upload-artifact：免费额度的 artifact 存储会被占满
   # （本项目第一次跑 CI 就撞上了），而 release 资产不占那个配额，也不会 90 天过期。
@@ -62,6 +66,20 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install build
+      # tag 和包版本对不上就别发：`--verify-tag` 只验证 tag 存在，不验证版本号，
+      # 忘了改 pyproject 的话会得到一个挂在 v0.1.13 名下的 0.1.12 wheel。
+      - name: tag 必须等于 pyproject 的版本
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          python - "$VERSION" <<'PY'
+          import sys, tomllib
+          tag = sys.argv[1].lstrip("v")
+          version = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          if tag != version:
+              sys.exit(f"❌ tag 是 {tag}，pyproject 是 {version}——先改 pyproject 再打 tag")
+          print(f"✅ tag 与版本一致：{version}")
+          PY
       - name: 重新构建（可重复构建是前提）
         run: python -m build
       - name: 发布到 GitHub Release

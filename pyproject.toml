@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voxos"
-version = "0.1.12"
+version = "0.1.13"
 description = "只听你一个人说话的语音操作系统 Agent：本地声纹锁 + 快慢双通道路由 + 极简胶囊"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,7 +16,7 @@ dependencies = ["numpy>=1.24"]
 audio = ["sounddevice>=0.4.6"]
 models = ["sherpa-onnx>=1.10", "onnxruntime>=1.17"]
 local-stt = ["faster-whisper>=1.0"]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "build>=1.2"]
 
 [project.scripts]
 voxos = "voxos.main:main"

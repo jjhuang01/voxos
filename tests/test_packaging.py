@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
 
-from voxos import config, main, models
+from voxos import __version__, config, main, models
 
 
 def test_models_is_a_subcommand():
@@ -141,3 +142,59 @@ def test_fetch_reads_proxy_from_environment(monkeypatch, tmp_path):
     monkeypatch.setattr(models, "verify", lambda *_: False)
     models.fetch(tmp_path, with_asr=False)
     assert seen and seen[0] == "http://127.0.0.1:7890", f"没读到代理：{seen[:3]}"
+
+
+def test_version_literal_matches_pyproject():
+    """`__version__` 和 `pyproject.toml` 的 version 必须是同一个数。
+
+    这不是洁癖：0.1.11、0.1.12 两个 tag 发出去的时候，`__init__.py` 里还写着
+    **0.1.10**，而没有任何地方会因此报错——直到装上 `--version` 才看见。
+    """
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml")
+                              .read_text(encoding="utf-8"))
+    assert pyproject["project"]["version"] == __version__, (
+        f"pyproject 写 {pyproject['project']['version']}，包里是 {__version__}")
+
+
+def test_version_flag_prints_and_exits(capsys):
+    """`voxos --version` 曾经直接报「缺少 command」——pipx 装完第一件事就是敲它。"""
+    with pytest.raises(SystemExit) as exit_info:
+        main.build_parser().parse_args(["--version"])
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out.strip() == f"voxos {__version__}"
+
+
+def test_doctor_says_where_the_config_lives(tmp_path, capsys):
+    """doctor 必须报出配置路径本身，而不是一个「正常」。
+
+    0.1.12 那个 bug 难发现，就是因为 doctor 里看不出自己改的是哪一份文件。
+    """
+    target = tmp_path / "settings.toml"
+    target.write_text('[stt]\nbackend = "scripted"\n', encoding="utf-8")
+    main.cmd_doctor(None, config.Config({}, source=target))  # type: ignore[arg-type]
+    out = capsys.readouterr().out
+    assert "配置文件" in out and str(target) in out, out
+    assert "可写" in out, out
+
+
+def test_doctor_warns_when_config_is_inside_the_install(tmp_path, capsys):
+    """配置落在安装目录里 = 升级一次就被整份替换，必须在 doctor 里说破。"""
+    installed = Path(sys.prefix) / "share" / "voxos" / "config" / "settings.toml"
+    main.cmd_doctor(None, config.Config({}, source=installed))  # type: ignore[arg-type]
+    out = capsys.readouterr().out
+    assert "升级会被整份替换" in out, out
+
+
+def test_ci_runs_the_install_smoke_not_a_weaker_one():
+    """CI 的安装冒烟必须真的跑 `scripts/install_smoke.sh`。
+
+    原来的 package job 只跑 `voxos tools` + `config.load()`，而 0.1.11 和 0.1.12
+    两个「装完就坏」的 bug 都能过那一关——守的是一个不会红的绿灯。
+    """
+    root = Path(__file__).resolve().parents[1]
+    script = root / "scripts" / "install_smoke.sh"
+    assert script.exists(), "安装冒烟脚本不见了"
+    assert script.stat().st_mode & 0o111, "install_smoke.sh 没有执行权限"
+    workflow = (root / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+    assert "scripts/install_smoke.sh" in workflow, "CI 没跑安装冒烟"
+

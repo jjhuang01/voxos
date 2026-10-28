@@ -5,7 +5,7 @@ PIP_INDEX ?= https://pypi.tuna.tsinghua.edu.cn/simple
 PIP := $(VENV)/bin/python -m pip install -q -i $(PIP_INDEX) --timeout 15 --retries 2
 export PYTHONPATH := src
 
-.PHONY: setup test verify verify-release demo doctor tools audit-ui soak clean
+.PHONY: setup test verify verify-release demo doctor tools audit-ui soak install-smoke clean
 
 # 一条命令把可跑的仓库变成能跑的仓库：建 .venv 并装齐依赖
 setup:
@@ -39,6 +39,14 @@ audit-ui:
 	@curl -s --noproxy '*' -o /dev/null http://127.0.0.1:$${PORT:-8765}/ \
 		|| { echo "❌ 先起服务：voxos serve"; exit 1; }
 	$(PY) scripts/audit_ui.py --port $${PORT:-8765}
+
+# 装一遍再验。源码布局里「资源根 == 数据根」，所以 0.1.11（相对路径按 cwd 解析）
+# 和 0.1.12（配置写回只读的安装资源）在 `make test` 下永远是绿的——它们只在
+# 真的装出来之后才现形。CI 的 package job 跑的是同一个脚本。
+install-smoke:
+	@$(PY) -c "import build" 2>/dev/null || { echo "❌ 缺 build —— 先跑 make setup"; exit 1; }
+	$(PY) -m build
+	bash scripts/install_smoke.sh dist/*.whl $(PY)
 
 # 长稳：默认 30 分钟，覆盖不到真麦克风热插拔
 soak:

@@ -23,7 +23,7 @@
 gh release download --repo jjhuang01/voxos --pattern '*.whl'
 
 # 2. 装成全局命令（pipx 会给它一个独立 venv，不污染你的环境）
-pipx install ./voxos-0.1.12-py3-none-any.whl
+pipx install ./voxos-0.1.13-py3-none-any.whl
 
 # 3. 语音相关依赖（不装也能跑：会降级成能量 VAD + 频谱声纹 + 脚本回放）
 pipx inject voxos sherpa-onnx sounddevice
@@ -39,8 +39,9 @@ voxos doctor
 装完就有的命令：
 
 ```bash
+voxos --version           # 打印版本（和安装包一致，不是手写的另一个数）
 voxos models              # 下载/校验模型（先写 .part，校验通过才原子替换）
-voxos doctor              # 环境自检
+voxos doctor              # 环境自检（含「配置文件在哪、能不能写」）
 voxos enroll --record 3   # 录声纹
 voxos run                 # 守护进程 + 胶囊
 voxos text "Siri，检查一下服务器负载"   # 不打字说话，直接打字
@@ -66,9 +67,10 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 221 项测试
+make test                                    # 226 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
+make install-smoke                           # 装一遍再验（源码跑永远看不到的那 6 项）
 ```
 
 > `make` 会自动优先使用 `.venv/bin/python`；已有自己的环境就 `PY=/path/to/python make test`。
@@ -215,7 +217,7 @@ voxos/
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 221 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/文档自洽
+└── tests/                  # 226 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/文档自洽
 ```
 
 ## 四条关键设计决策
