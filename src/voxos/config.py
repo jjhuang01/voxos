@@ -155,9 +155,37 @@ def _apply_env(data: dict[str, Any]) -> None:
             node[key] = raw
 
 
+_SEED_NOTE = (
+    "# 这份是你自己的 voxos 配置：从安装目录复制出来的第一份，之后只归你。\n"
+    "# 改它、删它都不影响程序本体，`pipx upgrade` 也不会覆盖它。\n"
+    "# 出厂默认值跟着安装包走（<prefix>/share/voxos/config/settings.toml）。\n\n"
+)
+
+
+def _settings_path() -> Path:
+    """当前生效的配置文件在哪。
+
+    源码布局（数据根就是仓库根）下，仓库里那份 `config/settings.toml` 就是当前配置——
+    行为不变。安装布局下不能再用安装目录那份：它只读，而且 `pipx upgrade` 会整份换掉，
+    用户在设置页改的东西活不过一次升级。所以改成「数据根优先，首次从安装目录 seed 一份」。
+    """
+    seed = ROOT / "config" / "settings.toml"
+    if DATA == ROOT:
+        return seed
+    user = DATA / ".voxos" / "settings.toml"
+    if user.exists() or not seed.exists():
+        return user
+    try:
+        user.parent.mkdir(parents=True, exist_ok=True)
+        user.write_text(_SEED_NOTE + seed.read_text(encoding="utf-8"), encoding="utf-8")
+        return user
+    except OSError:
+        return seed          # 系统级安装、家目录不可写：退回安装目录那份，别在启动时炸
+
+
 def load(path: str | Path | None = None) -> Config:
     """加载配置；文件缺失时用内置最小默认值（保证任何机器上都能起来）。"""
-    target = Path(path) if path else ROOT / "config" / "settings.toml"
+    target = Path(path) if path else _settings_path()
     data: dict[str, Any] = {}
     if target.exists():
         with open(target, "rb") as handle:

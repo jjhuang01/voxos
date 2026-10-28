@@ -46,6 +46,38 @@ def test_installed_layout_puts_models_outside_the_venv(monkeypatch, tmp_path):
     assert Path(sys.prefix) not in model_dir.parents, "模型落进了安装目录"
 
 
+def test_installed_layout_uses_a_writable_config_copy(monkeypatch, tmp_path):
+    """装出来的包，配置不能在 `<venv>/share/voxos/config/settings.toml` 里改。
+
+    那份是安装资源：只读、且 `pipx upgrade` 会整份换掉。用户在设置页切的
+    `stt.backend = sense_voice` 如果写在那儿，升级一次就回退成 scripted——
+    268MB 模型白下，而且没人会想到「我的设置被升级吃掉了」。
+    """
+    root = tmp_path / "share" / "voxos"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "settings.toml").write_text('[stt]\nbackend = "scripted"\n', encoding="utf-8")
+    data = tmp_path / "home"
+    monkeypatch.setattr(config, "ROOT", root)
+    monkeypatch.setattr(config, "DATA", data)
+
+    target = config._settings_path()
+    assert target == data / ".voxos" / "settings.toml"
+    assert target.exists() and "scripted" in target.read_text(encoding="utf-8")
+
+    # 复制只发生一次：用户改过之后不能被下一次启动重置回出厂值。
+    target.write_text('[stt]\nbackend = "sense_voice"\n', encoding="utf-8")
+    assert config._settings_path() == target
+    assert "sense_voice" in target.read_text(encoding="utf-8")
+
+
+def test_source_layout_keeps_using_the_repo_config(monkeypatch, tmp_path):
+    """源码布局（数据根就是仓库根）不能凭空多出一份 `.voxos/settings.toml`，
+    否则仓库里那份 config 就不是当前配置了，所有手工验证都会对不上。"""
+    monkeypatch.setattr(config, "ROOT", tmp_path)
+    monkeypatch.setattr(config, "DATA", tmp_path)
+    assert config._settings_path() == tmp_path / "config" / "settings.toml"
+
+
 def test_resource_paths_stay_with_the_install():
     """只读资源（胶囊页面、热词表）跟着安装走，不跟着数据走。"""
     cfg = config.Config({"ui": {"pill_file": "web/pill.html"}},

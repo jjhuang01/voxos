@@ -51,6 +51,10 @@ voxos text "Siri，检查一下服务器负载"   # 不打字说话，直接打�
 不在安装目录里——`pipx upgrade` 重建 venv 时不会把你 267MB 的模型一起删掉。
 只读资源（红线策略、胶囊页面）跟着安装走。
 
+**配置也归你**：首次启动会把出厂配置复制成 `~/.voxos/settings.toml`，之后设置页和
+`--config` 改的都是这一份。装在 venv 里那份只读、而且升级时会被整份替换——
+把 268MB 模型配好的 `stt.backend` 写在里面，升级一次就白配了。
+
 > 从源码跑（下面那节）时数据仍在仓库的 `.voxos/`，两种布局互不干扰。
 
 ## 30 秒上手
@@ -62,7 +66,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 219 项测试
+make test                                    # 221 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
 ```
@@ -211,7 +215,7 @@ voxos/
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 219 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/文档自洽
+└── tests/                  # 221 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/文档自洽
 ```
 
 ## 四条关键设计决策

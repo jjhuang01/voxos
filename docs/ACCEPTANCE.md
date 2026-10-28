@@ -22,7 +22,7 @@
 | 7 | 角色隔离（OPS 不可写文件） | 必须 | 拒绝并播报「当前角色 OPS 没有…的权限」 | ✅ |
 | 8 | 医疗草稿强制标记 | 必须 | 结果前缀`【未审核草稿】` | ✅ |
 | 9 | 单函数 ≤ 40 行 | 全部 | 最长 **39 行**（`core.dispatch`） | ✅ |
-| 10 | 测试全绿 | 100% | **219 项：218 passed + 1 skipped**（约 25s；skip 是缺 sherpa-onnx 时的互补分支） | ✅ |
+| 10 | 测试全绿 | 100% | **221 项：220 passed + 1 skipped**（约 25s；skip 是缺 sherpa-onnx 时的互补分支） | ✅ |
 | 11 | 跨站 / 无令牌请求被拦截 | 必须 | **401 / 403 / 200** 三个码全对，被拒请求一次都没执行 | ✅ |
 | 12 | 上下文注入不阻塞派发 | p95 < 5ms | **0.01ms**（修复前同步调 osascript 为 271ms） | ✅ |
 | 13 | 设置写回保住注释 | 必须 | 改值、保注释、写到 `--config` 指定文件、非法值零写入 | ✅ |
@@ -126,10 +126,10 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 | `dsp.py` | 281 | 纯函数信号处理（零 I/O，可离线测） |
 | `corpus.py` | 224 | 验收语料生成 |
 | `registry.py` | 191 | 工具契约 / `@tool` 自省 / 注册表 |
-| `config.py` | 175 | TOML + 环境变量 + 资源根/数据根分离 |
+| `config.py` | 203 | TOML + 环境变量 + 资源根/数据根分离 |
 | `models.py` | 158 | 模型下载 / 校验 / 原子替换（`voxos models`） |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **4191** | 10 个工具 / 4 条快通道 / 219 项测试 |
+| **合计** | **4219** | 10 个工具 / 4 条快通道 / 221 项测试 |
 
 - 最长函数 **39 行**（`scripts/verify.py:measure_stt`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；
@@ -166,7 +166,9 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
   `voxos models --proxy ...` 下齐 268MB（四个文件 SHA256 全对），`voxos doctor` 里
   声纹模型从「缺失（降级）」变成真实路径
 - 安装布局下 SenseVoice 真实转写：`say` 合成「Siri，检查一下服务器负载」→ int8 模型
-  在**任意工作目录**下都能找到模型并转写（这条测出了一个真 bug，见下）
+  在**任意工作目录**下都能找到模型并转写（87ms / 3.01s 音频 = 34.5×；这条测出了一个真 bug）
+- 安装布局下配置可写且升级不丢：首次启动 seed `~/.voxos/settings.toml`，
+  设置页/`--config` 改的是它，`<venv>/share/voxos/config` 只当出厂默认值
 
 **未验证（不要当成已实现）**
 | 项 | 为什么没测 | 风险 |
@@ -191,7 +193,7 @@ cd voxos
 make setup                         # 首次：建 .venv 并装依赖（约 20s）
 python scripts/fetch_models.py     # 首次：CAM++ 与 Silero（约 28MB，必需）
                                    #       默认含 SenseVoice（229MB，可选）；--no-asr 只取声纹与 VAD
-make test                          # 219 passed
+make test                          # 221 passed
 make verify                        # 回归模式：18 通过 + 1 项 GAP
 make verify-release                # 发布门禁：GAP / SKIP 也算不通过
 make demo                          # 真实语音端到端（沙箱写盘）

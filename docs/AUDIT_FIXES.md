@@ -65,7 +65,7 @@ cd /tmp && /tmp/voxos-smoke/venv/bin/voxos tools
 ## 验证
 
 ```bash
-make test            # 219 passed
+make test            # 221 passed
 make verify          # 回归模式：18 通过 + 1 未达标（混说术语召回，能力边界）
 make verify-release  # 发布门禁：退出码 1（GAP 也算不通过），这是**预期**结果
 ```
@@ -76,12 +76,13 @@ make verify-release  # 发布门禁：退出码 1（GAP 也算不通过），这
 原审计探针 `outputs/audit_probes.py` 保留为**基线证据**：它按 0.1.6 的缺陷写断言，
 修复后多数会变成 `PROBE_ERROR`，这是预期结果，不是回归失败。
 
-## 装完真跑才暴露的一个（0.1.11）
+## 装完真跑才暴露的两个（0.1.11 / 0.1.12）
 
 | 现象 | 根因 | 修复 | 守卫 |
 | :--- | :--- | :--- | :--- |
 | `pipx install` 之后切到 `stt.backend = sense_voice` 就报「`.voxos/models/sense-voice` 里缺 model.int8.onnx」——可在仓库根跑同样的命令又是好的 | `make_stt` 用 `cfg.get("stt.model_dir")` 原样取相对路径，相对的是**当前工作目录**；`make_embedder` / `make_vad` 早就走 `cfg.path()` 了，只有 STT 这一处漏了 | `make_stt` 改 `cfg.path("stt.model_dir", ...)`；顺手把 `refresh_hotwords` 的 workspace 默认值也统一到 `cfg.path()` | `test_relative_model_dir_resolves_against_data_root` |
+| 装完之后**根本改不了配置**：设置页写回的 `<venv>/share/voxos/config/settings.toml` 是只读资源，`pipx upgrade` 还会整份换掉；于是模型下好了也只能一直跑 `scripted` | `load()` 只认 `ROOT/config/settings.toml`，「资源根」和「配置根」被当成了同一个 | 安装布局下配置改读数据根 `~/.voxos/settings.toml`，首次从安装目录 seed 一份（带说明注释）；不可写时退回安装目录那份，不在启动时炸。源码布局行为不变（`DATA == ROOT` 时仍用仓库里那份） | `test_installed_layout_uses_a_writable_config_copy` / `test_source_layout_keeps_using_the_repo_config` |
 
 为什么之前的测试没拦住：跑源码时数据根就是仓库根，而人总是站在仓库根敲命令，
-相对路径「碰巧」是对的。**只有装出来、在别处启动，才会掉进这个坑。**
-这和 A19/A22/A26 是同一类问题——「源码布局下正常」不等于「装完正常」。
+相对路径「碰巧」是对的，配置文件也「碰巧」是可写的那一份。**只有装出来、在别处启动，
+才会掉进这两个坑。** 这和 A19/A22/A26 是同一类问题——「源码布局下正常」不等于「装完正常」。
