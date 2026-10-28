@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voxos"
-version = "0.1.23"
+version = "0.1.24"
 description = "只听你一个人说话的语音操作系统 Agent：本地声纹锁 + 快慢双通道路由 + 极简胶囊"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,7 +14,11 @@ dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
 audio = ["sounddevice>=0.4.6"]
-models = ["sherpa-onnx>=1.10", "onnxruntime>=1.17"]
+# `models` 故意**带上** sounddevice：只有识别引擎、没有麦克风是个没人想要的组合
+# （sherpa-onnx 装上了也听不到声音），而它恰好是「我想要真识别」的人最容易写下的
+# 那一条。实测踩过：`pipx install "voxos[models]"` 之后 App 一开就是
+# 「音频设备异常」。分开装不是自由，是陷阱。
+models = ["sherpa-onnx>=1.10", "onnxruntime>=1.17", "sounddevice>=0.4.6"]
 local-stt = ["faster-whisper>=1.0"]
 dev = ["pytest>=8", "build>=1.2"]
 

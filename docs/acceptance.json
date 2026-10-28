@@ -1,15 +1,15 @@
 {
   "report": {
     "fast_path": {
-      "p50": 0.0008,
+      "p50": 0.0007,
       "p95": 0.0008,
       "p99": 0.0008,
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 0.176,
-      "p95": 0.402,
-      "context_p95": 0.005,
+      "p50": 0.261,
+      "p95": 0.434,
+      "context_p95": 0.004,
       "rounds": 30
     },
     "voiceprint": {
@@ -91,11 +91,11 @@
       "backend": "sherpa-cam++",
       "threshold": 0.75,
       "dispatch_ms": [
-        0.56,
-        199.69
+        0.48,
+        128.59
       ],
-      "wall_ms": 631.9,
-      "realtime_factor": 0.035
+      "wall_ms": 338.2,
+      "realtime_factor": 0.019
     },
     "redlines": {
       "forbidden_cases": 8,
@@ -108,8 +108,8 @@
       "seconds": 30,
       "segments": 0,
       "vad": "SileroVad",
-      "cpu_percent": 0.5,
-      "realtime_factor": 0.006
+      "cpu_percent": 0.34,
+      "realtime_factor": 0.003
     },
     "security": {
       "codes": {
@@ -150,8 +150,8 @@
         "en": 3.1
       },
       "chars": 818,
-      "rtf": 0.035,
-      "wall_s": 2.8,
+      "rtf": 0.027,
+      "wall_s": 2.1,
       "samples": [
         {
           "want": "把刚才登录模块的报错原因记到今天的开发日志里",
@@ -257,8 +257,8 @@
         },
         {
           "file": "src/voxos/audio.py",
-          "lines": 654,
-          "code_lines": 521
+          "lines": 667,
+          "code_lines": 531
         },
         {
           "file": "src/voxos/config.py",
@@ -336,7 +336,7 @@
           "code_lines": 398
         }
       ],
-      "total_lines": 7975,
+      "total_lines": 7988,
       "max_function": {
         "name": "src/voxos/core.py:dispatch",
         "lines": 40
@@ -348,10 +348,10 @@
     },
     "tests": {
       "returncode": 0,
-      "summary": "310 passed, 1 skipped, 2 warnings in 29.04s",
-      "seconds": 29.9
+      "summary": "311 passed, 1 skipped, 2 warnings in 24.03s",
+      "seconds": 24.6
     },
-    "generated_at": "2026-10-29T02:24:03",
+    "generated_at": "2026-10-29T02:41:51",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -367,12 +367,12 @@
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "0.402ms",
+      "measured": "0.434ms",
       "pass": true
     },
     {
       "item": "静音待机 CPU < 1.5%",
-      "measured": "0.5%/秒音频",
+      "measured": "0.34%/秒音频",
       "pass": true
     },
     {
@@ -428,12 +428,12 @@
     },
     {
       "item": "测试全绿",
-      "measured": "310 passed, 1 skipped, 2 warnings in 29.04s",
+      "measured": "311 passed, 1 skipped, 2 warnings in 24.03s",
       "pass": true
     },
     {
       "item": "上下文注入不阻塞派发",
-      "measured": "0.005ms",
+      "measured": "0.004ms",
       "pass": true
     },
     {
@@ -448,7 +448,7 @@
     },
     {
       "item": "本地识别字符错误率 < 10%",
-      "measured": "2.8%（中文 1.4% / 英文 3.1%，24 句，≥20× 实时）",
+      "measured": "2.8%（中文 1.4% / 英文 3.1%，24 句，≥30× 实时）",
       "pass": true,
       "skipped": false
     },

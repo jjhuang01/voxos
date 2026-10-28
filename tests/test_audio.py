@@ -180,3 +180,17 @@ def test_make_embedder_falls_back_without_model(cfg):
 def test_concat_with_silence_lengths(make_voice):
     joined = audio.concat_with_silence([make_voice(118, 0.1), make_voice(118, 0.1)], gap_ms=100)
     assert joined.size == 2 * 1600 + 2 * 1600
+
+
+def test_missing_sounddevice_hint_matches_how_it_was_installed(monkeypatch):
+    """缺 sounddevice 时给的命令必须能直接粘进终端。
+
+    pipx 装出来的包用 `pip install` 补，会补到系统 Python 里，补完还是
+    ImportError——用户照着提示做一遍，问题一点没变。这比不给提示更糟：
+    他会以为自己操作错了，然后再试一次。
+    """
+    monkeypatch.setattr(audio.sys, "prefix", "/Users/x/.local/pipx/venvs/voxos")
+    assert "pipx inject voxos sounddevice" in str(audio._missing_sounddevice(ImportError()))
+
+    monkeypatch.setattr(audio.sys, "prefix", "/usr/local")
+    assert "pip install 'voxos[audio]'" in str(audio._missing_sounddevice(ImportError()))

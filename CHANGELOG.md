@@ -6,6 +6,35 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 
 格式约定：`## [x.y.z] - YYYY-MM-DD`，一个版本一段，从新到旧。
 
+## [0.1.24] - 2026-10-29
+
+起因是 App 一开就显示「音频设备异常：需要 sounddevice 才能用麦克风」。查下去发现
+不是一个 bug，是四个「装错了却看不出来」的口子。
+
+### 修复
+
+- **`[models]` 装上识别引擎却没有麦克风**。`sherpa-onnx` + `onnxruntime` 装好了，
+  但 `sounddevice` 是另一个 extra——于是 App 一开就报「音频设备异常」，引擎在、
+  麦不在。而这个组合恰好是「我想要真识别」的人最容易写下的那一条
+  （`pipx install "voxos[models]"`）。现在 `[models]` 直接包含 `sounddevice`。
+  分开装不是自由，是陷阱。
+
+- **缺 sounddevice 时给命令给错了**。两处报错文案不一致，一处说 `pipx inject`、
+  一处说 `pip install 'voxos[audio]'`——而 **pipx 装出来的包用 `pip install` 补，
+  会补到系统 Python 里，补完还是 ImportError**。用户照着提示做一遍，问题一点没变，
+  然后以为自己操作错了再试一次。现在按 `sys.prefix` 判断安装方式给命令，并加了
+  测试钉住两种分支。
+
+- **胶囊把「怎么修」截掉了**。回应那行是单行省略号，而报错里那句
+  `pip install 'voxos[audio]'` 在最末尾——用户看到
+  「需要 sounddevice 才能用麦克风：pip install 'voxos[audio…」，
+  知道出了什么事，却不知道该怎么办。改成最多折三行 + `overflow-wrap:anywhere`
+  （`voxos[audio]` 没有空格，不折行会直接溢出）。
+
+- **README 的手动安装路径漏了 `onnxruntime`**。`install.sh` 里特意注明它不能省
+  （少了 Silero VAD 会静默降级成能量 VAD，「咳一声」也算说话），但 README 那句
+  `pipx inject voxos sherpa-onnx sounddevice` 少了一个。补齐并写明理由。
+
 ## [0.1.23] - 2026-10-29
 
 这一版全在「说出来」：沙箱结论、启动横幅、失败原因，以及 App 的退出路径。

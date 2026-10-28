@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -98,6 +99,18 @@ def resolve_device(spec: object) -> int | None:
     raise RuntimeError(f"audio.input_device = {text!r} 匹配到多个设备，写详细一点：{detail}")
 
 
+def _missing_sounddevice(exc: ImportError) -> RuntimeError:
+    """缺 sounddevice 时说什么。
+
+    给的命令必须能**直接粘进终端**：pipx 装出来的包用 `pip install` 补，会补到
+    系统 Python 里，补完还是 ImportError——用户照着提示做一遍，问题一点没变，
+    这比不给提示更糟。所以按安装方式分开说。
+    """
+    hint = ("pipx inject voxos sounddevice" if "/pipx/venvs/" in sys.prefix
+            else "pip install 'voxos[audio]'")
+    return RuntimeError(f"需要 sounddevice 才能用麦克风：{hint}")
+
+
 def probe_mic(seconds: float = 0.5, device: object = None) -> tuple[str, float]:
     """采一小段，返回 (设备名, 峰值)。打不开就抛 RuntimeError。
 
@@ -107,7 +120,7 @@ def probe_mic(seconds: float = 0.5, device: object = None) -> tuple[str, float]:
     try:
         import sounddevice as sd  # noqa: PLC0415
     except ImportError as exc:  # pragma: no cover - 依赖缺失分支
-        raise RuntimeError("需要 sounddevice 才能用麦克风：pipx inject voxos sounddevice") from exc
+        raise _missing_sounddevice(exc) from exc
     index = resolve_device(device)
     with sd.InputStream(samplerate=dsp.SR, channels=1, dtype="float32", device=index) as stream:
         name = str(sd.query_devices(stream.device, kind="input")["name"])
@@ -122,7 +135,7 @@ class MicSource:
         try:
             import sounddevice as sd  # noqa: PLC0415
         except ImportError as exc:  # pragma: no cover - 依赖缺失分支
-            raise RuntimeError("需要 sounddevice 才能用麦克风：pip install 'voxos[audio]'") from exc
+            raise _missing_sounddevice(exc) from exc
         index = resolve_device(device)
         try:
             self._stream = sd.InputStream(samplerate=sr, channels=1, dtype="float32",

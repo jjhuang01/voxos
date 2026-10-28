@@ -82,10 +82,14 @@ bash install.sh ./voxos-0.1.15-py3-none-any.whl                # 或 curl 下 sc
 
 ```bash
 pipx install ./voxos-0.1.15-py3-none-any.whl   # 独立 venv，不污染你的环境
-pipx inject voxos sherpa-onnx sounddevice      # 音频依赖；跳过则降级为能量 VAD + 脚本回放
+pipx inject voxos sherpa-onnx sounddevice onnxruntime   # 音频依赖，三个都要
 voxos models --no-asr                          # 28MB 声纹 + VAD；去掉 --no-asr 是 267MB
 voxos doctor
 ```
+
+> `onnxruntime` 不是可选项：少了它 Silero VAD 加载失败，会**静默**降级成能量 VAD——
+> 能跑，但「咳一声」也算说话。这条只有装完才看得出来，所以 `doctor` 会单独报 VAD 后端。
+> 少了 `sounddevice` 则是直接报「音频设备异常」，麦克风根本打不开。
 
 > **升级就重跑同一条命令。** 别用 `pipx install --force`：pipx 1.15 走 uv 后端时
 > 重建 venv 会报 `A virtual environment already exists at: .`，然后拒绝删除
@@ -145,7 +149,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 311 项测试
+make test                                    # 312 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
@@ -320,7 +324,7 @@ voxos/
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 311 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/命令沙箱/定时/文档自洽
+└── tests/                  # 312 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/命令沙箱/定时/文档自洽
 ```
 
 ## 四条关键设计决策
@@ -379,11 +383,15 @@ JSON Schema 由类型注解自省生成（`registry.py`），正则快通道由�
 ## 依赖
 
 ```bash
-pip install -e ".[models]"     # numpy + sherpa-onnx + onnxruntime（推荐）
-pip install -e ".[audio]"      # + sounddevice（真麦克风）
+pip install -e ".[models]"     # numpy + sherpa-onnx + onnxruntime + sounddevice（推荐）
+pip install -e ".[audio]"      # 只要 sounddevice（真麦克风，不装识别模型）
 pip install -e ".[dev]"        # + pytest
 python scripts/fetch_models.py # 声纹 + VAD + SenseVoice 识别模型（约 267MB）
 ```
+
+`[models]` 里带上 sounddevice 是故意的：只有识别引擎没有麦克风是个没人想要的组合，
+而它恰好是「我想要真识别」的人最容易写下的那一条。装上之后 App 一开就是
+「音频设备异常」——引擎在、麦不在。
 
 核心链路（core/tools/ui/config）**只用标准库**；numpy 仅用于音频。
 

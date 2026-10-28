@@ -93,10 +93,16 @@
   .caption{width:100%;max-width:340px;display:flex;flex-direction:column;gap:1px;
     align-items:center;text-align:center;animation:drop .18s cubic-bezier(.2,.8,.2,1)}
   .caption[hidden]{display:none}
-  .caption .said,.caption .replied{max-width:100%;white-space:nowrap;
-    overflow:hidden;text-overflow:ellipsis;line-height:1.5}
-  .caption .said{font-size:12px;color:var(--dim)}
-  .caption .replied{font-size:12.5px;color:var(--ink)}
+  .caption .said{max-width:100%;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;line-height:1.5;font-size:12px;color:var(--dim)}
+  /* 回应允许折三行。原来和 .said 一样是单行省略号，而报错里那句「怎么修」
+     通常在最末尾——正好被切掉：用户看到「需要 sounddevice 才能用麦克风：
+     pip install 'voxos[audio…」，知道出了什么事，却不知道该怎么办。
+     `overflow-wrap:anywhere` 是给命令用的：`voxos[audio]` 这种没有空格的长串
+     不折行就会直接溢出。 */
+  .caption .replied{max-width:100%;line-height:1.5;font-size:12.5px;color:var(--ink);
+    display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
+    overflow:hidden;overflow-wrap:anywhere}
   .caption .replied[hidden]{display:none}
 
   /* ---------------- 面板 ---------------- */
