@@ -23,7 +23,7 @@
 gh release download --repo jjhuang01/voxos --pattern '*.whl'
 
 # 2. 装成全局命令（pipx 会给它一个独立 venv，不污染你的环境）
-pipx install ./voxos-0.1.9-py3-none-any.whl
+pipx install ./voxos-0.1.10-py3-none-any.whl
 
 # 3. 语音相关依赖（不装也能跑：会降级成能量 VAD + 频谱声纹 + 脚本回放）
 pipx inject voxos sherpa-onnx sounddevice
