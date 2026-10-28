@@ -282,6 +282,17 @@ SPECS = [
      "setup": "(() => { setUndo(true); document.querySelector('.body').scrollTop = 99999; })()"},
     {"name": "narrow", "path": "/?panel=recent&still=1", "width": 340,
      "setup": "switchTab('recent')"},
+    # 常驻监听这一轮加的三个状态。胶囊下面那两行是主要反馈：
+    # 不给的话用户只能打开面板翻记录，才知道有没有听对。
+    {"name": "caption-done", "path": "/?still=1", "height": 200,
+     "setup": "(() => { render({state:'executing', label:'处理中…', detail:'打开微信'});"
+              "render({state:'done', label:'完成', detail:'已打开 WeChat'}); })()"},
+    {"name": "miss", "path": "/?still=1", "height": 200,
+     "setup": "(() => { render({state:'executing', label:'处理中…', detail:'帮我订一张机票'});"
+              "render({state:'miss', label:'没听懂',"
+              "detail:'还没学会这句。能做的有：打开应用、问时间、查服务器负载、记日志。'}); })()"},
+    {"name": "paused-620", "path": "/?panel=status&still=1", "height": 620,
+     "setup": "new Promise(ok => setTimeout(() => { applyListening(false); ok(true); }, 700))"},
 ]
 
 if __name__ == "__main__":
