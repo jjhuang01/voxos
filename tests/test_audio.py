@@ -194,3 +194,91 @@ def test_missing_sounddevice_hint_matches_how_it_was_installed(monkeypatch):
 
     monkeypatch.setattr(audio.sys, "prefix", "/usr/local")
     assert "pip install 'voxos[audio]'" in str(audio._missing_sounddevice(ImportError()))
+
+
+class _AlwaysOk:
+    """声纹永远通过的替身：这一组测的是分段行为，不是身份判定。"""
+
+    def verify(self, audio):
+        return True, 1.0
+
+
+class _CountingStt:
+    """记下每次调用的音频长度，用来验证「只解结尾」和「不复用错引擎」。"""
+
+    partial_equals_final = True
+
+    def __init__(self, text: str = "打开微信") -> None:
+        self.text = text
+        self.calls: list[tuple[int, bool]] = []
+
+    def transcribe(self, audio, final: bool = False) -> str:
+        self.calls.append((int(audio.size), final))
+        return self.text
+
+
+class _PlainStt(_CountingStt):
+    """不声明 partial == final 的引擎（远端 Whisper、脚本回放都属于这一类）。"""
+
+    partial_equals_final = False
+
+
+def test_endpoint_check_only_decodes_the_tail(cfg, make_voice, silence):
+    """判「说完没」只看结尾，所以不该把整段重新解一遍。
+
+    离线引擎解码耗时随音频线性涨（实测 2s→68ms，12s→283ms）。长句子上每次复查
+    都整段重解，是最容易被忽略的 CPU 黑洞——而且它就在识别线程里。
+    """
+    stt = _CountingStt()
+    pipeline = audio.AudioPipeline(cfg=cfg, stt=stt, lock=_AlwaysOk(), on_event=lambda *a: None)
+    stream = np.concatenate([make_voice(118, 4.0, seed=7), silence(600)])
+    list(pipeline.run(audio.ArraySource(stream)))
+
+    partial = [n for n, final in stt.calls if not final]
+    assert partial, "应该至少复查一次"
+    window = int(audio.dsp.SR * float(cfg.get("audio.partial_window_ms", 3000)) / 1000)
+    assert max(partial) <= window + 512, f"复查解了 {max(partial)} 采样，超出窗口 {window}"
+
+
+def test_partial_result_is_reused_only_when_engine_says_so(cfg, make_voice, silence):
+    """引擎声明 partial == final 时省掉终稿重解；没声明的引擎必须老实重解。
+
+    写错过一次：条件只判了「文本非空」，于是脚本回放引擎（final 才推进队列）
+    的 peek 结果被当成终稿，同一句话被反复派发。
+    """
+    stream = np.concatenate([make_voice(118, 1.2, seed=8), silence(700)])
+    reuse = _CountingStt()
+    list(audio.AudioPipeline(cfg=cfg, stt=reuse, lock=_AlwaysOk(),
+                             on_event=lambda *a: None).run(audio.ArraySource(stream)))
+    assert not [call for call in reuse.calls if call[1]], "声明了 partial==final 就不该再解一次"
+
+    plain = _PlainStt()
+    list(audio.AudioPipeline(cfg=cfg, stt=plain, lock=_AlwaysOk(),
+                             on_event=lambda *a: None).run(audio.ArraySource(stream)))
+    assert [call for call in plain.calls if call[1]], "没声明的引擎必须走 final 重解"
+
+
+def test_prefix_padding_keeps_the_audio_before_speech_starts(cfg, make_voice, silence):
+    """VAD 逐块判，第一个音素常落在「上一块」里——不补就把起手字削掉。"""
+    pipeline = audio.AudioPipeline(cfg=cfg, stt=_CountingStt(), lock=_AlwaysOk(),
+                                   on_event=lambda *a: None)
+    spoken = make_voice(118, 1.0, seed=9)
+    stream = np.concatenate([silence(800), spoken, silence(700)])
+    got = [u for u in pipeline.run(audio.ArraySource(stream)) if u.accepted]
+    assert len(got) == 1
+    # 1.0s 人声 + 300ms 前缀 + 尾部静音，必然明显长于 1.0s
+    assert got[0].audio_ms > 1000 + float(cfg.get("audio.prefix_padding_ms", 300)) * 0.8
+
+
+def test_min_speech_gate_counts_voice_not_buffer(cfg, make_voice, silence):
+    """加了 prefix padding 之后缓冲一定比人声长，门禁必须按人声时长算。
+
+    否则一声咳嗽 + 300ms 前缀就能凑过 200ms 的门槛，转写出一段空话。
+    """
+    pipeline = audio.AudioPipeline(cfg=cfg, stt=_CountingStt(), lock=_AlwaysOk(),
+                                   on_event=lambda *a: None)
+    stream = np.concatenate([silence(600), make_voice(118, 0.08, seed=10), silence(700)])
+    got = list(pipeline.run(audio.ArraySource(stream)))
+    assert got, "这段必须产生一条记录——否则这条测试就是空过"
+    assert all(not u.accepted for u in got), f"80ms 的气音不该被接受：{[(u.accepted, u.reason) for u in got]}"
+    assert "太短" in got[0].reason

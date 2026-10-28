@@ -11,9 +11,18 @@ vad_threshold = 0.5
 vad_backend = "auto"          # auto | silero | energy（auto：有模型用 silero，否则能量 VAD）
 silero_model = ".voxos/models/silero_vad.onnx"
 speaker_model = ".voxos/models/campplus.onnx"   # CAM++ 声纹模型；缺失则降级频谱声纹
-silence_duration_ms = 800     # 停顿超过此值判定一句话结束
+silence_duration_ms = 500     # 静音超过此值 → 进入「候选端点」，开始问「说完了吗」
+                              # 旧值 800：从最后一个字到开始处理白等 0.8s，比豆包/ChatGPT
+                              # 慢一倍多。降噪靠语义尾词判断兜住，不是靠等更久。
+endpoint_extend_ms = 2500     # 候选端点发现「没说完」（结尾是「然后」「比如」…）时，
+                              # 再多等这么久。这是「断断续续说」的容忍窗口：
+                              # 短了会抢话，长了会显得迟钝。OpenAI 的 eagerness 就是这个东西。
+prefix_padding_ms = 300       # 判出人声时，往前补这么多音频。VAD 逐块判，第一个音素
+                              # 往往落在上一块里——不补就把「嗯」「把」这类轻声起头削掉。
+partial_window_ms = 3000      # 判「说完没」只解最后这么久。离线解码耗时随长度线性涨
+                              # （实测 2s→68ms，12s→283ms），而判断只看结尾。
 max_utterance_ms = 12000      # 单句硬上限，防止一直说不停
-min_speech_ms = 200           # 低于此人声时长视为噪音
+min_speech_ms = 200           # 真实人声短于此视为噪音（按人声时长算，不含 prefix padding）
 voiceprint_threshold = 0.75   # 实测标定：录 3 句取均值后，真麦克风同人最低 0.786 / 异人最高 0.715
                               # 旧值 0.82 的问题：只录 1 句时同人换句话只有 0.751，等于录完就被自己拒
                               # 对照：合成语料下 0.76 时 FAR 1.67%，0.86 时 FRR 8.3%（见 docs/ACCEPTANCE.md）

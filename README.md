@@ -149,7 +149,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 312 项测试
+make test                                    # 316 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
@@ -289,6 +289,7 @@ voxos/
 ├── DESIGN_SYSTEM.md        # 胶囊四态、Earcon、声学补偿、无障碍
 ├── TODO_ROADMAP.md         # 分阶段验收清单（含真实完成状态）
 ├── docs/ACCEPTANCE.md      # 实测验收报告（数字来自 scripts/verify.py）
+├── docs/VOICE.md           # 语音质量：和豆包/ChatGPT 差在哪、实测数据、选型与路线图
 ├── docs/PERFORMANCE.md     # 启动/内存/依赖的实测数字与复现命令
 ├── docs/PRODUCT.md         # 产品决定与它们的代价（乔布斯/张小龙/Apple HIG）
 ├── config/
@@ -321,10 +322,11 @@ voxos/
 │   ├── fetch_models.py     # 模型下载（支持代理；--no-asr 跳过 239MB 识别模型）
 │   ├── shot.py             # 零依赖 CDP 客户端：截 10 个界面状态，也能当探针量尺寸
 │   ├── bench.py            # 性能标定：启动分段 / 常驻内存 / VAD 与识别成本
+│   ├── voice_bench.py      # 语音链路测量：端点白等（算法）/ 判定耗时（墙钟），分开报
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 312 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/命令沙箱/定时/文档自洽
+└── tests/                  # 316 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/命令沙箱/定时/文档自洽
 ```
 
 ## 四条关键设计决策

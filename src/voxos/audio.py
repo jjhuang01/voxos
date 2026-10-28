@@ -444,6 +444,8 @@ class OpenAiStt:
 class LocalWhisperStt:
     """本地 faster-whisper（可选依赖）。"""
 
+    partial_equals_final = True      # 忽略 final 参数，每次都是整段重解
+
     def __init__(self, model: str = "small", hotwords: list[str] | None = None) -> None:
         try:
             from faster_whisper import WhisperModel  # noqa: PLC0415
@@ -461,12 +463,17 @@ class LocalWhisperStt:
 class SenseVoiceStt:
     """本地 SenseVoice（sherpa-onnx）：中英混说 + 代码术语，int8 在 CPU 上快于实时。
 
-    离线模型，`final` 参数被忽略——每次调用都是对整段音频重新解码。
-    因此管道里"边听边判是否说完"的复查点会真的花 CPU（实测 3 秒音频 94ms，
-    约 32× 实时），这是本地离线识别的固有代价，换来的是完全不出网。
+    离线模型，`final` 参数被忽略——每次调用都是对整段音频重新解码，而且耗时随
+    音频长度线性涨（本机实测：0.5s→22ms，2s→68ms，6s→138ms，12s→283ms）。
+    所以管道做了两件事：判「说完没」只解结尾那一小段（`partial_window_ms`），
+    终稿直接复用候选态那次解码（`partial_equals_final`）。换来的是完全不出网。
     """
 
     _TAG = re.compile(r"<\|[^|]*\|>")          # <|zh|><|NEUTRAL|><|Speech|><|withitn|>
+
+    # 离线引擎：`final` 参数被忽略，解一次就是整段。所以候选态那次解码的结果
+    # 和终稿完全一致，没必要再解一遍——实测 6 秒音频能省 138ms，12 秒省 283ms。
+    partial_equals_final = True
 
     def __init__(self, model_dir: str | Path, num_threads: int = 2,
                  language: str = "auto") -> None:
@@ -568,22 +575,51 @@ class AudioPipeline:
 
     def __post_init__(self) -> None:
         self._ep = dsp.EndpointDetector(
-            silence_ms=float(self.cfg.get("audio.silence_duration_ms", 800)),
+            silence_ms=float(self.cfg.get("audio.silence_duration_ms", 500)),
+            extended_ms=float(self.cfg.get("audio.endpoint_extend_ms", 2500)),
             max_ms=float(self.cfg.get("audio.max_utterance_ms", 12000)),
             min_speech_ms=float(self.cfg.get("audio.min_speech_ms", 200)),
         )
+        # 必须 reset 一次：`deadline_ms` 是 dataclass 默认值，只有 `reset()` 才把它
+        # 设成上面那个 `silence_ms`。不调的话，**第一句话**用的是 800 而不是配置值——
+        # 这个 bug 靠读代码看不出来，是靠 `scripts/voice_bench.py` 量出来的。
+        self._ep.reset()
         self.mask_mode = self.cfg.flag("audio.mask_mode", False)
+        self.prefix_ms = float(self.cfg.get("audio.prefix_padding_ms", 300))
+        self.window_ms = float(self.cfg.get("audio.partial_window_ms", 3000))
+        self._prefix: list[np.ndarray] = []
+        self._prefix_ms = 0.0
 
     def reset(self) -> None:
         """设备断流后清掉句级状态：旧缓冲、端点状态和 VAD 上下文都不能跨断流。"""
         self._ep.reset()
+        self._prefix, self._prefix_ms = [], 0.0
         reset = getattr(self.vad, "reset", None)
         if callable(reset):
             reset()
 
+    def _keep_prefix(self, chunk: np.ndarray) -> None:
+        """攒「说话之前」那一小段音频，最多 `prefix_padding_ms`。
+
+        VAD 是逐块判的：判出「这块有语音」时，人声的第一个音素往往已经在**上一块**
+        里了。直接从第一块「有语音」的音频开始攒，开头几个字就被削掉——中文里
+        最常被削的正是「嗯」「把」「那」这类轻声起头。OpenAI 的 `server_vad` 有
+        `prefix_padding_ms`（示例值 300ms）就是为这件事，这里照抄。
+        """
+        if self.prefix_ms <= 0:
+            return
+        self._prefix.append(chunk)
+        self._prefix_ms += chunk.size / dsp.SR * 1000.0
+        while len(self._prefix) > 1 and self._prefix_ms - \
+                self._prefix[0].size / dsp.SR * 1000.0 >= self.prefix_ms:
+            head = self._prefix.pop(0)
+            self._prefix_ms -= head.size / dsp.SR * 1000.0
+
     def run(self, source: Iterable[np.ndarray]) -> Iterator[Utterance]:
         buffer: list[np.ndarray] = []
         last_partial_ms = 0.0
+        started = False
+        self._prefix, self._prefix_ms = [], 0.0
         for raw in source:
             chunk = self._preprocess(raw)
             if not self.echo.allow_chunk(dsp.dbfs(chunk)):
@@ -592,7 +628,12 @@ class AudioPipeline:
                 chunk = np.zeros_like(chunk)
             state = self._ep.push(bool(self.vad.is_speech(chunk)), chunk.size)  # type: ignore[attr-defined]
             if state == "idle":
+                self._keep_prefix(chunk)
                 continue
+            if not started:
+                buffer.extend(self._prefix)     # 起手那 300ms 补回去
+                self._prefix, self._prefix_ms = [], 0.0
+                started = True
             buffer.append(chunk)
             if state not in ("candidate", "force_end"):
                 continue
@@ -604,6 +645,7 @@ class AudioPipeline:
             buffer.clear()
             self._ep.reset()
             last_partial_ms = 0.0
+            started = False
             yield result
         if buffer:
             yield self._finalize(buffer)             # 收尾必产一段，缓冲随之清空
@@ -626,34 +668,49 @@ class AudioPipeline:
         audio_ms = audio.size / dsp.SR * 1000.0
         if audio_ms - last_partial_ms < self.partial_interval_ms:
             return None                            # 还没到复查点，省一次 STT
+        # 判「说完没」只看结尾，所以只解最后 `partial_window_ms`。整段重解是白花：
+        # 本机实测 SenseVoice 解码耗时随音频线性涨（0.5s→22ms，12s→283ms），
+        # 而 `should_end` 只关心末尾有没有「把」「然后」这类半截话。
+        tail = audio[-int(dsp.SR * self.window_ms / 1000):] if self.window_ms > 0 else audio
         if getattr(self.stt, "remote", False):
             # 远端识别会把音频上传。身份没确认之前，一个字节都不该离开本机。
             ok, score = self.lock.verify(audio)
             if not ok:
                 return self._drop(audio_ms, score, "声纹不匹配，已丢弃")
-        if not self._ep.should_end(self.stt.transcribe(audio, final=False)):
+        text = self.stt.transcribe(tail, final=False)
+        if not self._ep.should_end(text):
             return None                            # 半截话，继续等（语义尾词等待）
-        return self._finalize(buffer)              # 终稿重新解码，保证文本权威
+        # 只解了结尾时，这份文本不完整，不能当终稿；解了全段才能省掉下面那次重解。
+        return self._finalize(buffer, text if tail.size == audio.size else "")
 
-    def _finalize(self, buffer: list[np.ndarray]) -> Utterance:
+    def _finalize(self, buffer: list[np.ndarray], text: str = "") -> Utterance:
         """收尾一段话，**永远返回一个 Utterance**——哪怕是空转写。
 
         返回 `None` 会被 `run()` 理解成「还没说完，继续攒」，而那只在候选态成立。
         一旦 VAD 判了硬上限或静音收尾，缓冲就必须清掉：留着它，下一块音频会把
         整段重新拼一遍再解码一次，句子越长越慢，最后把管道拖死。
         真机上的触发条件很普通——一声咳嗽、一次 VAD 假阳性，转写出来是空的。
+
+        `text` 非空表示调用方已经解过全段（离线引擎 partial == final），
+        直接用它，省掉一次 100–300ms 的重解。
         """
         audio = np.concatenate(buffer) if buffer else np.zeros(0, dtype=np.float32)
         audio_ms = audio.size / dsp.SR * 1000.0
-        if audio_ms < float(self.cfg.get("audio.min_speech_ms", 200)):
+        # 用真实人声时长判「太短」，不用缓冲长度：加了 prefix padding 之后，
+        # 缓冲一定比人声长 300ms，一声咳嗽就能凑过 200ms 的门槛。
+        if self._ep.speech_ms < float(self.cfg.get("audio.min_speech_ms", 200)):
             return self._drop(audio_ms, 0.0, "太短，已丢弃")
         ok, score = self.lock.verify(audio)
         if not ok:
             return self._drop(audio_ms, score, "声纹不匹配，已丢弃")
-        try:
-            text = self.stt.transcribe(audio, final=True)
-        except Exception as exc:                   # 单句识别失败不能杀死整条监听
-            return self._drop(audio_ms, score, f"识别失败：{exc}")
+        if not text or not getattr(self.stt, "partial_equals_final", False):
+            # 只有引擎自己声明「partial 就是 final」才能省这次解码。别的引擎
+            # （远端 Whisper、脚本回放）的 final 走的是另一条路——脚本回放的
+            # final 才推进队列，复用它会让同一句话被反复派发。
+            try:
+                text = self.stt.transcribe(audio, final=True)
+            except Exception as exc:               # 单句识别失败不能杀死整条监听
+                return self._drop(audio_ms, score, f"识别失败：{exc}")
         if not text.strip():
             return self._drop(audio_ms, score, "空转写，已丢弃")
         if not self.echo.allow_text(text):
