@@ -149,7 +149,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 336 项测试
+make test                                    # 337 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
@@ -327,7 +327,7 @@ voxos/
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 336 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/语音合成/命令沙箱/定时/文档自洽
+└── tests/                  # 337 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/语音合成/命令沙箱/定时/文档自洽
 ```
 
 ## 四条关键设计决策

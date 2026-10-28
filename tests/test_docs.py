@@ -152,3 +152,35 @@ def test_acceptance_names_the_real_longest_function():
     assert (int(match.group(1)), match.group(2)) == (length, name), (
         f"文档写 {match.group(1)} 行（{match.group(2)}），"
         f"实际最长是 {length} 行（{name}）")
+
+
+_HEREDOC = re.compile(r"<<-?\s*([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def test_unquoted_heredocs_have_no_backticks():
+    """未加引号的 heredoc 里，反引号会在**执行时**被当成命令替换。
+
+    `scripts/build_app.sh` 用 `<<LAUNCHER`（没加引号）生成 App 启动器，于是
+    注释里随手写的 `wait -n` 会在**构建机上真的被执行一遍**。0.1.23~0.1.27
+    一直在刷「WINDOW_PID: unbound variable」和「wait: -n: invalid option」。
+
+    讽刺的是同一段 heredoc 上方第 109 行就写着「注释里也不能写反引号」——
+    规矩写在旁边，然后写规矩的人自己违反了它。所以这条必须是**能自动跑的**，
+    不能只是注释。
+    """
+    text = (ROOT / "scripts" / "build_app.sh").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    bad: list[str] = []
+    index = 0
+    while index < len(lines):
+        match = _HEREDOC.search(lines[index])
+        index += 1
+        if not match:
+            continue
+        terminator = match.group(1)
+        while index < len(lines) and lines[index].strip() != terminator:
+            if "`" in lines[index]:
+                bad.append(f"  {index + 1}: {lines[index].strip()[:90]}")
+            index += 1
+        index += 1
+    assert not bad, "未加引号的 heredoc 里不能有反引号（构建时会被执行）：\n" + "\n".join(bad)
