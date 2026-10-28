@@ -6,6 +6,20 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 
 格式约定：`## [x.y.z] - YYYY-MM-DD`，一个版本一段，从新到旧。
 
+## [0.1.16] - 2026-10-28
+
+### 修复
+
+- **装完之后 VAD 静默降级**。`onnxruntime` 只写在 `models` extra 里，而 `install.sh`
+  只注入 `sherpa-onnx sounddevice`——于是 Silero VAD 加载失败，回落到能量 VAD。
+  能跑，但一声咳嗽、一次关门都会被当成说话，而日志里只有一行
+  `[voxos] Silero VAD 加载失败，降级能量 VAD`，很容易被当成正常输出忽略。
+  - 安装脚本补上 `onnxruntime`（它不是一个可选优化：模型文件下了却用不上）。
+  - `doctor` 增加「VAD 后端」一行，降级当场可见。
+- 这条是在真机把整条链路跑通之后才发现的：`voxos run` 已经能听懂
+  「Siri，检查一下服务器负载」并回复「负载 7.4/5.7，磁盘 94%…17ms」，
+  而同一份日志里就躺着那行降级警告。
+
 ## [0.1.15] - 2026-10-28
 
 ### 新增

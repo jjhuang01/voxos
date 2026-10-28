@@ -104,12 +104,14 @@ pipx uninstall voxos >/dev/null 2>&1 || true
 pipx install "$WHEEL" >/dev/null || die "pipx 安装失败，加 -v 看详情：pipx install -v $WHEEL"
 
 if [ "$WITH_AUDIO" = 1 ]; then
-    step "5/5 音频依赖（sherpa-onnx + sounddevice）"
+    step "5/5 音频依赖（sherpa-onnx + sounddevice + onnxruntime）"
     # 装了就会在下次 `install --force` 时被清掉，所以每次安装都重放一遍；
     # --force 让重复执行不报「已经装了」。
-    if ! pipx inject --force voxos sherpa-onnx sounddevice >/dev/null 2>&1; then
+    # onnxruntime 不是可选的：少了它 Silero VAD 加载失败，会静默降级成能量 VAD——
+    # 能跑，但「咳一声」也会被当成说话。这条只有装完才看得出来。
+    if ! pipx inject --force voxos sherpa-onnx sounddevice onnxruntime >/dev/null 2>&1; then
         warn "音频依赖没装上（可能没网或源不通）。核心链路仍可用，语音会降级成脚本回放。"
-        warn "手动补：pipx inject voxos sherpa-onnx sounddevice"
+        warn "手动补：pipx inject voxos sherpa-onnx sounddevice onnxruntime"
     fi
 else
     step "5/5 跳过音频依赖（--no-audio）"

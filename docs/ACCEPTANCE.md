@@ -116,7 +116,7 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 
 | 模块 | 行数 | 职责 |
 | :--- | ---: | :--- |
-| `main.py` | 872 | CLI 编排 / 守护循环 / 确认闸门 |
+| `main.py` | 883 | CLI 编排 / 守护循环 / 确认闸门 |
 | `audio.py` | 654 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
 | `ui.py` | 461 | 状态总线 / SSE / Earcon / 本地接口 |
 | `core.py` | 369 | 快慢双通道路由 / 多意图切分 / LLM 客户端 |
@@ -129,7 +129,7 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 | `config.py` | 203 | TOML + 环境变量 + 资源根/数据根分离 |
 | `models.py` | 158 | 模型下载 / 校验 / 原子替换（`voxos models`） |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **4457** | 10 个工具 / 4 条快通道 / 232 项测试 |
+| **合计** | **4468** | 10 个工具 / 4 条快通道 / 232 项测试 |
 
 - 最长函数 **39 行**（`scripts/verify.py:measure_stt`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；

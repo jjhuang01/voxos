@@ -747,6 +747,7 @@ def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
         ("LLM", f"{cfg.get('llm.model')} @ {cfg.get('llm.base_url')}" if cfg.flag("llm.enabled") else "未启用（走快通道+离线兜底）"),
         ("识别后端", _hotword_note(cfg, [])),
         ("输入设备", _mic_note(cfg)),
+        ("VAD 后端", _vad_note(cfg)),
         ("资源根", str(cfg.root)),
         ("数据根", str(cfg.data_root)),
         ("配置文件", _config_note(cfg)),
@@ -784,6 +785,16 @@ def _hotword_note(cfg: Config, words: list[str]) -> str:
     if audio.supports_hotwords(cfg):
         return f"{label}（热词表 {len(words)} 条生效）"
     return f"{label}（无热词接口，热词表不生效）"
+
+
+def _vad_note(cfg: Config) -> str:
+    """报出实际用的 VAD。少了 onnxruntime 会静默降级成能量 VAD：
+    能跑，但一声咳嗽也算说话——装完才看得出来，所以 doctor 必须报。
+    """
+    try:
+        return type(audio.make_vad(cfg)).__name__
+    except Exception as exc:
+        return f"不可用（{exc}）"
 
 
 def _mic_note(cfg: Config) -> str:
