@@ -117,7 +117,8 @@ def test_llm_failure_after_a_tool_call_does_not_replay_offline(cfg):
     message = {"tool_calls": [{"id": "1", "function": {
         "name": "dispatch_code_session",
         "arguments": json.dumps({"instruction": "把 auth.py 的空值校验补上"})}}]}
-    llm = cfg.with_overrides(**{"llm.enabled": True, "llm.base_url": "http://unused.invalid"})
+    llm = cfg.with_overrides(**{"llm.enabled": True, "llm.base_url": "http://unused.invalid",
+                               "llm.api_key": "test-key"})
     with patch.object(core, "chat", side_effect=[message, RuntimeError("HTTP 500")]):
         result = core.dispatch("把 auth.py 的空值校验补上", cfg=llm, executor=Spy(), context={})
     assert calls == ["dispatch_code_session"], calls

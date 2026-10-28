@@ -6,6 +6,58 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 
 格式约定：`## [x.y.z] - YYYY-MM-DD`，一个版本一段，从新到旧。
 
+## [0.1.19] - 2026-10-29
+
+这一版接上了大模型，并把「提示词」从代码里搬了出来。用户的原话：
+「另外可以接入大模型，大模型默认用cline渠道，1017；关闭思考模式，具体看sub2API；
+而且这可能要有agent来处理？内置提示词系统」。
+
+### 新增
+
+- **大模型慢通道开箱可用：默认 Cline 渠道 `cline-pass/deepseek-v4.1-flash-1017`**。
+  三条实测结论写进了配置注释里，每一条都是踩出来的：
+  - 模型名**必须带 `cline-pass/` 前缀**。裸 `deepseek/*` 走付费层，余额 0 时直接 402。
+  - **思考必须关**（`thinking: {"type": "disabled"}`）。开着时 DeepSeek V4 会把思考链
+    混进 tool_call 的参数流，结构化调用直接失败；关掉之后 3/3 成功。
+  - 网关把标准 OpenAI 响应整个包在 `{"data": …, "success": true}` 里。
+    `body["choices"]` 会 KeyError，而这个 KeyError 被上层当成「模型不可用」——
+    于是配好了也永远走离线兜底，报错还完全指错方向。现在 `core._unwrap` 负责剥信封。
+- **`voxos llm` / `voxos llm --set-key` / `voxos llm --check`**。`--check` 是**真发**一次：
+  余额 402、模型名写错、网关套信封，只有发出去才知道。密钥落到 `~/.voxos/llm_key`（0600），
+  不进仓库——源码布局下 `settings.toml` 就是仓库里那份，填一次密钥等于往公开仓库推一次。
+- **内置提示词系统（`src/voxos/prompts.py` + `config/prompts/*.md`）**。
+  调一句「回复 ≤ 25 字」不该走一遍构建和发版。三层来源、后者覆盖前者：
+  代码里的 `DEFAULT_DISPATCH` → 随包 `config/prompts/dispatch.md` →
+  用户 `~/.voxos/prompts/dispatch.md`（升级不丢，存盘即生效，按 mtime 失效）。
+  角色纪律（DEVELOPER / OPS / DOCTOR）是**叠加**而不是替换：少一段纪律顶多不听话，
+  缺了调度规则就完全跑偏。`voxos prompts --role OPS` 打印每段的来源文件和最终文本。
+- **状态页不再替模型撒谎**。原来只有「大模型：已启用 / 离线」两档，而「开了但缺 Key」
+  和「真能回话」在界面上长得一模一样。现在报具体原因（缺 API Key / 缺接口地址 / 未启用）
+  和模型短名。
+
+### 修复
+
+- **思考链不再回放**。`messages.append(message)` 原样把网关返回的整个 message 塞回对话，
+  里面带着 `reasoning_content` 和几十行 `provider_metadata`。把思考链回放给模型，
+  它会把自己的推理当成对话的一部分继续往下编——现在只回填 `role` / `content` / `tool_calls`。
+- **没配 Key 时不再白等一次超时**。`_try_llm` 现在先问 `llm_ready`：缺钥匙就一个请求都不发，
+  直接走离线兜底（本地 Ollama 不需要 Key，不受影响）。
+- **一条路由测试原来会发真实网络请求**。`test_unknown_speech_still_explains_what_it_can_do`
+  用的是 `load()` 读本机真实配置——大模型一配好，这条本该 1 毫秒的断言就变成一次真实请求，
+  红的原因还和被测行为毫无关系。改成显式关掉慢通道。
+- **启动器少起一次解释器**。App 启动时为了读一个端口号要跑 `voxos port`，
+  那条命令会 import numpy / sherpa / sounddevice。改成用 `sed` 只读 `[ui]` 段的 `port`，
+  就绪轮询也从 250ms 收到 100ms。
+
+### 文档
+
+- 新增 **`docs/PERFORMANCE.md`**：启动分段、常驻内存、VAD 与识别的真实成本，
+  以及「要不要换 Rust」的结论（不整体重写，理由用数字说话）。
+- 新增 **`scripts/bench.py`**：`boot` / `mem` / `audio` 三个子命令，
+  把性能文档里的每个数字都变成一条可复现的命令。
+- `PROMPTS_AND_ROUTING.md` 第 3 节重写：提示词三层来源、agent 循环的两条硬约束、
+  Cline 渠道私有字段的来龙去脉。
+
 ## [0.1.18] - 2026-10-28
 
 ### 修复

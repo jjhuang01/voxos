@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voxos"
-version = "0.1.18"
+version = "0.1.19"
 description = "只听你一个人说话的语音操作系统 Agent：本地声纹锁 + 快慢双通道路由 + 极简胶囊"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,6 +30,14 @@ where = ["src"]
 # 运行资源不在 src 包里：不声明它们，普通安装会缺默认配置、红线策略和胶囊页面。
 [tool.setuptools.data-files]
 "share/voxos/config" = ["config/settings.toml", "config/redlines.toml"]
+# 提示词也是运行资源：漏了不会报错，只会静默退回代码里那份 DEFAULT_DISPATCH——
+# 本机（源码布局）测不出来，装完才发现自己改的文件没人读。
+"share/voxos/config/prompts" = [
+    "config/prompts/dispatch.md",
+    "config/prompts/developer.md",
+    "config/prompts/ops.md",
+    "config/prompts/doctor.md",
+]
 "share/voxos/web" = ["web/pill.html"]
 
 [tool.pytest.ini_options]

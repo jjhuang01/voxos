@@ -387,3 +387,15 @@ def test_every_stt_backend_has_a_human_label():
 def test_play_is_silent_when_no_player(monkeypatch):
     monkeypatch.setattr(ui.shutil, "which", lambda _: None)
     ui.play(Path("/nonexistent.wav"))  # 不应抛异常
+
+
+def test_pill_explains_why_the_model_is_not_ready():
+    """状态卡只写「已启用 / 离线」是不够的。
+
+    「开了但缺 API Key」和「真能回话」在界面上长得一模一样，用户会以为
+    模型在思考，其实一个请求都没发出去。所以页面必须读 llm_ready / llm_model
+    这两个字段，而不是只看 llm 这个布尔。
+    """
+    html = (REPO / "web" / "pill.html").read_text(encoding="utf-8")
+    assert "status.llm_ready" in html, "状态卡没读 llm_ready，缺 Key 会被显示成「已启用」"
+    assert "status.llm_model" in html, "状态卡没显示模型名"

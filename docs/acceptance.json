@@ -1,14 +1,14 @@
 {
   "report": {
     "fast_path": {
-      "p50": 0.0007,
-      "p95": 0.0008,
-      "p99": 0.0009,
+      "p50": 0.0008,
+      "p95": 0.0021,
+      "p99": 0.0024,
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 0.227,
-      "p95": 0.932,
+      "p50": 0.252,
+      "p95": 1.048,
       "context_p95": 0.008,
       "rounds": 30
     },
@@ -91,11 +91,11 @@
       "backend": "sherpa-cam++",
       "threshold": 0.75,
       "dispatch_ms": [
-        0.67,
-        317.41
+        0.64,
+        197.03
       ],
-      "wall_ms": 900.2,
-      "realtime_factor": 0.05
+      "wall_ms": 488.0,
+      "realtime_factor": 0.027
     },
     "redlines": {
       "forbidden_cases": 8,
@@ -108,7 +108,7 @@
       "seconds": 30,
       "segments": 0,
       "vad": "SileroVad",
-      "cpu_percent": 0.35,
+      "cpu_percent": 0.4,
       "realtime_factor": 0.004
     },
     "security": {
@@ -150,8 +150,8 @@
         "en": 3.1
       },
       "chars": 818,
-      "rtf": 0.046,
-      "wall_s": 3.7,
+      "rtf": 0.036,
+      "wall_s": 2.9,
       "samples": [
         {
           "want": "把刚才登录模块的报错原因记到今天的开发日志里",
@@ -206,6 +206,11 @@
           "code_lines": 273
         },
         {
+          "file": "scripts/bench.py",
+          "lines": 163,
+          "code_lines": 116
+        },
+        {
           "file": "scripts/build_ubm.py",
           "lines": 38,
           "code_lines": 26
@@ -232,8 +237,8 @@
         },
         {
           "file": "scripts/shot.py",
-          "lines": 288,
-          "code_lines": 243
+          "lines": 299,
+          "code_lines": 252
         },
         {
           "file": "scripts/soak.py",
@@ -257,13 +262,13 @@
         },
         {
           "file": "src/voxos/config.py",
-          "lines": 203,
-          "code_lines": 161
+          "lines": 229,
+          "code_lines": 184
         },
         {
           "file": "src/voxos/core.py",
-          "lines": 395,
-          "code_lines": 320
+          "lines": 465,
+          "code_lines": 374
         },
         {
           "file": "src/voxos/corpus.py",
@@ -277,13 +282,18 @@
         },
         {
           "file": "src/voxos/main.py",
-          "lines": 964,
-          "code_lines": 789
+          "lines": 1041,
+          "code_lines": 853
         },
         {
           "file": "src/voxos/models.py",
           "lines": 158,
           "code_lines": 137
+        },
+        {
+          "file": "src/voxos/prompts.py",
+          "lines": 123,
+          "code_lines": 94
         },
         {
           "file": "src/voxos/registry.py",
@@ -297,8 +307,8 @@
         },
         {
           "file": "src/voxos/settings.py",
-          "lines": 351,
-          "code_lines": 286
+          "lines": 360,
+          "code_lines": 295
         },
         {
           "file": "src/voxos/tools.py",
@@ -311,7 +321,7 @@
           "code_lines": 398
         }
       ],
-      "total_lines": 6663,
+      "total_lines": 7142,
       "max_function": {
         "name": "src/voxos/core.py:dispatch",
         "lines": 40
@@ -319,14 +329,14 @@
       "classes": 34,
       "tools": 12,
       "fast_routes": 6,
-      "test_files": 15
+      "test_files": 16
     },
     "tests": {
       "returncode": 0,
-      "summary": "250 passed, 1 skipped, 2 warnings in 24.13s",
-      "seconds": 24.8
+      "summary": "272 passed, 1 skipped, 2 warnings in 25.76s",
+      "seconds": 26.2
     },
-    "generated_at": "2026-10-28T23:17:43",
+    "generated_at": "2026-10-29T00:05:29",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -337,17 +347,17 @@
   "verdicts": [
     {
       "item": "快通道决策延迟 p95 < 5ms",
-      "measured": "0.0008ms",
+      "measured": "0.0021ms",
       "pass": true
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "0.932ms",
+      "measured": "1.048ms",
       "pass": true
     },
     {
       "item": "静音待机 CPU < 1.5%",
-      "measured": "0.35%/秒音频",
+      "measured": "0.4%/秒音频",
       "pass": true
     },
     {
@@ -403,7 +413,7 @@
     },
     {
       "item": "测试全绿",
-      "measured": "250 passed, 1 skipped, 2 warnings in 24.13s",
+      "measured": "272 passed, 1 skipped, 2 warnings in 25.76s",
       "pass": true
     },
     {

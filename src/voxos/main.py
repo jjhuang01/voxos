@@ -22,7 +22,7 @@ import webbrowser
 from collections import deque
 from pathlib import Path
 
-from . import __version__, audio, core, corpus, dsp, settings, tools, ui
+from . import __version__, audio, core, corpus, dsp, prompts, settings, tools, ui
 from .config import Config, load
 
 # 一句话没匹配到任何能力时，终端、接口、历史三处必须说同一句话。
@@ -197,6 +197,7 @@ def _lock(cfg: Config) -> dsp.SpeakerLock:
 def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]:
     cfg = runtime.cfg
     backend = str(cfg.get("stt.backend", ""))
+    ready, why = core.llm_ready(cfg)
     return {
         "version": __version__,
         "enrolled": bool(lock and lock.profiles),
@@ -205,6 +206,10 @@ def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]
         "dry_run": cfg.flag("workspace.dry_run"),
         "listening": not _MUTED.is_set(),
         "llm": cfg.flag("llm.enabled"),
+        # 只报「开没开」是不够的：开了但缺 Key 和真能回话，界面上长得一模一样。
+        "llm_model": cfg.get("llm.model") if ready else "",
+        "llm_ready": ready,
+        "llm_note": why,
         "stt": STT_LABELS.get(backend, backend or "—"),
         "confirm_timeout_s": float(cfg.get("workspace.confirm_timeout_s", 8)),
         "uptime_s": round(time.time() - runtime.started),
@@ -825,7 +830,7 @@ def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
         ("say/afplay", shutil.which("say") or "缺失"),
         ("声纹模型", str(cfg.path("audio.speaker_model", "")) if cfg.path("audio.speaker_model", "").exists() else "缺失（降级）"),
         ("声纹档案", "已录入" if cfg.path("audio.voiceprint_profiles").exists() else "未录入"),
-        ("LLM", f"{cfg.get('llm.model')} @ {cfg.get('llm.base_url')}" if cfg.flag("llm.enabled") else "未启用（走快通道+离线兜底）"),
+        ("LLM", _llm_note(cfg)),
         ("识别后端", _hotword_note(cfg, [])),
         ("输入设备", _mic_note(cfg)),
         ("VAD 后端", _vad_note(cfg)),
@@ -840,9 +845,62 @@ def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_llm(args: argparse.Namespace, cfg: Config) -> int:
+    """看渠道 / 写密钥 / 真发一次请求。"""
+    if args.set_key:
+        return _write_key(cfg, args.set_key)
+    ready, why = core.llm_ready(cfg)
+    rows = (("渠道", core.provider(cfg)), ("模型", cfg.get("llm.model")),
+            ("地址", cfg.get("llm.base_url")), ("思考", cfg.get("llm.thinking", "auto")),
+            ("密钥", "已配置" if cfg.get("llm.api_key") else
+             f"未配置（可写 {cfg.path('llm.api_key_file', '.voxos/llm_key')}）"),
+            ("状态", "可用" if ready else why))
+    for name, value in rows:
+        print(f"{name:<6} {value}")
+    return _llm_probe(cfg) if args.check else 0
+
+
+def _write_key(cfg: Config, key: str) -> int:
+    """密钥单独落一个 0600 的文件：写进 settings.toml 等于往公开仓库推一次。"""
+    path = cfg.path("llm.api_key_file", ".voxos/llm_key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(key.strip() + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    print(f"密钥已写入 {path}（权限 600，不在仓库里）")
+    return 0
+
+
+def _llm_probe(cfg: Config) -> int:
+    """真发一次：余额 402、模型名写错、网关套信封，只有发出去才知道。"""
+    started = time.perf_counter()
+    try:
+        message = core.chat(
+            base_url=str(cfg.get("llm.base_url")), api_key=str(cfg.get("llm.api_key", "")),
+            model=str(cfg.get("llm.model")), messages=[{"role": "user", "content": "只回复两个字：收到"}],
+            timeout=float(cfg.get("llm.timeout_s", 20)), extra=core.llm_extra(cfg))
+    except Exception as exc:
+        print(f"请求失败：{exc}")
+        return 1
+    took = (time.perf_counter() - started) * 1000
+    print(f"通：{(message.get('content') or '').strip()[:40]}  {took:.0f}ms")
+    return 0
+
+
+def cmd_prompts(args: argparse.Namespace, cfg: Config) -> int:
+    """打印每一段提示词的来源，以及真正会发给模型的那段文字。"""
+    view = cfg.with_overrides(**{"workspace.role": args.role.upper()}) if args.role else cfg
+    for name, source in prompts.sources(view).items():
+        print(f"{name:<10} {source}")
+    print("-" * 64)
+    print(prompts.active(view, role=view.get("workspace.role"),
+                         now=time.strftime("%Y-%m-%d %H:%M"), active_window="（运行时填）",
+                         workspace=view.path("workspace.default_code_dir", "~"),
+                         recent_files="（运行时填）", max_rounds=view.get("llm.max_tool_rounds", 3)))
+    return 0
+
+
 def _config_note(cfg: Config) -> str:
     """配置在哪、能不能写、会不会被升级冲掉。
-
     这一行是 0.1.12 那个 bug 的「可观测性」补丁：当时 doctor 只报依赖和模型，
     看不出自己改的是 `<venv>/share/voxos` 里那份只读资源——于是 268MB 模型配好的
     `stt.backend` 在 `pipx upgrade` 之后悄悄变回出厂值，没人会怀疑到这儿。
@@ -857,6 +915,14 @@ def _config_note(cfg: Config) -> str:
     probe = resolved if resolved.exists() else resolved.parent
     writable = os.access(probe, os.W_OK)
     return f"{resolved}（{'可写' if writable else '只读，改配置会失败'}）"
+
+
+def _llm_note(cfg: Config) -> str:
+    """慢通道的真实状态。报「已启用」而实际缺 Key，等于替它撒谎。"""
+    ready, why = core.llm_ready(cfg)
+    if ready:
+        return f"{cfg.get('llm.model')} @ {cfg.get('llm.base_url')}（思考 {cfg.get('llm.thinking', 'auto')}）"
+    return f"{why}（走快通道 + 离线兜底）"
 
 
 def _hotword_note(cfg: Config, words: list[str]) -> str:
@@ -935,22 +1001,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("pill", help="无边框胶囊窗口").set_defaults(func=cmd_pill)
 
-    _add_models(sub)
-    sub.add_parser("stop", help="停掉在跑的 run").set_defaults(func=cmd_stop)
-    sub.add_parser("port", help="打印界面端口").set_defaults(func=cmd_port)
-    sub.add_parser("tools", help="列出已注册工具").set_defaults(func=cmd_tools)
-    sub.add_parser("doctor", help="环境自检").set_defaults(func=cmd_doctor)
+    _add_extra(sub)               # models / llm / prompts / stop / port / tools / doctor
     return parser
 
 
-def _add_models(sub: argparse._SubParsersAction) -> None:
-    """模型下载的参数单独放，build_parser 已经顶到行预算了。"""
+def _add_extra(sub: argparse._SubParsersAction) -> None:
+    """其余子命令的参数单独放：build_parser 已经顶到行预算了。"""
     models = sub.add_parser("models", help="下载声纹/VAD/识别模型")
     models.add_argument("--proxy", default=None, help="下载代理，如 http://127.0.0.1:7890")
     models.add_argument("--force", action="store_true", help="即使已存在也重下")
     models.add_argument("--no-asr", action="store_true", help="跳过 239MB 识别模型")
     models.add_argument("--dir", default=None, help="模型目录（默认数据目录下的 .voxos/models）")
     models.set_defaults(func=cmd_models)
+
+    llm = sub.add_parser("llm", help="看/配大模型渠道")
+    llm.add_argument("--set-key", default=None, help="把密钥写进 api_key_file（不进仓库）")
+    llm.add_argument("--check", action="store_true", help="真发一次请求，看通不通")
+    llm.set_defaults(func=cmd_llm)
+
+    prompts = sub.add_parser("prompts", help="看当前生效的提示词与来源文件")
+    prompts.add_argument("--role", default=None, help="临时换角色看效果（DEVELOPER/OPS/DOCTOR）")
+    prompts.set_defaults(func=cmd_prompts)
+
+    for name, hint, func in (("stop", "停掉在跑的 run", cmd_stop),
+                             ("port", "打印界面端口", cmd_port),
+                             ("tools", "列出已注册工具", cmd_tools),
+                             ("doctor", "环境自检", cmd_doctor)):
+        sub.add_parser(name, help=hint).set_defaults(func=func)
 
 
 def main(argv: list[str] | None = None) -> int:

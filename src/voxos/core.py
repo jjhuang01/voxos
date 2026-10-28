@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from .config import Config, load
+from .prompts import DEFAULT_DISPATCH, active as _active_prompt
 from .registry import (  # noqa: F401  # re-export 给旧调用方
     FAST_ROUTES, REGISTRY, RiskLevel, Tool, build_schema, ensure_tools, tool,
 )
@@ -30,19 +31,15 @@ __all__ = [
     "DispatchResult", "dispatch", "chat", "heuristic_plan", "execute_safely", "SYSTEM_PROMPT",
     "RiskLevel", "Tool", "Verdict", "REGISTRY", "FAST_ROUTES", "tool", "build_schema",
     "Guard", "Executor", "ensure_tools", "snapshot_file", "restore_latest", "human_name",
+    "llm_ready", "llm_extra", "provider",
 ]
 
 
 # ---------------------------------------------------------------- 快慢双通道
 
-SYSTEM_PROMPT = """你是 VoxOS 的意图调度内核。运行角色：{role}
-【环境】时间 {now} | 焦点窗口 {active_window} | 工作区 {workspace} | 最近文件 {recent_files}
-【规则】
-1. 输入来自语音转写，可能有同音错字，请结合上下文纠正技术术语。
-2. 若是闲聊、感叹词、与工作无关的内容，只输出 IGNORE，不要调用任何工具。
-3. 一句话含多个意图时，在同一回合发起多个 tool_calls。
-4. 用户只说文件名时，优先在【最近文件】与【工作区】内解析，不要臆造路径。
-5. 不解释过程、不输出 Markdown；最终回复 ≤ 25 字，将被 TTS 播报。"""
+# 出厂那份调度提示词。真正生效的是 `config/prompts/dispatch.md`（可被
+# `~/.voxos/prompts/dispatch.md` 覆盖），这里只留同名副本给文档和兜底引用。
+SYSTEM_PROMPT = DEFAULT_DISPATCH
 
 
 @dataclass
@@ -65,12 +62,15 @@ def chat(
     tools: list[dict[str, Any]] | None = None,
     temperature: float = 0.1,
     timeout: float = 20.0,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """OpenAI 兼容 /chat/completions（DeepSeek / Ollama / Claude 网关通用），零 SDK 依赖。"""
+    """OpenAI 兼容 /chat/completions（DeepSeek / Ollama / Cline 网关通用），零 SDK 依赖。"""
     payload: dict[str, Any] = {"model": model, "messages": messages, "temperature": temperature}
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    if extra:
+        payload.update(extra)             # 渠道私有字段：thinking / reasoning_effort 等
     request = urllib.request.Request(
         url=base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -84,7 +84,79 @@ def chat(
         raise RuntimeError(f"LLM HTTP {exc.code}: {exc.read()[:200]!r}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise RuntimeError(f"LLM 不可达：{exc}") from exc
-    return body["choices"][0]["message"]
+    return _unwrap(body)["choices"][0]["message"]
+
+
+def _unwrap(body: dict[str, Any]) -> dict[str, Any]:
+    """剥掉网关的信封。
+
+    mindax / sub2API 这类网关把标准 OpenAI 响应整个包进 `{"data": …, "success": true}`，
+    直接取 `body["choices"]` 会 KeyError——而那个 KeyError 会被上层当成「模型不可用」，
+    于是配好了也永远走离线兜底，报错信息还完全指错方向。
+    """
+    inner = body.get("data")
+    if isinstance(inner, dict) and "choices" in inner:
+        return inner
+    if body.get("error") or body.get("success") is False:
+        raise RuntimeError(f"LLM 返回错误：{str(body)[:200]}")
+    return body
+
+
+def llm_ready(cfg: Config) -> tuple[bool, str]:
+    """慢通道现在能不能真的发出去；不能就说明缺哪一样。
+
+    只做**报告**不做拦截：拦截会让「开了但没配 Key」的机器悄悄退回离线兜底，
+    用户以为模型在思考，其实一个请求都没发出去。所以照常发、照常失败、照常显示。
+    """
+    if not cfg.flag("llm.enabled", False):
+        return False, "未启用"
+    if not str(cfg.get("llm.base_url", "")).strip():
+        return False, "缺接口地址"
+    if provider(cfg) not in ("ollama", "local") and not str(cfg.get("llm.api_key", "")).strip():
+        return False, "缺 API Key"
+    return True, str(cfg.get("llm.model", ""))
+
+
+def provider(cfg: Config) -> str:
+    """渠道名。配置里没写就按模型名前缀认。
+
+    老配置（0.1.18 及以前）没有 `provider` 这一项，而用户自己的
+    `~/.voxos/settings.toml` **不会被升级覆盖**——那是他的文件，不该被动。
+    所以「这个渠道要不要关思考」不能指望配置文件里有那一行，得由代码兜住：
+    `cline-pass/` 开头的模型只可能是 Cline 渠道。
+    """
+    explicit = str(cfg.get("llm.provider", "")).strip().lower()
+    if explicit:
+        return explicit
+    return "cline" if str(cfg.get("llm.model", "")).strip().lower().startswith("cline-pass/") \
+        else "openai"
+
+
+def _default_thinking(cfg: Config) -> str:
+    """没写 `thinking` 时的默认值：Cline 必须关，其它渠道不传这个字段。"""
+    return "disabled" if provider(cfg) == "cline" else "auto"
+
+
+def llm_extra(cfg: Config) -> dict[str, Any]:
+    """渠道私有字段。
+
+    Cline 渠道（sub2API）实测：不加 `thinking: {"type": "disabled"}` 时，DeepSeek V4
+    会把思考链混进 tool_call 的参数流，结构化调用直接失败；加上之后 3/3 成功。
+    交接文档见 yq/memories 的 `cline-deepseek-dsml-tool-call-leak.md`。
+    """
+    extra: dict[str, Any] = {}
+    thinking = str(cfg.get("llm.thinking") or "").strip().lower() or _default_thinking(cfg)
+    if thinking in ("disabled", "enabled"):
+        extra["thinking"] = {"type": thinking}
+    raw = cfg.get("llm.extra_body", "")
+    if isinstance(raw, dict):
+        extra.update(raw)
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            extra.update(json.loads(raw))
+        except json.JSONDecodeError:      # 手写的 JSON 有错：忽略，别让整句派发挂掉
+            pass
+    return extra
 
 
 def _wake_pattern(cfg: Config | None) -> re.Pattern[str] | None:
@@ -154,8 +226,8 @@ def _try_llm(
     一旦本轮已经真的执行过工具，失败就**不再**回落离线规划：否则一次派发会因为
     总结阶段的网络抖动被执行第二遍，副作用翻倍。
     """
-    if not (cfg.flag("llm.enabled", False) and cfg.get("llm.base_url")):
-        return None
+    if not llm_ready(cfg)[0]:
+        return None            # 没开 / 没地址 / 没钥匙：一个请求都别发，直接走离线兜底
     state: dict[str, Any] = {"executed": False, "results": []}
     try:
         return _llm_route(text, executor, cfg, context, started, state)
@@ -230,14 +302,30 @@ def _fast_route(
     return None
 
 
+def _prompt_values(cfg: Config, context: dict[str, Any]) -> dict[str, Any]:
+    """提示词里能引用的变量。多给一个不影响：模板只替换认得的占位符。"""
+    return {
+        "role": cfg.get("workspace.role", "DEVELOPER"),
+        "now": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "active_window": context.get("active_window", "unknown"),
+        "workspace": context.get("workspace", str(cfg.path("workspace.default_code_dir", "~"))),
+        "recent_files": ", ".join(context.get("recent_files", [])[-5:]) or "无",
+        "max_rounds": int(cfg.get("llm.max_tool_rounds", 3)),
+    }
+
+
 def _system_message(cfg: Config, context: dict[str, Any]) -> dict[str, Any]:
-    return {"role": "system", "content": SYSTEM_PROMPT.format(
-        role=cfg.get("workspace.role", "DEVELOPER"),
-        now=datetime.now().strftime("%Y-%m-%d %H:%M"),
-        active_window=context.get("active_window", "unknown"),
-        workspace=context.get("workspace", str(cfg.path("workspace.default_code_dir", "~"))),
-        recent_files=", ".join(context.get("recent_files", [])[-5:]) or "无",
-    )}
+    return {"role": "system", "content": _active_prompt(cfg, **_prompt_values(cfg, context))}
+
+
+def _replayable(message: dict[str, Any]) -> dict[str, Any]:
+    """回填进对话之前，只留 OpenAI 定义的三件套。
+
+    网关会往 message 里塞 `provider_metadata`（路由、成本、原始 id，几十行）和
+    `reasoning_content`（思考链）。把思考链回放给模型，它会把自己的推理当成
+    对话的一部分继续往下编——交接文档里那次「复读」就是这么来的。
+    """
+    return {key: message[key] for key in ("role", "content", "tool_calls") if key in message}
 
 
 def _execute_calls(
@@ -296,6 +384,7 @@ def _llm_route(
             tools=schemas,
             temperature=float(cfg.get("llm.temperature", 0.1)),
             timeout=float(cfg.get("llm.timeout_s", 20)),
+            extra=llm_extra(cfg),
         )
         calls = message.get("tool_calls") or []
         if not calls:
@@ -305,7 +394,7 @@ def _llm_route(
                                       reply=content, latency_ms=_ms(started))
             return DispatchResult("llm", text, first_tool, first_args,
                                   content or "；".join(results), _ms(started), results)
-        messages.append(message)
+        messages.append(_replayable(message))
         if state is not None:
             state["executed"] = True
         name, args = _execute_calls(calls, messages, executor, results, text)

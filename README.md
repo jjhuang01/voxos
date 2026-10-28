@@ -99,7 +99,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 251 项测试
+make test                                    # 277 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
@@ -116,6 +116,23 @@ PYTHONPATH=src python -m voxos.main run                 # 守护进程 + 胶囊 
 PYTHONPATH=src python -m voxos.main pill                # 用无边框小窗打开胶囊（最接近悬浮）
 PYTHONPATH=src python -m voxos.main text "Siri，检查一下服务器负载"   # 不想说话？打字也行
 ```
+
+接大模型（默认 Cline 渠道，思考已关闭）：
+
+```bash
+voxos llm --set-key sk-...      # 密钥落到 ~/.voxos/llm_key（0600，不进仓库）
+voxos llm                       # 看渠道 / 模型 / 思考 / 状态
+voxos llm --check               # 真发一次请求，看通不通
+voxos prompts --role OPS        # 看当前生效的提示词，以及每段来自哪个文件
+```
+
+出厂默认 `provider = "cline"`、`model = "cline-pass/deepseek-v4.1-flash-1017"`、
+`thinking = "disabled"`。两条都是踩出来的：**`cline-pass/` 前缀不能省**（裸 `deepseek/*`
+走付费层，余额 0 时直接 402）；**思考必须关**（开着时 DeepSeek V4 会把思考链混进
+tool_call 的参数流，结构化调用直接失败）。
+
+换成本地 Ollama 只改 `[llm]` 三行：`provider = "ollama"`、
+`base_url = "http://127.0.0.1:11434/v1"`、`model = "qwen2.5-coder:14b"`，Key 留空即可。
 
 想让它开机就活着：
 
@@ -225,11 +242,13 @@ voxos/
 ├── config/
 │   ├── settings.toml       # 全局配置（TOML，标准库解析）
 │   ├── redlines.toml       # 红线正则 + 工具风险等级 + 角色白名单
+│   ├── prompts/            # 内置提示词：dispatch.md + 三个角色纪律（可被 ~/.voxos/prompts 覆盖）
 │   └── ubm.npz             # 降级声纹的背景模型（几 KB）
 ├── src/voxos/
 │   ├── registry.py         # 工具契约：@tool 自省生成 Schema + 快通道 + 注册表
 │   ├── safety.py           # 安全边界：红线网关 / 快照回滚 / 单飞执行器 / 审计
-│   ├── core.py             # 路由：快慢双通道 + LLM 客户端（re-export 旧入口）
+│   ├── core.py             # 路由：快慢双通道 + LLM 客户端（网关信封 / 渠道私有字段）
+│   ├── prompts.py          # 提示词系统：三层来源 / 角色叠加 / 按 mtime 热更新
 │   ├── tools.py            # 12 个原子工具，每个 ≤ 15 行
 │   ├── dsp.py              # 纯函数：AGC / 高架滤波 / VAD / 端点 / 回声门 / 声纹
 │   ├── audio.py            # 设备源、自愈重连、Silero/Sherpa 适配、STT、管道
@@ -246,10 +265,11 @@ voxos/
 │   ├── soak.py             # 长稳：实时节奏喂音频，采样 phys_footprint/CPU（RSS 会骗人）
 │   ├── fetch_models.py     # 模型下载（支持代理；--no-asr 跳过 239MB 识别模型）
 │   ├── shot.py             # 零依赖 CDP 客户端：截 10 个界面状态，也能当探针量尺寸
+│   ├── bench.py            # 性能标定：启动分段 / 常驻内存 / VAD 与识别成本
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 251 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/文档自洽
+└── tests/                  # 277 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/文档自洽
 ```
 
 ## 四条关键设计决策
@@ -283,7 +303,7 @@ JSON Schema 由类型注解自省生成（`registry.py`），正则快通道由�
 | VAD | Silero ONNX（实时率 0.4%） | 能量 VAD（自适应底噪） | 嘈杂环境误触发率上升 |
 | 声纹 | CAM++ 192 维 | 频谱统计 + UBM | **FRR/FAR 不再满足 PRD**，仅保证链路可跑 |
 | STT | **SenseVoice int8（本地，239MB，20–38× 实时，视机器负载）** | faster-whisper / OpenAI 兼容接口 / 脚本化 | 本地识别不出网；脚本化仅用于测试与演示 |
-| LLM | 任意 OpenAI 兼容（Ollama/DeepSeek/Claude） | 离线启发式（4 条规则） | 只认三大高频场景，其余不执行 |
+| LLM | 任意 OpenAI 兼容（默认 Cline 渠道 `cline-pass/deepseek-v4.1-flash-1017`，思考关闭） | 离线启发式（4 条规则） | 只认三大高频场景，其余不执行 |
 | GUI | 无头 + SSE 胶囊 | CLI 状态行 | 无 |
 
 ## 与原始规划文档的差异（以及为什么）

@@ -32,20 +32,66 @@
 2. 捕获组 1 永远是"要传给工具的第一个参数"（`@tool` 约定），多余信息交给慢通道。
 3. 宁可漏，不可错：命中歧义时**放弃**快通道，让 LLM 判断。
 
-## 3. 慢通道 System Prompt（`core.py: SYSTEM_PROMPT`）
+## 3. 慢通道 System Prompt（`config/prompts/dispatch.md`）
+
+提示词**不在代码里**。调一句「回复 ≤ 25 字」不该走一遍构建和发版，所以它是一份文件，
+三层来源、后者覆盖前者：
+
+| 层 | 路径 | 特点 |
+| :--- | :--- | :--- |
+| 1 | `prompts.DEFAULT_DISPATCH`（代码） | 唯一兜底，保证任何机器都起得来 |
+| 2 | `config/prompts/dispatch.md`（随包） | 跟着 wheel 走，`pipx upgrade` 会换 |
+| 3 | `~/.voxos/prompts/dispatch.md`（用户） | 升级不丢，**存盘即生效**（按 mtime 失效） |
+
+角色纪律是**叠加**，不是替换：`dispatch.md` 之后接 `developer.md` / `ops.md` / `doctor.md`
+（按 `workspace.role` 选）。少一段纪律顶多不听话，缺了调度规则就完全跑偏——
+所以角色文件缺失只降级，不报错。
+
+占位符只替换**认得的**那几个（`{role}` `{now}` `{active_window}` `{workspace}`
+`{recent_files}` `{max_rounds}`）。用 `str.format_map` 会让用户提示词里的
+`{"a": 1}` 当场 KeyError，把一句闲聊变成一次异常。
 
 ```
 你是 VoxOS 的意图调度内核。运行角色：{role}
 【环境】时间 {now} | 焦点窗口 {active_window} | 工作区 {workspace} | 最近文件 {recent_files}
 【规则】
-1. 输入是语音转写，可能有同音错字，请结合上下文纠正技术术语（如 "配置"→"config"）。
-2. 若为闲聊、感叹词、与工作无关的内容，只输出 IGNORE，不要调用任何工具。
-3. 一句话含多个意图时，在同一回合发起多个 tool_calls。
-4. 用户只说文件名（如"打开 auth.py"）时，优先在【最近文件】与【工作区】内解析，不要臆造路径。
-5. 不要解释过程，不要输出 Markdown，最终回复 ≤ 25 字，将被 TTS 播报。
+1. 输入来自语音转写，可能有同音错字，请结合上下文纠正技术术语（如「配置」→ config）。
+2. 不是对你说的（屋里闲聊、电视声、听不清的碎片）：只输出 IGNORE，不调工具也不回复。
+3. 明确在问你或让你做事：先判断能不能用工具完成；能就调用，不能就直接回答。
+4. 一句话含多个意图时，同一回合发起多个 tool_calls；拿到结果后再判断要不要继续，
+   最多 {max_rounds} 轮。不要为了凑轮次重复调用同一个工具。
+5. 用户只说文件名时，优先在【最近文件】与【工作区】内解析，不要臆造路径。
+6. 工具返回「需要确认」或「已拦截」时，把这句话原样告诉用户，不要自己重试。
+7. 不解释过程、不输出 Markdown；最终回复 ≤ 25 字，会被 TTS 念出来。
 ```
 
 温度固定 `0.1`。工具 schema 由类型注解自省生成，**不手写**。
+`voxos prompts --role OPS` 打印每段提示词的**来源文件**和最终文本——
+「我改了文件怎么没反应」第一个要看的就是它读的是不是那个路径。
+
+### 3.1 慢通道是 agent 循环，不是一问一答
+
+一轮 = 发一次请求 → 拿到 `tool_calls` → 执行 → 把结果回填 → 再发一次。
+上限 `llm.max_tool_rounds`（默认 3）。两个必须的约束：
+
+- **只回填三件套**（`role` / `content` / `tool_calls`）。网关塞回来的
+  `provider_metadata`（路由、成本、原始 id）和 `reasoning_content`（思考链）
+  一律削掉：把思考链回放给模型，它会把自己的推理当成对话的一部分继续往下编。
+- **工具结果原样进上下文**。模型据此决定「还要不要再调一个」，
+  所以 `execute_safely` 的返回值必须是**人能读懂的一句话**，不是 JSON。
+
+### 3.2 渠道私有字段（Cline / sub2API）
+
+`provider = "cline"` 时注入 `thinking: {"type": "disabled"}`。两条都是实测踩出来的：
+
+- 模型名必须带 `cline-pass/` 前缀（`cline-pass/deepseek-v4.1-flash-1017`）。
+  裸 `deepseek/*` 走付费层，余额 0 时直接 402。
+- **思考必须关**。开着时 DeepSeek V4 会把思考链混进 tool_call 的参数流，
+  结构化调用直接失败；关掉之后 3/3 成功。
+
+另外网关把标准 OpenAI 响应整个包在 `{"data": …, "success": true}` 里，
+`body["choices"]` 会 KeyError——而那个 KeyError 会被上层当成「模型不可用」，
+于是配好了也永远走离线兜底。`core._unwrap` 负责剥这层信封。
 
 ## 4. 离线启发式规划器（断网/无 Key 兜底）
 

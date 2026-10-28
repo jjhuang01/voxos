@@ -53,6 +53,8 @@ ENV_MAP = {
     "VOXOS_LLM_BASE_URL": ("llm", "base_url"),
     "VOXOS_LLM_MODEL": ("llm", "model"),
     "VOXOS_LLM_API_KEY": ("llm", "api_key"),
+    "VOXOS_LLM_PROVIDER": ("llm", "provider"),
+    "VOXOS_LLM_THINKING": ("llm", "thinking"),
     "VOXOS_ROLE": ("workspace", "role"),
     "VOXOS_DRY_RUN": ("workspace", "dry_run"),
     "VOXOS_LOG_DIR": ("workspace", "daily_log_dir"),
@@ -183,6 +185,29 @@ def _settings_path() -> Path:
         return seed          # 系统级安装、家目录不可写：退回安装目录那份，别在启动时炸
 
 
+def _read_api_key(data: dict[str, Any]) -> None:
+    """`[llm].api_key` 为空时，从 `api_key_file` 读第一行。
+
+    为什么不直接写在 settings.toml 里：源码布局下那份文件就是仓库里那份，
+    填一次密钥等于往公开仓库推一次。独立文件落在数据根（默认 `.voxos/`，
+    已在 `.gitignore` 里），配置里只留路径；环境变量仍然优先于文件。
+    """
+    llm = data.get("llm")
+    if not isinstance(llm, dict) or str(llm.get("api_key", "")).strip():
+        return
+    raw = str(llm.get("api_key_file", "")).strip()
+    if not raw:
+        return
+    path = Path(os.path.expanduser(raw))
+    if not path.is_absolute():
+        path = DATA / path
+    try:
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+        llm["api_key"] = lines[0].strip() if lines else ""
+    except OSError:
+        pass                      # 没这个文件不是错误：走「缺 Key」那条提示
+
+
 def load(path: str | Path | None = None) -> Config:
     """加载配置；文件缺失时用内置最小默认值（保证任何机器上都能起来）。"""
     target = Path(path) if path else _settings_path()
@@ -191,6 +216,7 @@ def load(path: str | Path | None = None) -> Config:
         with open(target, "rb") as handle:
             data = tomllib.load(handle)
     _apply_env(data)
+    _read_api_key(data)
     return Config(data, source=target, data_root=DATA)
 
 

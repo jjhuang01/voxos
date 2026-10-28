@@ -82,7 +82,18 @@ export PATH="\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/u
 BIN="$VX"
 # 端口从配置里读，不写死：8765 被别的程序占用时，写死会让启动器永远等不到服务就绪，
 # 然后弹一个「没能启动」的框，而真实原因（Address already in use）只在日志里。
-PORT="\${VOXOS_PORT:-\$("\$BIN" port 2>/dev/null || echo 8765)}"
+#
+# 为什么不用「voxos port」那条命令：它要走一次完整的包导入（numpy / sherpa /
+# sounddevice），光为了取一个整数就多花一次解释器冷启动。双击到看见窗口本来
+# 就只有两三秒，这种开销全在用户感知里。sed 只认 [ui] 段里那行 port，读不到退回 8765。
+# （注释里也不能写反引号：这段是未加引号的 heredoc，反引号会被当成命令替换执行。）
+read_port() {
+    local cfg="\$HOME/.voxos/settings.toml" value=""
+    [ -f "\$cfg" ] && value=\$(sed -n '/^\[ui\]/,/^\[/p' "\$cfg" \\
+        | sed -n 's/^[[:space:]]*port[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    echo "\${value:-8765}"
+}
+PORT="\${VOXOS_PORT:-\$(read_port)}"
 LOG="\$HOME/.voxos/logs/app.log"
 mkdir -p "\$(dirname "\$LOG")"
 
@@ -98,10 +109,11 @@ echo "=== \$(date '+%F %T') 启动 VoxOS ===" >>"\$LOG"
 CHILD=\$!
 trap 'kill "\$CHILD" 2>/dev/null' EXIT INT TERM
 
-for _ in \$(seq 1 80); do
+# 100ms 一探：服务本身 0.35s 就绪，250ms 的步长等于白等最多 0.25s
+for _ in \$(seq 1 200); do
     alive && break
     kill -0 "\$CHILD" 2>/dev/null || break
-    sleep 0.25
+    sleep 0.1
 done
 
 if ! alive; then

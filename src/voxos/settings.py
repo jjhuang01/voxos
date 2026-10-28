@@ -82,8 +82,17 @@ SCHEMA: tuple[Field, ...] = (
     Field("llm.enabled", "启用大模型慢通道", "bool", "llm",
           "关闭时只走正则快通道 + 离线启发式，完全离线可用。"),
     Field("llm.base_url", "接口地址", "str", "llm", "任何 OpenAI 兼容端点，如 Ollama / vLLM。"),
+    Field("llm.provider", "渠道", "enum", "llm",
+          "cline 会自动带上渠道私有字段；openai / ollama 不加。",
+          options=("cline", "openai", "ollama")),
+    Field("llm.thinking", "思考模式", "enum", "llm",
+          "Cline 渠道必须 disabled：否则 DeepSeek V4 会把思考链混进工具调用的参数流，"
+          "结构化调用直接失败。auto = 不传这个字段。",
+          options=("disabled", "enabled", "auto")),
     Field("llm.model", "模型名", "str", "llm", ""),
-    Field("llm.api_key", "API Key", "str", "llm", "本地模型可留空。", secret=True),
+    Field("llm.api_key", "API Key", "str", "llm",
+          "本地模型可留空。写在这里会跟着配置文件走，建议用 `voxos llm --set-key` 落到独立文件。",
+          secret=True),
 
     Field("workspace.role", "当前角色", "enum", "workspace",
           "决定哪些工具可调用；OPS 不能写文件，DOCTOR 输出强制标记草稿。",

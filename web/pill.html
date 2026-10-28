@@ -550,6 +550,13 @@ $('mic').addEventListener('click', e => {
 $('listen').addEventListener('change', () => setListening($('listen').checked));
 
 /* ---------------- 状态卡 ---------------- */
+/* 模型全名有 32 个字符（cline-pass/deepseek-v4.1-flash-1017），
+   格子放不下就只留最后一段；拿不到名字时退回说原因，别写一个「—」了事 */
+function shortModel(status) {
+  if (status.llm_model) return String(status.llm_model).split('/').pop();
+  return status.llm_note || (status.llm ? '已启用' : '离线');
+}
+
 async function loadStatus() {
   try {
     const status = await api('/api/status');
@@ -558,7 +565,8 @@ async function loadStatus() {
       ['阈值', status.threshold == null ? '—' : Number(status.threshold).toFixed(2), ''],
       ['角色', status.role || '—', ''],
       ['识别', status.stt || '—', ''],
-      ['大模型', status.llm ? '已启用' : '离线', status.llm ? 'ok' : ''],
+      /* 只写「已启用」等于替它撒谎：开了但缺 Key 的机器，界面上和真能回话的一模一样 */
+      ['大模型', shortModel(status), status.llm_ready ? 'ok' : (status.llm ? 'warn' : '')],
       ['演练模式', status.dry_run ? '开启' : '关闭', status.dry_run ? 'warn' : ''],
     ];
     $('cells').innerHTML = rows.map(([k, v, tone]) =>

@@ -40,13 +40,21 @@ api_key = ""
 timeout_s = 30
 
 [llm]
-enabled = false               # false = 只走快通道 + 离线启发式（完全离线可用）
-base_url = "http://localhost:11434/v1"
-api_key = ""
-model = "qwen2.5-coder:14b"
+enabled = true                # 慢通道总开关。关掉 = 只走正则快通道 + 离线启发式，完全离线可用
+provider = "cline"            # cline | openai | ollama。决定要不要注入渠道私有字段（见 core._llm_extra）
+base_url = "https://llm.mindax.cn/v1"
+api_key = ""                  # 留空则读 api_key_file（默认 .voxos/llm_key）；环境变量 VOXOS_LLM_API_KEY 最优先
+api_key_file = ".voxos/llm_key"   # 独立文件，不进仓库：填一次密钥不该等于往公开仓库推一次
+model = "cline-pass/deepseek-v4.1-flash-1017"
+                              # 必须带 cline-pass/ 前缀：裸 deepseek/* 走付费层，余额 0 时 402
+thinking = "disabled"         # disabled | enabled | auto。Cline 渠道必须 disabled：
+                              # 否则 DeepSeek V4 会把思考链混进 tool_call 参数流，结构化调用直接失败
 temperature = 0.1
 timeout_s = 20
-max_tool_rounds = 3
+max_tool_rounds = 3           # agent 循环上限：一轮 tool_calls + 回填结果算一轮
+prompts_dir = "config/prompts"        # 随包提示词（升级会换掉）
+user_prompts_dir = ".voxos/prompts"   # 你自己的覆盖版（升级不丢，存盘即生效）
+extra_body = ""               # 其它渠道私有字段，JSON 字符串，如 '{"reasoning_effort":"low"}'
 
 [workspace]
 daily_log_dir = "~/Documents/DevLogs"

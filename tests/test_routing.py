@@ -8,7 +8,17 @@ from __future__ import annotations
 import pytest
 
 from voxos import core
-from voxos.config import load
+from voxos.config import Config, load
+
+
+def offline() -> Config:
+    """真实配置，但把慢通道关掉。
+
+    这条文件说的是「哪种说法落到哪个工具」，和本机有没有配 Key 无关。
+    直接 `load()` 会让一条本该 1 毫秒的断言变成一次真实网络请求：
+    机器上配好大模型之后它就红了，红的原因还和被测行为毫无关系。
+    """
+    return load().with_overrides(**{"llm.enabled": False})
 
 CASES: list[tuple[str, str, str]] = [
     # (期望工具, 说法, 备注)
@@ -117,13 +127,13 @@ def test_small_talk_is_answered_not_ignored(text: str):
     能力没错，但一个能对话的东西不该把问候当失败——所以问候、道谢、问身份
     各有自己的出口，且**不算 ignore**（ignore 不朗读，问它一句会变成沉默）。
     """
-    result = core.dispatch(text, cfg=load())
+    result = core.dispatch(text, cfg=offline())
     assert result.route == "chat", f"「{text}」落到了 {result.route}"
     assert result.reply, f"「{text}」没有回话"
 
 
 def test_unknown_speech_still_explains_what_it_can_do():
     """听不懂时也要给下一步，不能只留一句「没听懂」。"""
-    result = core.dispatch("帮我订一张机票", cfg=load())
+    result = core.dispatch("帮我订一张机票", cfg=offline())
     assert result.route == "ignore"
     assert "打开应用" in result.reply
