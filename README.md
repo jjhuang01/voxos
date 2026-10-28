@@ -21,7 +21,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 161 项测试
+make test                                    # 173 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
 ```
@@ -170,7 +170,7 @@ voxos/
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 161 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端
+└── tests/                  # 173 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/文档自洽
 ```
 
 ## 四条关键设计决策
@@ -252,11 +252,17 @@ python scripts/fetch_models.py # 声纹 + VAD + SenseVoice 识别模型（约 26
 机器上有别的进程抢 CPU 时会掉到 **20×** 上下。`make verify` 报的是当次的最差值。
 
 **但这不是中英混说的成绩。** 上面那组是英文句子用英文音色读，量的是英文识别。
-真实场景是中文句子里夹术语——「把 redis 的连接池调大一点」——同一批术语在这种念法下
-召回只有 **29.4%**（`docker`→`care`、`nginx`→`in`），中文本身没问题（字错 9.6%）。
-对照实验证明是发音而非模型：同一批句子交给英文音色，`docker`/`build`/`review` 全对。
-所以代码术语得靠热词表 + 更懂双语口音的模型，不能指望这个声学模型自己扛。
-详见 `docs/REVIEW.md §22`。
+真实场景是中文句子里夹术语——「把 redis 的连接池调大一点」。两版语料一起量：
+
+| 语料 | 术语召回 | 典型错法 |
+| :--- | ---: | :--- |
+| 中文音色念术语 | 29.4% | `docker`→`care`、`nginx`→`in` |
+| 双语拼接（术语用英文音色） | **47.1%** | `nginx`→`gaangs`、`docker`→`doggcker` |
+
+中文本身没问题（字错 9.6%）。双语拼接更接近真人的念法，能救回 `sql`/`python`/`token`，
+但 `nginx`/`docker`/`git rebase` 照样错——所以这**不只是发音问题**：模型对中文语境里的
+英文术语本来就弱。热词偏置在 sherpa-onnx 的 SenseVoice 上没有接口，想达标得换支持
+contextual biasing 的双语模型。详见 `docs/REVIEW.md §22` 与 `§27`。
 
 识别后端在设置页切换（`stt.backend`），默认 `scripted`（不依赖模型，CI 与演示用）。
 换成 `sense_voice` 后完全离线，音频不出本机。
