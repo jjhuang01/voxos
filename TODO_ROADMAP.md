@@ -148,7 +148,7 @@
 
 ### Task 1.8 工程化
 
-- [x] 226 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
+- [x] 229 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
       `scripts/audit_ui.py` 12 项界面回归（`make audit-ui`），`scripts/soak.py` 长稳（`make soak`）。
 - [x] 全模块单函数 ≤ 40 行（最长 39 行）、核心五模块共 8 个类、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README。
@@ -186,6 +186,40 @@
       修法：建 venv 之前就 `unset PYTHONPATH`。这条只在本地跑 `make install-smoke` 时出现，
       CI 里没有 PYTHONPATH，所以**如果只跑 CI，这个坑会一直藏着**。
 - *验收*：测试 +5（226 项），验收指标不变（安装冒烟是 CI 门禁，不进 `verify.py` 的 19 项）。
+
+### Task 1.10 打包与安装这条链路本身（0.1.14）
+
+目标只有一个：**发得出去，装得上来**。0.1.13 之后剩下的三个洞都不是功能问题，
+而是「链路在某一步会断」。
+
+- [x] **升级会断在第二步**。README 原来写「`pipx install --force` → `inject` → `doctor`」，
+      实测在干净 HOME 上第二次跑就失败：pipx 1.15 走 uv 后端重建 venv 时报
+      `error: A virtual environment already exists at: .`，接着 pipx 拒绝删除
+      「不是本次会话创建的」venv。也就是说**升级路径根本没被验证过**——
+      之前每次都是在仓库里 `pipx install --force`，恰好没触发。
+      改成 `pipx uninstall` → `pipx install`：等价、不依赖 pipx 版本，
+      且卸载只删 venv，`~/.voxos` 里的模型/声纹/日志一个不动。
+- [x] **`scripts/install.sh`**：一条命令装好或升级（取包 → 装 → 音频依赖 → 自检）。
+      支持本地 wheel、最新 Release、`--no-audio`。为什么要脚本而不是文档里的三条命令：
+      `inject` 是升级时最容易漏的一步，漏了之后 `doctor` 只报「降级」，
+      不会说「你上次注入的依赖没了」——于是模型下好了却永远跑脚本回放。
+- [x] **一个自己写出来的坑：EXIT trap 覆盖退出码**。`cleanup() { [ -n "$WORK" ] && rm -rf "$WORK"; }`
+      在本地 wheel 路径下（`$WORK` 为空）返回 1，而 bash 用 trap 里最后一条命令的退出码
+      覆盖脚本退出码——**装成功了却报失败**。加 `return 0` 钉住。
+      这类 bug 只有真的跑一遍并检查退出码才看得见，看日志是绿的。
+- [x] **发布门禁从「永久红」改成「可豁免但有痕」**。`make verify-release` 此前把
+      GAP（中英混说 95%）算作不通过，而这一项在合成语料下关不掉，于是门禁永远红、
+      等于没有——0.1.11/0.1.12 都是绕过它发的。现在 `--allow-gap 关键字 --reason 理由
+      --until 到期日`，缺理由/缺到期日/日期过期/关键字写错**四种情况都直接拦**，
+      通过时也照打 WARN 并算进「未达标」。豁免是「知道并接受」，不是「假装通过」。
+- [x] **Release 说明来自 `CHANGELOG.md`**（`scripts/release_notes.py` 抽取），
+      缺段落直接报错。手写的说明会和 CHANGELOG 各说一套，而且发版时最容易被跳过。
+- [x] **Actions 升到 v7**（`checkout@v7` / `setup-python@v7`）。v4/v5 已被强制跑在
+      Node 24 上并持续告警，将来会变成硬错误——打包链路会整个停掉。
+- [x] **CI 里真的跑一遍 `install.sh`**（package job，`--no-audio`）。
+      用户敲的是它，不是那串 pip 命令；退出码必须是 0。
+- *验收*：测试 +3（229 项），`make verify-release` 首次为绿（带显式豁免），
+      Release 说明由 CHANGELOG 生成。
 
 ---
 

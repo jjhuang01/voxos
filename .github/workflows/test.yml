@@ -42,8 +42,8 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - name: 安装最小依赖
@@ -60,8 +60,8 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - run: python -m pip install build
@@ -73,6 +73,13 @@ jobs:
       # 改配置、并比对安装目录那份一个字节没动。
       - name: 安装冒烟（装完才验得出来的 6 项）
         run: bash scripts/install_smoke.sh dist/*.whl
+      # 用户真正敲的是 install.sh，不是上面那串 pip 命令。这条在干净 runner 上
+      # 把「取包 → pipx install → 自检」整条走一遍，退出码必须是 0——
+      # 脚本里 EXIT trap 覆盖退出码那类 bug，只有真的跑一遍才看得见。
+      - name: 一条命令装（scripts/install.sh）
+        run: |
+          python -m pip install -q pipx
+          bash scripts/install.sh dist/*.whl --no-audio
 
   # 产物走 release 资产，不走 upload-artifact：免费额度的 artifact 存储会被占满
   # （本项目第一次跑 CI 就撞上了），而 release 资产不占那个配额，也不会 90 天过期。
@@ -84,8 +91,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - run: python -m pip install build
@@ -107,6 +114,13 @@ jobs:
       # 实测两次摘要不同）。要的是「产物来自这个 commit」，不是「字节一致」。
       - name: 重新构建
         run: python -m build
+      # 发布说明从 CHANGELOG.md 抽：手写的说明会和 CHANGELOG 各说一套，而且发版时
+      # 最容易被跳过。缺段落时 release_notes.py 直接报错——空白的 Release 页面
+      # 比一条明确的错误更难发现。
+      - name: 发布说明取自 CHANGELOG
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: python scripts/release_notes.py "$VERSION" > notes.md
       - name: 发布到 GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -115,5 +129,5 @@ jobs:
           gh release create "$VERSION" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "$VERSION" \
-            --notes "安装：pipx install voxos-${VERSION#v}-py3-none-any.whl" \
+            --notes-file notes.md \
             --verify-tag

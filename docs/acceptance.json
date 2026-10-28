@@ -7,9 +7,9 @@
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 0.4,
-      "p95": 1.006,
-      "context_p95": 0.014,
+      "p50": 0.245,
+      "p95": 0.478,
+      "context_p95": 0.032,
       "rounds": 30
     },
     "voiceprint": {
@@ -91,11 +91,11 @@
       "backend": "sherpa-cam++",
       "threshold": 0.82,
       "dispatch_ms": [
-        0.45,
-        124.4
+        0.59,
+        191.54
       ],
-      "wall_ms": 339.9,
-      "realtime_factor": 0.019
+      "wall_ms": 445.8,
+      "realtime_factor": 0.025
     },
     "redlines": {
       "forbidden_cases": 8,
@@ -108,8 +108,8 @@
       "seconds": 30,
       "segments": 0,
       "vad": "SileroVad",
-      "cpu_percent": 0.33,
-      "realtime_factor": 0.003
+      "cpu_percent": 0.37,
+      "realtime_factor": 0.004
     },
     "security": {
       "codes": {
@@ -150,8 +150,8 @@
         "en": 3.1
       },
       "chars": 818,
-      "rtf": 0.025,
-      "wall_s": 2.0,
+      "rtf": 0.041,
+      "wall_s": 3.3,
       "samples": [
         {
           "want": "把刚才登录模块的报错原因记到今天的开发日志里",
@@ -217,8 +217,13 @@
         },
         {
           "file": "scripts/fetch_models.py",
-          "lines": 144,
-          "code_lines": 126
+          "lines": 36,
+          "code_lines": 25
+        },
+        {
+          "file": "scripts/release_notes.py",
+          "lines": 68,
+          "code_lines": 50
         },
         {
           "file": "scripts/shot.py",
@@ -232,8 +237,8 @@
         },
         {
           "file": "scripts/verify.py",
-          "lines": 772,
-          "code_lines": 666
+          "lines": 825,
+          "code_lines": 709
         },
         {
           "file": "src/voxos/__init__.py",
@@ -242,13 +247,13 @@
         },
         {
           "file": "src/voxos/audio.py",
-          "lines": 591,
+          "lines": 593,
           "code_lines": 470
         },
         {
           "file": "src/voxos/config.py",
-          "lines": 138,
-          "code_lines": 109
+          "lines": 203,
+          "code_lines": 161
         },
         {
           "file": "src/voxos/core.py",
@@ -267,8 +272,13 @@
         },
         {
           "file": "src/voxos/main.py",
-          "lines": 680,
-          "code_lines": 556
+          "lines": 724,
+          "code_lines": 592
+        },
+        {
+          "file": "src/voxos/models.py",
+          "lines": 158,
+          "code_lines": 137
         },
         {
           "file": "src/voxos/registry.py",
@@ -287,8 +297,8 @@
         },
         {
           "file": "src/voxos/tools.py",
-          "lines": 329,
-          "code_lines": 264
+          "lines": 341,
+          "code_lines": 272
         },
         {
           "file": "src/voxos/ui.py",
@@ -296,7 +306,7 @@
           "code_lines": 386
         }
       ],
-      "total_lines": 5825,
+      "total_lines": 6119,
       "max_function": {
         "name": "scripts/verify.py:measure_stt",
         "lines": 39
@@ -304,14 +314,14 @@
       "classes": 34,
       "tools": 10,
       "fast_routes": 4,
-      "test_files": 13
+      "test_files": 14
     },
     "tests": {
       "returncode": 0,
-      "summary": "207 passed in 20.32s",
-      "seconds": 20.8
+      "summary": "225 passed, 1 skipped in 20.93s",
+      "seconds": 21.5
     },
-    "generated_at": "2026-10-28T14:00:15",
+    "generated_at": "2026-10-28T19:41:25",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -327,12 +337,12 @@
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "1.006ms",
+      "measured": "0.478ms",
       "pass": true
     },
     {
       "item": "静音待机 CPU < 1.5%",
-      "measured": "0.33%/秒音频",
+      "measured": "0.37%/秒音频",
       "pass": true
     },
     {
@@ -387,12 +397,12 @@
     },
     {
       "item": "测试全绿",
-      "measured": "207 passed in 20.32s",
+      "measured": "225 passed, 1 skipped in 20.93s",
       "pass": true
     },
     {
       "item": "上下文注入不阻塞派发",
-      "measured": "0.014ms",
+      "measured": "0.032ms",
       "pass": true
     },
     {
@@ -407,7 +417,7 @@
     },
     {
       "item": "本地识别字符错误率 < 10%",
-      "measured": "2.8%（中文 1.4% / 英文 3.1%，24 句，≥40× 实时）",
+      "measured": "2.8%（中文 1.4% / 英文 3.1%，24 句，≥20× 实时）",
       "pass": true,
       "skipped": false
     },

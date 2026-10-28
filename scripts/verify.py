@@ -717,21 +717,60 @@ def render(report: dict[str, object], rows: list[dict[str, object]]) -> str:
     )
 
 
-def main() -> int:
+def _apply_waivers(gaps: list[dict[str, object]], args) -> tuple[list, list]:
+    """把被显式豁免的 GAP 摘出来，返回 (已豁免, 仍拦截)。
+
+    豁免必须同时给理由和到期日：只写 `--allow-gap` 就等于把门禁改成永不开火，
+    那和删掉这条检查没区别。到期日让豁免自动失效，逼着人重新判断一次。
+    """
+    if not args.allow_gap:
+        return [], gaps
+    if not args.reason or not args.until:
+        print("❌ --allow-gap 必须同时给 --reason 和 --until（豁免要留痕，也要能到期）")
+        raise SystemExit(2)
+    try:
+        deadline = datetime.strptime(args.until, "%Y-%m-%d").date()
+    except ValueError:
+        print(f"❌ --until 要写成 YYYY-MM-DD，收到 {args.until!r}")
+        raise SystemExit(2)
+    if deadline < datetime.now().date():
+        print(f"❌ 豁免已于 {args.until} 到期——重新判断一次，别让豁免变成永久")
+        raise SystemExit(2)
+    waived, blocking = [], []
+    for row in gaps:
+        hit = any(pattern in str(row["item"]) for pattern in args.allow_gap)
+        (waived if hit else blocking).append(row)
+    for pattern in args.allow_gap:
+        if not any(pattern in str(row["item"]) for row in waived):
+            # 关键字写错了也要拦：否则「豁免配好了」是个假象，下次真出现新 GAP 时
+            # 会被同一份配置一起放过。
+            print(f"❌ --allow-gap {pattern!r} 没匹配到任何未达标项（关键字写错了？）")
+            raise SystemExit(2)
+    return waived, blocking
+
+
+def _parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--refresh-corpus", action="store_true")
     parser.add_argument("--release", action="store_true",
                         help="发布门禁：GAP / SKIP 也算不通过（回归模式仍只拦 FAIL）")
-    args = parser.parse_args()
-    SANDBOX.mkdir(parents=True, exist_ok=True)
-    report = build_report(args.refresh_corpus)
-    rows = verdicts(report)
-    if not (ROOT / "docs").exists():
-        (ROOT / "docs").mkdir()
-    (ROOT / "docs" / "acceptance.json").write_text(
-        json.dumps({"report": report, "verdicts": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
-    (ROOT / "docs" / "ACCEPTANCE.html").write_text(render(report, rows), encoding="utf-8")
+    parser.add_argument("--allow-gap", action="append", default=[], metavar="关键字",
+                        help="豁免某个未达标项（按 item 文本包含匹配，可重复）")
+    parser.add_argument("--reason", default="", help="豁免理由（会打印出来留痕）")
+    parser.add_argument("--until", default="", help="豁免到期日 YYYY-MM-DD，过期即失效")
+    return parser.parse_args()
 
+
+def _write_reports(report: dict[str, object], rows: list[dict[str, object]]) -> None:
+    docs = ROOT / "docs"
+    docs.mkdir(exist_ok=True)
+    (docs / "acceptance.json").write_text(
+        json.dumps({"report": report, "verdicts": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
+    (docs / "ACCEPTANCE.html").write_text(render(report, rows), encoding="utf-8")
+
+
+def _summarize(rows: list[dict[str, object]], args) -> int:
+    """打印逐项结果与结论，返回进程退出码。"""
     print("\n验收项")
     print("-" * 62)
     for row in rows:
@@ -739,18 +778,32 @@ def main() -> int:
     failed = [row for row in rows if not row["pass"] and not row.get("skipped") and not row.get("gap")]
     gaps = [row for row in rows if row.get("gap") and not row.get("skipped")]
     skipped = [row for row in rows if row.get("skipped")]
+    waived, blocking = _apply_waivers(gaps, args)
     judged = len(rows) - len(skipped)
     tail = f" · {len(skipped)} 跳过（缺模型/缺素材）" if skipped else ""
     if gaps:
         tail += f" · {len(gaps)} 项未达标（能力边界，见 REVIEW §22）"
+        if waived:
+            tail += f"，其中 {len(waived)} 项已豁免至 {args.until}"
     print(f"{judged - len(failed) - len(gaps)}/{judged} 通过{tail}"
           f" · 报告 docs/ACCEPTANCE.html")
+    for row in waived:
+        print(f"WARN  豁免  {row['item']:<28} {row['measured']}  ← {args.reason}")
     if failed:
         return 1
-    if args.release and (gaps or skipped):
+    if args.release and (blocking or skipped):
         print("发布门禁：存在未达标或未测量的必测项，按不通过处理")
         return 1
     return 0
+
+
+def main() -> int:
+    args = _parse_args()
+    SANDBOX.mkdir(parents=True, exist_ok=True)
+    report = build_report(args.refresh_corpus)
+    rows = verdicts(report)
+    _write_reports(report, rows)
+    return _summarize(rows, args)
 
 
 def _passes_all(mixed: dict[str, object]) -> bool:

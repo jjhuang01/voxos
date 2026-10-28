@@ -19,22 +19,30 @@
 只有音频部分要 `numpy` + `sherpa-onnx`。
 
 ```bash
-# 1. 从 GitHub Release 取安装包（仓库是公开的，不需要登录）
-gh release download --repo jjhuang01/voxos --pattern '*.whl'
+# 一条命令：取最新 Release → pipx 安装 → 音频依赖 → 自检
+curl -fsSL https://raw.githubusercontent.com/jjhuang01/voxos/main/scripts/install.sh | bash
+```
 
-# 2. 装成全局命令（pipx 会给它一个独立 venv，不污染你的环境）
-pipx install ./voxos-0.1.13-py3-none-any.whl
+不想用管道执行远端脚本，就自己下包再交给同一个脚本（两件事完全等价）：
 
-# 3. 语音相关依赖（不装也能跑：会降级成能量 VAD + 频谱声纹 + 脚本回放）
-pipx inject voxos sherpa-onnx sounddevice
+```bash
+gh release download --repo jjhuang01/voxos --pattern '*.whl'   # 仓库公开，不需要登录
+bash install.sh ./voxos-0.1.14-py3-none-any.whl                # 或 curl 下 scripts/install.sh
+```
 
-# 4. 下模型（约 267MB；--no-asr 只要 28MB 的声纹 + VAD）
-voxos models --no-asr
+脚本里做的事，想手动做也可以：
+
+```bash
+pipx install ./voxos-0.1.14-py3-none-any.whl   # 独立 venv，不污染你的环境
+pipx inject voxos sherpa-onnx sounddevice      # 音频依赖；跳过则降级为能量 VAD + 脚本回放
+voxos models --no-asr                          # 28MB 声纹 + VAD；去掉 --no-asr 是 267MB
 voxos doctor
 ```
 
-> 顺序不能反：`pipx install --force` 会**重建 venv**，把 inject 进去的依赖一起清掉。
-> 升级版本时按 `install --force` → `inject` → `doctor` 三步走，别只看第一条命令的退出码。
+> **升级就重跑同一条命令。** 别用 `pipx install --force`：pipx 1.15 走 uv 后端时
+> 重建 venv 会报 `A virtual environment already exists at: .`，然后拒绝删除
+> "不是本次会话创建的" venv，升级就断在那里。脚本改成先 `pipx uninstall` 再
+> `pipx install`——卸载只删 venv，`~/.voxos` 里的模型、声纹、日志一个都不动。
 
 装完就有的命令：
 
@@ -67,8 +75,9 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 226 项测试
+make test                                    # 229 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
+make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
 make install-smoke                           # 装一遍再验（源码跑永远看不到的那 6 项）
 ```
