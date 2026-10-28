@@ -19,7 +19,7 @@
 只有音频部分要 `numpy` + `sherpa-onnx`。
 
 ```bash
-# 1. 从 GitHub Release 取安装包（私有仓库需要先 gh auth login）
+# 1. 从 GitHub Release 取安装包（仓库是公开的，不需要登录）
 gh release download --repo jjhuang01/voxos --pattern '*.whl'
 
 # 2. 装成全局命令（pipx 会给它一个独立 venv，不污染你的环境）

@@ -103,7 +103,9 @@ jobs:
               sys.exit(f"tag 是 {tag}，pyproject 是 {version}——先改 pyproject 再打 tag")
           print(f"tag 与版本一致：{version}")
           PY
-      - name: 重新构建（可重复构建是前提）
+      # 再构建一次：同一份源码，不是字节级可重复（wheel 里带构建时间戳，
+      # 实测两次摘要不同）。要的是「产物来自这个 commit」，不是「字节一致」。
+      - name: 重新构建
         run: python -m build
       - name: 发布到 GitHub Release
         env:
