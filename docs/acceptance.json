@@ -3,13 +3,13 @@
     "fast_path": {
       "p50": 0.0007,
       "p95": 0.0008,
-      "p99": 0.0009,
+      "p99": 0.0008,
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 0.317,
-      "p95": 0.965,
-      "context_p95": 0.007,
+      "p50": 0.169,
+      "p95": 0.443,
+      "context_p95": 0.003,
       "rounds": 30
     },
     "voiceprint": {
@@ -91,11 +91,11 @@
       "backend": "sherpa-cam++",
       "threshold": 0.82,
       "dispatch_ms": [
-        0.53,
-        244.05
+        0.58,
+        123.87
       ],
-      "wall_ms": 496.1,
-      "realtime_factor": 0.027
+      "wall_ms": 340.1,
+      "realtime_factor": 0.019
     },
     "redlines": {
       "forbidden_cases": 8,
@@ -108,8 +108,8 @@
       "seconds": 30,
       "segments": 0,
       "vad": "SileroVad",
-      "cpu_percent": 0.38,
-      "realtime_factor": 0.004
+      "cpu_percent": 0.33,
+      "realtime_factor": 0.003
     },
     "security": {
       "codes": {
@@ -150,8 +150,8 @@
         "en": 3.1
       },
       "chars": 818,
-      "rtf": 0.027,
-      "wall_s": 2.2,
+      "rtf": 0.026,
+      "wall_s": 2.1,
       "samples": [
         {
           "want": "把刚才登录模块的报错原因记到今天的开发日志里",
@@ -175,8 +175,10 @@
       "available": true,
       "cases": 10,
       "terms": 17,
+      "hits": 5,
       "recall": 29.4,
       "zh_cer": 9.6,
+      "recall_bilingual": 47.1,
       "samples": [
         {
           "want": "把 redis 的连接池调大一点",
@@ -230,8 +232,8 @@
         },
         {
           "file": "scripts/verify.py",
-          "lines": 734,
-          "code_lines": 636
+          "lines": 745,
+          "code_lines": 644
         },
         {
           "file": "src/voxos/__init__.py",
@@ -250,13 +252,13 @@
         },
         {
           "file": "src/voxos/core.py",
-          "lines": 326,
-          "code_lines": 268
+          "lines": 332,
+          "code_lines": 270
         },
         {
           "file": "src/voxos/corpus.py",
-          "lines": 173,
-          "code_lines": 141
+          "lines": 224,
+          "code_lines": 183
         },
         {
           "file": "src/voxos/dsp.py",
@@ -275,8 +277,8 @@
         },
         {
           "file": "src/voxos/safety.py",
-          "lines": 267,
-          "code_lines": 217
+          "lines": 282,
+          "code_lines": 231
         },
         {
           "file": "src/voxos/settings.py",
@@ -294,7 +296,7 @@
           "code_lines": 309
         }
       ],
-      "total_lines": 5133,
+      "total_lines": 5216,
       "max_function": {
         "name": "scripts/verify.py:measure_stt",
         "lines": 39
@@ -302,14 +304,14 @@
       "classes": 34,
       "tools": 10,
       "fast_routes": 4,
-      "test_files": 11
+      "test_files": 12
     },
     "tests": {
       "returncode": 0,
-      "summary": "161 passed in 16.45s",
-      "seconds": 17.0
+      "summary": "173 passed in 16.89s",
+      "seconds": 17.4
     },
-    "generated_at": "2026-10-28T04:04:45",
+    "generated_at": "2026-10-28T10:59:14",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -325,12 +327,12 @@
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "0.965ms",
+      "measured": "0.443ms",
       "pass": true
     },
     {
       "item": "静音待机 CPU < 1.5%",
-      "measured": "0.38%/秒音频",
+      "measured": "0.33%/秒音频",
       "pass": true
     },
     {
@@ -385,12 +387,12 @@
     },
     {
       "item": "测试全绿",
-      "measured": "161 passed in 16.45s",
+      "measured": "173 passed in 16.89s",
       "pass": true
     },
     {
       "item": "上下文注入不阻塞派发",
-      "measured": "0.007ms",
+      "measured": "0.003ms",
       "pass": true
     },
     {
@@ -411,7 +413,7 @@
     },
     {
       "item": "中英混说英文术语召回 ≥ 95%",
-      "measured": "29.4%（17 个术语，中文 9.6% 字错）",
+      "measured": "29.4%（中文音色）/ 47.1%（双语拼接），17 个术语，中文 9.6% 字错",
       "pass": false,
       "skipped": false,
       "gap": true

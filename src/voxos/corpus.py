@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import wave
@@ -73,6 +74,56 @@ def build_mixed(root: Path, voice: str = OWNER_VOICE) -> list[dict[str, str]]:
         if not path.exists() and not _say(text, voice, path):
             return []
         clips.append({"path": path.name, "text": text})
+    return clips
+
+
+def _split_runs(text: str) -> list[tuple[str, str]]:
+    """切成中文段与英文段：`把 redis 的连接池` → `[("zh","把"),("en","redis"),("zh","的连接池")]`。"""
+    runs: list[tuple[str, str]] = []
+    for match in re.finditer(r"[A-Za-z0-9]+|[^\sA-Za-z0-9]+", text):
+        piece = match.group(0)
+        if piece.strip():
+            runs.append(("en" if piece.isascii() else "zh", piece))
+    return runs
+
+
+def _read_wav(path: Path) -> np.ndarray:
+    with wave.open(str(path), "rb") as handle:
+        return np.frombuffer(handle.readframes(handle.getnframes()),
+                             dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def _write_wav(path: Path, samples: np.ndarray) -> None:
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(dsp.SR)
+        handle.writeframes((np.clip(samples, -1, 1) * 32767).astype(np.int16).tobytes())
+
+
+def build_mixed_bilingual(
+    root: Path, zh_voice: str = OWNER_VOICE, en_voice: str = "Samantha", gap_ms: int = 60
+) -> list[dict[str, str]]:
+    """中英混说，但**术语用英文音色念**：中文说中文，术语说英文。
+
+    用中文音色把 `docker` 读成「多克」是 TTS 的局限，不是用户的说法。真人夹术语
+    就是这么说的，所以这一版更接近现场。两版一起量，才知道真实水平落在哪个区间——
+    只报低的那版会把模型说得比实际差，只报高的那版才是自欺。
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    gap = np.zeros(int(dsp.SR * gap_ms / 1000), dtype=np.float32)
+    clips: list[dict[str, str]] = []
+    for index, text in enumerate(MIXED_LINES):
+        target = root / f"mixed-bilingual-{index}.wav"
+        pieces: list[np.ndarray] = []
+        for part, (language, segment) in enumerate(_split_runs(text)):
+            piece = root / f"mixed-bilingual-{index}-{part}.wav"
+            if not piece.exists() and not _say(segment, en_voice if language == "en" else zh_voice, piece):
+                return []
+            pieces.append(np.concatenate([_read_wav(piece), gap]))
+        if not target.exists():
+            _write_wav(target, np.concatenate(pieces))
+        clips.append({"path": target.name, "text": text})
     return clips
 
 
