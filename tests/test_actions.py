@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 from voxos import messaging, sandbox, scheduler
 
@@ -31,6 +32,64 @@ def test_profile_denies_writes_outside_workspace(cfg):
 def test_network_flag_opens_only_that_hole(cfg):
     opened = cfg.with_overrides(**{"workspace.network": True})
     assert "(deny network*)" not in sandbox.profile(opened)
+
+
+def test_start_dir_is_a_write_root_but_slash_is_not(cfg, monkeypatch):
+    """启动目录要能写，但 `/` 和家目录本身不能算——那两个等于没有边界。
+
+    真实症状：用户在自己项目里说「跑一下测试」，pytest 连 `.pytest_cache`
+    都写不进去。命令没错，是边界画错了（codex 的 workspace-write 也是 cwd 起步）。
+    而 App 由 LaunchServices 拉起时 cwd 就是 `/`，所以「有 cwd 就放行」必须
+    排除它，否则每个从 Finder 打开的命令都是全开。
+    """
+    inside = Path.home() / "Documents"
+    monkeypatch.chdir(inside)
+    assert inside.resolve() in sandbox.writes_roots(cfg)
+
+    monkeypatch.chdir("/")
+    assert Path("/").resolve() not in sandbox.writes_roots(cfg)
+
+    monkeypatch.chdir(Path.home())
+    assert Path.home().resolve() not in sandbox.writes_roots(cfg)
+
+
+def test_dev_is_not_opened_wholesale(cfg):
+    """`(subpath "/dev")` 等于允许 `dd of=/dev/disk2`：只开真正需要的节点。"""
+    text = sandbox.profile(cfg)
+    assert '(subpath "/dev")' not in text
+    assert '(literal "/dev/null")' in text
+    assert '(subpath "/dev/fd")' in text
+
+
+def test_extra_write_roots_are_honoured(cfg):
+    """配置里写一个字符串也得认——手写 TOML 时很容易漏掉方括号。"""
+    listed = cfg.with_overrides(**{"workspace.write_roots": ["/opt/data"]})
+    assert Path("/opt/data") in sandbox.writes_roots(listed)
+    single = cfg.with_overrides(**{"workspace.write_roots": "/srv/one"})
+    assert Path("/srv/one") in sandbox.writes_roots(single)
+    empty = cfg.with_overrides(**{"workspace.write_roots": ""})
+    assert not [one for one in sandbox.writes_roots(empty) if str(one) == ""]
+
+
+def test_sandbox_status_is_probed_once(cfg, monkeypatch):
+    """探测结论要缓存：每条命令都探一次，等于每条命令多起一个进程。"""
+    calls: list[int] = []
+
+    def fake_probe():
+        calls.append(1)
+        return True, ""
+
+    monkeypatch.setattr(sandbox, "_probe", fake_probe)
+    sandbox.reset()
+    try:
+        assert sandbox.status() == (True, "")
+        assert sandbox.status() == (True, "")
+        assert len(calls) == 1, "同一个进程里不该重复探测"
+        sandbox.reset()
+        sandbox.status()
+        assert len(calls) == 2, "reset() 之后应该重新探"
+    finally:
+        sandbox.reset()
 
 
 def test_sandbox_failure_is_told_apart_from_command_failure():

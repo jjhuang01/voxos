@@ -22,7 +22,7 @@ import webbrowser
 from collections import deque
 from pathlib import Path
 
-from . import __version__, core, prompts, scheduler, settings, tools, ui
+from . import __version__, core, prompts, sandbox, scheduler, settings, tools, ui
 # audio / corpus / dsp 不在顶层导入：它们把 numpy（实测 58ms）一起拖进来，
 # 而 `voxos text`、`voxos schedule`、`--version` 一条都用不到。谁用谁在里面导。
 from .config import Config, load
@@ -406,7 +406,7 @@ def _run_forever(cfg: Config) -> int:
     hotwords = audio.refresh_hotwords(cfg) if audio.supports_hotwords(cfg) else []
     _, threshold, kind = audio.make_embedder(cfg)
     print(f"VoxOS 已启动：声纹后端={kind} 阈值={threshold} "
-          f"识别={_hotword_note(cfg, hotwords)} 胶囊={url}")
+          f"识别={_hotword_note(cfg, hotwords)} 命令沙箱={_sandbox_note(cfg)} 胶囊={url}")
     if not lock.profiles:
         print("首次使用：在胶囊面板里点「录入声纹」（3 秒），或运行 voxos enroll --record 3")
         runtime.bus.emit("onboard", "请先录入声纹", "点胶囊 → 录入声纹")
@@ -921,6 +921,8 @@ def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
         ("资源根", str(cfg.root)),
         ("数据根", str(cfg.data_root)),
         ("配置文件", _config_note(cfg)),
+        ("命令沙箱", _sandbox_note(cfg)),
+        ("可写根", _roots_note(cfg)),
         ("dry_run", str(cfg.flag("workspace.dry_run"))),
         ("角色", str(cfg.get("workspace.role"))),
     ]
@@ -1018,6 +1020,30 @@ def _hotword_note(cfg: Config, words: list[str]) -> str:
     if audio.supports_hotwords(cfg):
         return f"{label}（热词表 {len(words)} 条生效）"
     return f"{label}（无热词接口，热词表不生效）"
+
+
+def _sandbox_note(cfg: Config) -> str:
+    """命令沙箱到底生不生效。
+
+    「装好了但悄悄没生效」是这一组里最危险的一种「看起来正常」：用户以为命令
+    被关在笼子里，其实没有。所以 doctor 和启动横幅都必须报它，而且要报**为什么**。
+    """
+    current = sandbox.mode(cfg)
+    if current == "danger-full-access":
+        return "danger-full-access（不限制，命令直接跑）"
+    if current == "read-only":
+        return "read-only（一条命令都不执行）"
+    usable, why = sandbox.status()
+    return f"{current}（生效）" if usable else f"{current}（不生效：{why}）"
+
+
+def _roots_note(cfg: Config) -> str:
+    """沙箱允许写哪儿。不报出来，用户只能靠「为什么写不进去」去猜边界——
+    而那条错误信息长得和「命令自己有 bug」一模一样。"""
+    if sandbox.mode(cfg) != "workspace-write":
+        return "不适用"
+    home = str(Path.home())
+    return " ".join(str(one).replace(home, "~") for one in sandbox.writes_roots(cfg))
 
 
 def _vad_note(cfg: Config) -> str:

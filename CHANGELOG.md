@@ -6,6 +6,50 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 
 格式约定：`## [x.y.z] - YYYY-MM-DD`，一个版本一段，从新到旧。
 
+## [0.1.22] - 2026-10-29
+
+### 修复
+
+- **沙箱「装好了但悄悄没生效」这件事现在会自己说出来**。0.1.21 只是把失败判定
+  收紧了，用户仍然不知道自己的命令到底有没有被关进笼子。现在进程启动后探一次
+  `sandbox-exec` 能不能真的套上 profile、缓存结论，`voxos doctor` 与启动横幅都报
+  「生效 / 不生效 + 为什么」，`run_command` 按结论走而不是先试一次。
+
+- **可写根画错了**。`workspace-write` 原来只放行 `~/Projects` + `~/Documents/DevLogs`
+  + 临时目录——用户在自己项目里说「跑一下测试」，pytest 连 `.pytest_cache` 都写不
+  进去，报错和「命令有 bug」长得一模一样。现在按 codex 的语义补上**启动目录**，
+  并新增 `workspace.write_roots` 配置项。`/` 和家目录本身不算：App 由
+  LaunchServices 拉起时 cwd 就是 `/`，算进去等于不设边界。
+
+- **`/dev` 从整段放行改成逐个节点**。`(subpath "/dev")` 等于允许
+  `dd of=/dev/disk2`（要 root 才生效，但没必要开）。现在只开
+  `/dev/null`、`/dev/zero`、`/dev/random`、`/dev/urandom`、`/dev/stdout`、
+  `/dev/stderr`、`/dev/tty` 这些 `literal`，外加 `/dev/fd`（进程替换的地基）。
+
+- `voxos doctor` 新增「可写根」一行：边界不写出来，用户只能靠「为什么写不进去」猜。
+
+### 调研结论（这次「沙箱起不来」的根因）
+
+**macOS 不允许嵌套收紧。** 进程已经在某个沙箱里时，`sandbox_apply` 对任何比现状
+更严的 profile 都返回 `EPERM`。本机实测矩阵（macOS 27.2 / build 26B5086k / arm64）：
+
+| profile | 结果 |
+| :--- | :--- |
+| `(allow default)` | ✅ `ok` |
+| `(allow default)(deny file-write*)` | ❌ `Operation not permitted` |
+| `(allow default)(deny network*)` | ❌ |
+| `(deny default)(allow file-read*)` | ❌ |
+| `(allow default)(deny sysctl-write)` | ❌ |
+
+所以这不是 profile 写错了，是**执行环境本身在沙箱里**。用最小 `.app` 经
+LaunchServices 启动（`open -a`）拿到干净上下文后，`sandbox.status()` 返回
+`(True, '')`，七项 A/B 全部符合预期（cwd 在项目里可写、cwd 在 `/` 时同一路径被拒、
+`/dev/null` 可写、`~/Desktop` 被拒、`$TMPDIR` 可写、`curl` 断网）。
+
+顺带排除了三条死路：`launchctl submit`（无输出）、`launchctl bootstrap gui/501`
+（`Bootstrap failed: 5`）、`open -a Terminal x.command`（命令不执行）——沙箱上下文
+会继承，只有真正被 LaunchServices 拉起的 app bundle 是干净的。
+
 ## [0.1.21] - 2026-10-29
 
 ### 修复

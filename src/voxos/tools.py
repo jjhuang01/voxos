@@ -460,10 +460,17 @@ def _timeout(cfg: Config, raw: int) -> int:
 
 
 def _shell(cfg: Config, command: str, limit: int) -> tuple[subprocess.CompletedProcess, str]:
-    """跑一次；沙箱没起来就退回裸跑，并把这件事写进返回文本。
+    """跑一次。沙箱可用就套上，不可用就直说——**不先套一次再重试**。
 
-    不静默降级：用户以为有沙箱、实际没有，比一开始就说清楚危险得多。
+    「先试、失败再降级」看着更稳，实际更糟：多起一个进程，而且降级重跑等于
+    把同一条命令执行两遍。所以可用性在启动时探一次（`sandbox.status()`），
+    这里只按结论走。
     """
+    usable, why = sandbox.status()
+    if not usable:
+        bare = subprocess.run(["/bin/sh", "-lc", command], capture_output=True,
+                              text=True, timeout=limit)
+        return bare, f"（命令沙箱不可用：{why}；这条是直接执行的）"
     argv, profile = sandbox.wrap(cfg, ["/bin/sh", "-lc", command])
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=limit)
@@ -472,8 +479,10 @@ def _shell(cfg: Config, command: str, limit: int) -> tuple[subprocess.CompletedP
             profile.unlink(missing_ok=True)
     if done.returncode == 0 or not sandbox.failed_by_sandbox(done.stderr):
         return done, ""
-    bare = subprocess.run(["/bin/sh", "-lc", command], capture_output=True, text=True, timeout=limit)
-    return bare, "（沙箱没能应用，这次是直接执行的）"
+    # 探测说能用、这次却起不来（临时文件被删、并发、profile 写失败）：退回裸跑。
+    bare = subprocess.run(["/bin/sh", "-lc", command], capture_output=True,
+                          text=True, timeout=limit)
+    return bare, "（沙箱这次没能应用，这条是直接执行的）"
 
 
 def _brief(done: subprocess.CompletedProcess) -> str:

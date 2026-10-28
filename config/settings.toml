@@ -70,6 +70,10 @@ log_template = "- **[{time}] [{category}]** ({project}) {content}"
 confirm_timeout_s = 8
 sandbox = "workspace-write"   # 命令沙箱：read-only | workspace-write | danger-full-access
 network = false               # 沙箱里的命令能否联网（默认不能：别在你不知道的时候往外发东西）
+# 沙箱额外允许写入的目录。上面两个根 + 启动目录（cwd）+ 临时目录已经默认放行，
+# 所以这里只用来补「我还有个别的项目目录」这种例外。别写 "/" 或 "~"：
+# 那两个等于不设边界，代码里会直接把整个 profile 变成全开。
+write_roots = []
 command_timeout_s = 60        # 单条命令的超时上限
 schedule_file = ".voxos/schedules.json"  # 定时任务表，删掉就等于清空
 

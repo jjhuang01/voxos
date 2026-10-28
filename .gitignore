@@ -17,3 +17,7 @@ BUSINESS.md
 
 # 本地工作记忆，不进仓库
 .workbuddy-ai/
+
+# 沙箱探针（scripts/sandbox_probe.sh）写出来的临时文件
+_voxos_probe.txt
+_sbx_*.txt

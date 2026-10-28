@@ -33,9 +33,32 @@
 字典），这条路是抄社区的，代价（需要辅助功能权限、会抢焦点）写在返回值里。
 
 **怎么确认沙箱真的生效**：在**普通终端**里跑 `voxos text "执行命令 echo hi"`。
-结果里只有 `hi` 就是生效了；前面多一句「（沙箱没能应用，这次是直接执行的）」
-说明这台机器拒绝应用 seatbelt（在别的沙箱里嵌套跑、或企业策略禁止），
-那时命令照跑，但边界只剩红线和确认，你该知道。
+结果里只有 `hi` 就是生效了；前面多一句「（沙箱不可用：…）」说明这台机器拒绝
+应用 seatbelt，那时命令照跑，但边界只剩红线和确认，你该知道。`voxos doctor`
+会把结论和**可写根**一起列出来，不用猜。
+
+为什么会有「拒绝」这回事：**macOS 不允许嵌套收紧**。进程已经在某个沙箱里时，
+`sandbox_apply` 对任何比现状更严的 profile 都返回 `EPERM`——本机实测
+（macOS 27.2 / arm64）：`(allow default)` 能过，`(deny file-write*)`、
+`(deny network*)`、甚至只写一句 `(deny sysctl-write)` 全部
+`sandbox_apply: Operation not permitted`。所以 `sandbox.status()` 在进程启动后
+**探一次并缓存**，`run_command` 按结论走——不做「先试一次、失败再降级」，
+那等于把同一条命令跑两遍。
+
+`workspace-write` 的可写根 = `~/Projects` + `~/Documents/DevLogs` + **启动目录** +
+`$TMPDIR` + 配置里的 `workspace.write_roots`（codex 的语义就是 cwd 起步）。
+`/` 和家目录本身**不算**——App 由 LaunchServices 拉起时 cwd 就是 `/`，算进去
+等于不设边界。
+
+**在沙箱外验证沙箱**（怀疑「到底生不生效」时跑这个）：
+
+```bash
+sh scripts/sandbox_probe.sh
+```
+
+它会造一个一次性 `.app` 用 `open -a` 拉起，拿到干净上下文后跑七项 A/B：cwd 在项目里
+可写、cwd 在 `/` 时同一路径被拒、`/dev/null` 可写、`~/Desktop` 被拒、`$TMPDIR` 可写、
+`curl` 断网。`launchctl` 和 `open -a Terminal x.command` 都不行——沙箱上下文会继承。
 
 ## 安装（不用源码）
 
@@ -122,7 +145,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 306 项测试
+make test                                    # 310 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
@@ -297,7 +320,7 @@ voxos/
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 306 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/命令沙箱/定时/文档自洽
+└── tests/                  # 310 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/命令沙箱/定时/文档自洽
 ```
 
 ## 四条关键设计决策
