@@ -127,9 +127,9 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 | `corpus.py` | 224 | 验收语料生成 |
 | `registry.py` | 191 | 工具契约 / `@tool` 自省 / 注册表 |
 | `config.py` | 173 | TOML + 环境变量 + 资源根/数据根分离 |
-| `models.py` | 146 | 模型下载 / 校验 / 原子替换（`voxos models`） |
+| `models.py` | 158 | 模型下载 / 校验 / 原子替换（`voxos models`） |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **4175** | 10 个工具 / 4 条快通道 / 218 项测试 |
+| **合计** | **4187** | 10 个工具 / 4 条快通道 / 218 项测试 |
 
 - 最长函数 **39 行**（`scripts/verify.py:measure_stt`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；

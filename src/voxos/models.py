@@ -89,6 +89,10 @@ def download(url: str, target: Path, proxy: str | None, spec: dict) -> bool:
                 capture_output=True, text=True,
             )
             ok = result.returncode == 0
+            if not ok:
+                # 不说清楚「代理这条路也不通」，用户会以为只是网络慢。
+                reason = (result.stderr or "").strip().splitlines()[-1:] or [str(result.returncode)]
+                print(f"  经代理 {proxy} 失败：{reason[0][:160]}")
         else:
             opener = urllib.request.build_opener()
             with opener.open(url, timeout=120) as response, open(part, "wb") as handle:
@@ -134,13 +138,21 @@ def fetch(target: Path | None = None, *, proxy: str | None = None,
             path.unlink(missing_ok=True)
             (skipped if name in OPTIONAL else failed).append(name)
 
+    _report(failed, skipped, base, proxy)
+    return 1 if failed else 0
+
+
+def _report(failed: list[str], skipped: list[str], base: Path, proxy: str | None) -> None:
+    """失败与跳过要分开说：一个能修，一个是设计如此。"""
     if skipped:
         print(f"\n· 可选模型未下载：{', '.join(skipped)}")
         print("  不影响核心功能，但 stt.backend=sense_voice 时会退回脚本回放。")
-    if failed:
-        print(f"\n⚠️ 下载失败：{', '.join(failed)}")
-        print("  可手动下载后放入上述目录；缺失时系统会自动降级（能量 VAD + 频谱声纹），")
-        print("  但声纹精度会下降，FRR/FAR 不再满足 PRD 指标。")
-        return 1
-    print(f"\n完成，模型在 {base}。下一步：voxos enroll --record 3 && voxos run")
-    return 0
+    if not failed:
+        print(f"\n完成，模型在 {base}。下一步：voxos enroll --record 3 && voxos run")
+        return
+    print(f"\n⚠️ 下载失败：{', '.join(failed)}")
+    print("  可手动下载后放入上述目录；缺失时系统会自动降级（能量 VAD + 频谱声纹），")
+    print("  但声纹精度会下降，FRR/FAR 不再满足 PRD 指标。")
+    if proxy:
+        print(f"  当前用的代理是 {proxy}（来自 --proxy 或环境变量），换成能连 GitHub 的再试：")
+    print("  voxos models --proxy http://127.0.0.1:7890")
