@@ -448,7 +448,7 @@ def refresh_hotwords(cfg: Config, workspace: str | Path | None = None, limit: in
     root = Path(os.path.expanduser(str(workspace or cfg.get("workspace.default_code_dir", "~"))))
     cap = int(limit or cfg.get("audio.hotwords_max", 2000))
     words: list[str] = []
-    custom = cfg.path("audio.hotwords_path", "config/hotwords.txt")
+    custom = cfg.res_path("audio.hotwords_path", "config/hotwords.txt")
     if custom.exists():
         words += [line.strip() for line in custom.read_text(encoding="utf-8").splitlines() if line.strip()]
     if root.exists():

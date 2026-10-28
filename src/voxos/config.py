@@ -23,7 +23,27 @@ def _default_root() -> Path:
     return installed if (installed / "config").exists() else source_root
 
 
+def _default_data_root() -> Path:
+    """用户数据根：模型、声纹、日志、快照、状态。
+
+    为什么要和资源根分开：pipx / pip 装出来的包在 `~/.local/pipx/venvs/voxos/`，
+    把 267MB 模型下载到那儿，`pipx upgrade` 重建 venv 时会一起删掉；系统级安装
+    还可能根本不可写。所以源码布局照旧（数据就在仓库里），安装布局落到家目录，
+    `.voxos/models/...` 自然变成 `~/.voxos/models/...`。
+
+    可用 `VOXOS_HOME` 覆盖（多实例、CI、测试）。
+    """
+    override = os.environ.get("VOXOS_HOME")
+    if override:
+        return Path(os.path.expanduser(override))
+    source_root = Path(__file__).resolve().parents[2]
+    if (source_root / "config").exists():
+        return source_root
+    return Path.home()
+
+
 ROOT = _default_root()
+DATA = _default_data_root()
 
 # 环境变量 -> 配置点（演示与 CI 用，避免改文件）
 ENV_MAP = {
@@ -47,9 +67,10 @@ class Config:
     """只读配置视图。`cfg.get("audio.vad_threshold", 0.5)` 这样取值。"""
 
     def __init__(self, data: dict[str, Any], root: Path = ROOT,
-                 source: Path | None = None) -> None:
+                 source: Path | None = None, data_root: Path | None = None) -> None:
         self.data = data
         self.root = root
+        self.data_root = data_root if data_root is not None else root
         self.source = source          # 这份配置是从哪个文件读出来的（写回时要用）
 
     def get(self, dotted: str, default: Any = None) -> Any:
@@ -65,10 +86,24 @@ class Config:
         return dict(value) if isinstance(value, dict) else {}
 
     def path(self, dotted: str, default: str = "") -> Path:
-        """取路径类配置并展开 ~ ；相对路径按仓库根目录解析。"""
-        raw = str(self.get(dotted, default))
+        """取**用户数据**路径并展开 ~ ；相对路径按数据根解析。
+
+        模型、声纹、日志、快照、状态都走这里——它们该落在可写、可备份、
+        升级不丢的地方，而不是安装目录。
+        """
+        return self._join(self.data_root, str(self.get(dotted, default)))
+
+    def res_path(self, dotted: str, default: str = "") -> Path:
+        """取**只读安装资源**路径（红线策略、胶囊页面、热词表）。
+
+        相对路径按资源根解析：源码布局是仓库根，安装布局是 `<prefix>/share/voxos`。
+        """
+        return self._join(self.root, str(self.get(dotted, default)))
+
+    @staticmethod
+    def _join(base: Path, raw: str) -> Path:
         expanded = Path(os.path.expanduser(raw))
-        return expanded if expanded.is_absolute() else (self.root / expanded)
+        return expanded if expanded.is_absolute() else (base / expanded)
 
     def flag(self, dotted: str, default: bool = False) -> bool:
         value = self.get(dotted, default)
@@ -103,7 +138,7 @@ class Config:
             for part in parts[:-1]:
                 node = node.setdefault(part, {})
             node[parts[-1]] = value
-        return Config(data, self.root, self.source)
+        return Config(data, self.root, self.source, self.data_root)
 
 
 def _apply_env(data: dict[str, Any]) -> None:
@@ -126,7 +161,7 @@ def load(path: str | Path | None = None) -> Config:
         with open(target, "rb") as handle:
             data = tomllib.load(handle)
     _apply_env(data)
-    return Config(data, source=target)
+    return Config(data, source=target, data_root=DATA)
 
 
 def load_redlines(path: str | Path | None = None) -> dict[str, Any]:

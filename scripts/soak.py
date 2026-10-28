@@ -178,7 +178,7 @@ def main() -> int:
     cfg = load()
     if args.stt:
         cfg = cfg.with_overrides(**{"stt.backend": args.stt})
-    root = cfg.root / ".voxos" / "corpus"
+    root = cfg.data_root / ".voxos" / "corpus"
     manifest = corpus.ensure_corpus(root)
     units, unit_samples = build_source(root, manifest)
     chunk = int(dsp.SR * float(cfg.get("audio.chunk_ms", 20)) / 1000)

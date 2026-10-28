@@ -181,7 +181,7 @@ def _bootstrap(cfg: Config) -> None:
 
 
 def _bus(cfg: Config) -> ui.StatusBus:
-    return ui.StatusBus(cfg.root / ".voxos" / "status.jsonl")
+    return ui.StatusBus(cfg.data_root / ".voxos" / "status.jsonl")
 
 
 def _lock(cfg: Config) -> dsp.SpeakerLock:
@@ -254,7 +254,7 @@ def _ui_context(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
 
     return ui.UiContext(
         bus=runtime.bus,
-        pill_file=runtime.cfg.path("ui.pill_file", "web/pill.html"),
+        pill_file=runtime.cfg.res_path("ui.pill_file", "web/pill.html"),
         on_command=lambda text: _run_text(runtime, text),
         settings_get=lambda: settings.describe(runtime.cfg),
         settings_set=save,
@@ -292,7 +292,7 @@ def cmd_text(args: argparse.Namespace, cfg: Config) -> int:
 
 def cmd_demo(args: argparse.Namespace, cfg: Config) -> int:
     if not args.live:                       # 默认沙箱：不污染真实日志目录
-        demo = cfg.root / ".voxos" / "demo"
+        demo = cfg.data_root / ".voxos" / "demo"
         cfg = cfg.with_overrides(**{
             "workspace.daily_log_dir": str(demo / "logs"),
             "workspace.default_code_dir": str(demo / "projects"),
@@ -301,7 +301,7 @@ def cmd_demo(args: argparse.Namespace, cfg: Config) -> int:
         tools.configure(cfg)
         print(f"沙箱模式：日志写入 {demo / 'logs'}（--live 可写入真实目录）\n")
     runtime = Runtime(cfg, _bus(cfg))
-    root = cfg.root / ".voxos" / "corpus"
+    root = cfg.data_root / ".voxos" / "corpus"
     manifest = corpus.ensure_corpus(root, force=args.refresh)
     embedder, threshold, kind = audio.make_embedder(cfg)
     lock = dsp.SpeakerLock(threshold=threshold, embedder=embedder)
@@ -344,7 +344,7 @@ def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
     if lock.profiles:
         enrolled.set()
     url = _serve(runtime, lock, enrolled)
-    sounds = ui.ensure_earcons(cfg.root / ".voxos" / "sounds")
+    sounds = ui.ensure_earcons(cfg.data_root / ".voxos" / "sounds")
     hotwords = audio.refresh_hotwords(cfg) if audio.supports_hotwords(cfg) else []
     _, threshold, kind = audio.make_embedder(cfg)
     print(f"VoxOS 已启动：声纹后端={kind} 阈值={threshold} "
@@ -595,6 +595,15 @@ def cmd_tools(_: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_models(args: argparse.Namespace, cfg: Config) -> int:
+    """下载模型。装好的包只有 `voxos` 命令，所以这条必须是子命令而不是脚本。"""
+    from .models import default_dir, fetch
+
+    target = Path(args.dir) if args.dir else default_dir()
+    proxy = args.proxy or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    return fetch(target, proxy=proxy, force=args.force, with_asr=not args.no_asr)
+
+
 def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
     checks = [
         ("python", sys.version.split()[0]),
@@ -664,9 +673,20 @@ def build_parser() -> argparse.ArgumentParser:
     pill = sub.add_parser("pill", help="用无边框窗口打开胶囊（最接近悬浮）")
     pill.set_defaults(func=cmd_pill)
 
+    _add_models(sub)
     sub.add_parser("tools", help="列出已注册工具").set_defaults(func=cmd_tools)
     sub.add_parser("doctor", help="环境自检").set_defaults(func=cmd_doctor)
     return parser
+
+
+def _add_models(sub: argparse._SubParsersAction) -> None:
+    """模型下载的参数单独放，build_parser 已经顶到行预算了。"""
+    models = sub.add_parser("models", help="下载声纹/VAD/识别模型")
+    models.add_argument("--proxy", default=None, help="下载代理，如 http://127.0.0.1:7890")
+    models.add_argument("--force", action="store_true", help="即使已存在也重下")
+    models.add_argument("--no-asr", action="store_true", help="跳过 239MB 识别模型")
+    models.add_argument("--dir", default=None, help="模型目录（默认数据目录下的 .voxos/models）")
+    models.set_defaults(func=cmd_models)
 
 
 def main(argv: list[str] | None = None) -> int:

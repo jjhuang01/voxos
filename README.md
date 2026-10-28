@@ -12,6 +12,43 @@
 它说：日志已记录
 ```
 
+## 安装（不用源码）
+
+**语言与产物**：Python 3.11+，打出来是 `py3-none-any` 的纯 Python wheel——
+不含编译产物，macOS / Linux 通用。核心链路（路由、安全、配置、工具）零第三方依赖，
+只有音频部分要 `numpy` + `sherpa-onnx`。
+
+```bash
+# 1. 从 GitHub Release 取安装包（私有仓库需要先 gh auth login）
+gh release download --repo jjhuang01/voxos --pattern '*.whl'
+
+# 2. 装成全局命令（pipx 会给它一个独立 venv，不污染你的环境）
+pipx install ./voxos-0.1.8-py3-none-any.whl
+
+# 3. 语音相关依赖（不装也能跑：会降级成能量 VAD + 频谱声纹 + 脚本回放）
+pipx inject voxos sherpa-onnx sounddevice
+
+# 4. 下模型（约 267MB；--no-asr 只要 28MB 的声纹 + VAD）
+voxos models --no-asr
+voxos doctor
+```
+
+装完就有的命令：
+
+```bash
+voxos models              # 下载/校验模型（先写 .part，校验通过才原子替换）
+voxos doctor              # 环境自检
+voxos enroll --record 3   # 录声纹
+voxos run                 # 守护进程 + 胶囊
+voxos text "Siri，检查一下服务器负载"   # 不打字说话，直接打字
+```
+
+**数据落在哪**：模型、声纹、日志、快照、状态都在 `~/.voxos/`（可用 `VOXOS_HOME` 改），
+不在安装目录里——`pipx upgrade` 重建 venv 时不会把你 267MB 的模型一起删掉。
+只读资源（红线策略、胶囊页面）跟着安装走。
+
+> 从源码跑（下面那节）时数据仍在仓库的 `.voxos/`，两种布局互不干扰。
+
 ## 30 秒上手
 
 ```bash
@@ -21,7 +58,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 208 项测试
+make test                                    # 216 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
 ```
@@ -170,7 +207,7 @@ voxos/
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 208 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/文档自洽
+└── tests/                  # 216 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/文档自洽
 ```
 
 ## 四条关键设计决策

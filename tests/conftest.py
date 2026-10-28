@@ -44,7 +44,8 @@ def base_settings(tmp: Path) -> dict:
 
 @pytest.fixture
 def cfg(tmp_path: Path) -> Config:
-    config = Config(copy.deepcopy(base_settings(tmp_path)), root=tmp_path)
+    config = Config(copy.deepcopy(base_settings(tmp_path)), root=tmp_path,
+                    data_root=tmp_path)
     tools.configure(config)
     core.ensure_tools()
     return config

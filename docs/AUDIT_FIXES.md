@@ -65,7 +65,7 @@ cd /tmp && /tmp/voxos-smoke/venv/bin/voxos tools
 ## 验证
 
 ```bash
-make test            # 208 passed
+make test            # 216 passed
 make verify          # 回归模式：18 通过 + 1 未达标（混说术语召回，能力边界）
 make verify-release  # 发布门禁：退出码 1（GAP 也算不通过），这是**预期**结果
 ```
