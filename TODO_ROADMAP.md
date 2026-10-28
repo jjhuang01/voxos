@@ -148,7 +148,7 @@
 
 ### Task 1.8 工程化
 
-- [x] 316 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
+- [x] 328 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
       `scripts/audit_ui.py` 12 项界面回归（`make audit-ui`），`scripts/soak.py` 长稳（`make soak`）。
 - [x] 全模块单函数 ≤ 40 行（最长 40 行，`core.dispatch`）、核心五模块共 8 个类、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README。
@@ -282,7 +282,7 @@
       `__post_init__` 里补一次 `self._ep.reset()` 之后变成 564ms。
 - *验收*：`.venv/bin/python scripts/voice_bench.py endpoint --real` 实测
       端点白等 p50 **564ms** / 判定耗时 p50 **98ms**；用户感知短句 **616ms**、8s 长句 **920ms**
-      （改前 ≈844ms / ≈1240ms，省 228–320ms）。测试 316 项。
+      （改前 ≈844ms / ≈1240ms，省 228–320ms）。测试 318 项。
 
 > **还没解决的（不是调参能解决的）**：长句现在付「尾部复查解码 + 全段终稿解码」两次，
 > 8s 那行判定耗时 356ms 里有 ~96ms 是纯浪费；再往下降必须换架构——
@@ -356,11 +356,31 @@
       ③**保留本地兜底**——断网也能出声。
       验收：大模型路径「说完到出声」< 1.5s；拔网线仍能出声。
 
-- [ ] **Task 2.12 打断时截断上下文（P1，半天）**。
-      现在打断只停 TTS，**上下文里那段「说了但用户没听到」的话还在**，下一次回答
-      会接着它说，用户觉得「答非所问」。抄 OpenAI `conversation.item.truncate` 的语义：
-      截断音频**同时删掉服务端文本记录**，保证上下文里没有用户不知道的文本。
-      验收：TTS 播到一半插话，下一轮回答不引用被截掉的内容。
+- [x] **Task 2.12 打断时截断上下文（0.1.26 已完成）**。
+      动手时发现前提不成立：**我们根本没有上下文**。`_llm_route` 每轮都是
+      `[system, user]`，模型永远失忆，所以「截断上下文」无从谈起。三件事一起做：
+
+      1. **最近 6 轮滚动历史**（`core._HISTORY`）。只记 `chat` / `llm`，**不记工具
+         输出**——上一轮 `df -h` 的整段输出留在上下文里会把这一轮的注意力拉走，
+         而且那是几 KB 的 token，每轮重发一次。历史排在 `system` **之后**：
+         有的网关按消息顺序算前缀缓存，放前面会让每轮全量重算。
+      2. **按句播报**（`dsp.sentences`）。以前是 `say text[:60]`，第 60 个字落在
+         一句话中间就是半截，而且**不知道播到哪**，上下文只能记全文。
+      3. **`core.note_spoken(full, spoken)`**。抄 OpenAI
+         `conversation.item.truncate`：打断时把上下文里那条回答改成
+         「用户真听到的那几句 + ……（被打断，后面没念）」。
+
+      顺带修掉一个相关的错：`stop_speaking` 原来只看「有没有 `say` 进程在跑」，
+      而句与句之间有几十毫秒空档——那一刻的「停」会被判成「没在播报」，于是这句
+      「停」被当成普通指令派发出去，用户得到一句「还没学会这句」。改成看
+      「有没有人在念」（`owner`）。
+
+      两条边界条件都进了测试，因为都是「看起来不会发生」的那种：`_HISTORY[:-0]`
+      是**空列表**（先判长度再切，否则整段历史被清空）；`note_spoken` 回来时
+      可能已经又聊过一轮（只按「最后一条」改会把新一轮的回答改写成上一轮残句）。
+      *验收*：`test_second_turn_sees_the_first` 钉住历史结构，
+      `test_interrupt_rewrites_the_context_to_what_was_heard` 钉住截断，
+      `test_stop_speaking_works_between_sentences` 钉住空档打断。
 
 - [ ] **Task 2.13 DeepFilterNet3 降噪（P2）**。
       单帧 <10ms、模型 ~2.5MB，有 Python 包；RNNoise（30ms 帧，48 维特征 + LSTM）作更轻的备选。
@@ -397,7 +417,6 @@
 | **判停质量不可量化**（只有后缀词表） | 「说完了没」靠一张中文连接词表猜，没有 TPR/TNR，改好改坏都不知道。长句还为此多付一次纯浪费的解码（实测 ~96ms） | Task 2.9：smart-turn v3（8MB，audio-native，BSD-2） |
 | **非流式 ASR，没有实时字幕** | 用户开口到看见文字之间什么都没有；长句解码线性变慢（0.5s→22ms，12s→283ms） | Task 2.10：sherpa-onnx streaming |
 | **半双工，插不进话** | `EchoGate` 是「TTS 期间把麦克风当静音」，用时间换正确性；用户说话时我们在装聋 | Task 2.14：AEC3（要换音频 IO，工作量最大） |
-| **打断不截断上下文** | 停播了，但上下文里那段「说了没播出去」的文本还在，下一轮会接着它说 → 用户觉得答非所问 | Task 2.12（半天，抄 OpenAI `conversation.item.truncate`） |
 | **TTS 不是流式** | 大模型路径「说完到出声」3.2–7.2s，等一整个来回 | Task 2.11：豆包语音合成 2.0 流式 + 首字节降级 |
 | 中英混说术语召回 **29.4% / 47.1%**（目标 95%） | 中文句子夹 `docker`/`nginx` 会被听成 `care`/`in`；中文本身没问题（字错 9.6%）。两个数是两种语料：中文音色念术语 / 双语拼接，真人落在两者之间 | 支持热词偏置的双语模型，或真人发音样本重新标定（见 REVIEW §27） |
 | 真人声纹未标定 | 现有 FRR/FAR 来自 6 个 TTS 音色，真人未知 | 录 20 条真人音频重跑 `make verify` |
@@ -410,6 +429,7 @@
 
 > 已关闭：「面板未做像素级走查」（`scripts/shot.py` + 10 张真实截图 + `audit_ui.py` 12 条断言）、
 > 「没有打断词」（回声门 + 打断词白名单 + `stop_speaking()`，见 `tests/test_barge.py`）、
+> 「打断后不截断上下文」（0.1.26：多轮上下文 + 按句播报 + `note_spoken`，见 Task 2.12）、
 > 「未接真实 STT」（SenseVoice int8，2.8% / ≥30× 实时，见 `docs/REVIEW.md §15`）、
 > 「macOS 麦克风权限 / launchd 未自动化」（`scripts/install_launchd.sh`）、
 > 「设置无历史 / 撤销」（`settings.bak` + `POST /api/settings/undo`，见 `docs/REVIEW.md §19`）、

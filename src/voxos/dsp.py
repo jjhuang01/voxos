@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -290,3 +291,34 @@ class SpeakerLock:
             with np.load(path) as data:
                 self.profiles = {k: data[k].astype(np.float32) for k in data.files}
         return self
+
+
+# ---------------------------------------------------------------- 播报切分
+
+_SENTENCE = re.compile(r"[^。！？!?；;\n]+[。！？!?；;]?")
+
+
+def sentences(text: str, max_chars: int = 40, limit: int = 160) -> list[str]:
+    """把一段话切成能一句一句念的片段。
+
+    **按句切，不按字数切。** 以前是 `say text[:60]`——第 60 个字如果落在一句话
+    中间，用户听到的就是半截，而且完全不知道后面还有。按句切之后，被打断时
+    我们还能准确知道「用户听到了哪几句」（`main._speak` 拿它回填上下文）。
+
+    `limit` 是总字数**软预算**：念一段 2000 字的答案没人受得了，超了就停在句子
+    边界上——宁可多念一句，也不把一句话切两半（所以实际字数可能比 `limit` 多出
+    最后那一句的长度）。
+    """
+    out: list[str] = []
+    used = 0
+    for raw in _SENTENCE.findall(text or ""):
+        piece = raw.strip()
+        while piece and used < limit:
+            cut = max(piece.rfind(sep, 0, max_chars) for sep in "，,、：:")
+            cut = cut + 1 if cut > 0 else max_chars
+            head, piece = piece[:cut], piece[cut:].lstrip("，,、：: ")
+            out.append(head)
+            used += len(head)
+        if used >= limit:
+            break
+    return out

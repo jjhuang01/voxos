@@ -59,5 +59,20 @@ def test_is_interrupt_matches_common_phrasings():
 
 
 def test_stop_speaking_is_safe_when_idle():
-    main._TTS["proc"] = None
+    main._TTS.update(proc=None, owner=None, stopped=False)
     assert main.stop_speaking() is False
+
+
+def test_stop_speaking_works_between_sentences():
+    """句与句之间有几十毫秒的空档，那一刻 `proc` 已经退出。
+
+    旧实现只看 `proc`，于是这段时间里的「停」会被判成「没在播报」→ 返回 False →
+    这句「停」被当成一条普通指令派发出去，用户得到一句「还没学会这句」。
+    所以判的必须是「有没有人在念」（`owner`），不是「有没有一个进程在跑」。
+    """
+    main._TTS.update(proc=None, owner=object(), stopped=False)
+    try:
+        assert main.stop_speaking() is True
+        assert main._TTS["stopped"] is True
+    finally:
+        main._TTS.update(proc=None, owner=None, stopped=False)

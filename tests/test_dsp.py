@@ -158,3 +158,36 @@ def test_long_speech_still_hits_the_hard_limit():
     ep = dsp.EndpointDetector(max_ms=1000.0)
     states = [ep.push(True, 512) for _ in range(60)]
     assert "force_end" in states
+
+
+# ---------------------------------------------------------------- 播报切分
+
+def test_sentences_split_on_punctuation_not_mid_sentence():
+    """以前是 `say text[:60]`：第 60 个字落在一句话中间，用户听到半截。
+
+    按句切之后每一段都是完整的一句话，`say` 念完一句再念下一句。
+    """
+    assert dsp.sentences("好的，已经打开了微信。接下来需要我做什么？") == [
+        "好的，", "已经打开了微信。", "接下来需要我做什么？"]
+
+
+def test_sentences_handle_text_without_punctuation():
+    """模型经常回一句没有句号的短话——不能因为没标点就整段丢掉。"""
+    assert dsp.sentences("没有任何标点的一句话") == ["没有任何标点的一句话"]
+    assert dsp.sentences("") == []
+    assert dsp.sentences("   ") == []
+
+
+def test_sentences_respect_the_speak_budget():
+    """念一段两千字的答案没人受得了；超了要停在**句子边界**上，不是半个词上。"""
+    chunks = dsp.sentences("这是一句话。" * 100, limit=40)
+    # 软预算：不切句子，所以最多超出一句（这里一句 6 个字）
+    assert 40 <= sum(len(c) for c in chunks) <= 46
+    assert all(c.endswith("。") for c in chunks)
+
+
+def test_sentences_break_long_sentences_on_commas():
+    """一口气念不完的长句要在逗号处断开，而不是硬切在字数上限上。"""
+    chunks = dsp.sentences("前面还有很长一段铺垫，" + "然后才是重点" * 8, max_chars=20)
+    assert chunks[0].endswith("，")
+    assert all(len(c) <= 20 for c in chunks)

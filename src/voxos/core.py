@@ -31,7 +31,7 @@ __all__ = [
     "DispatchResult", "dispatch", "chat", "heuristic_plan", "execute_safely", "SYSTEM_PROMPT",
     "RiskLevel", "Tool", "Verdict", "REGISTRY", "FAST_ROUTES", "tool", "build_schema",
     "Guard", "Executor", "ensure_tools", "snapshot_file", "restore_latest", "human_name",
-    "llm_ready", "llm_extra", "provider",
+    "llm_ready", "llm_extra", "provider", "history", "reset_history",
 ]
 
 
@@ -51,6 +51,57 @@ class DispatchResult:
     reply: str = ""
     latency_ms: float = 0.0
     results: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------- 多轮上下文
+
+# 一句话进来，模型只看得到这一句，等于每轮都失忆。用户说「再来一次」「换成英文」
+# 「那个文件」时，模型无从指代——这是「智能」上最便宜的一大步。
+#
+# 刻意**不记** `fast` / `offline` 两条路的工具输出：那些结果已经进了当轮上下文，
+# 再存一份会让下一次调用被上一轮的执行细节带偏（比如上一轮 `df -h` 的整段输出
+# 会把这一轮的注意力拉走）。对话要记的是「说了什么」，不是「跑了什么」。
+_HISTORY: list[dict[str, str]] = []
+_MAX_TURNS = 6                    # 6 轮 ≈ 12 条消息；再多只是把延迟和费用顶上去
+
+
+def _remember(result: DispatchResult) -> DispatchResult:
+    """把这一轮记进上下文，原样返回结果（这样 `dispatch` 一行都不用多）。"""
+    if result.route not in ("chat", "llm") or not result.reply.strip():
+        return result
+    _HISTORY.append({"role": "user", "content": result.text})
+    _HISTORY.append({"role": "assistant", "content": result.reply})
+    # 先判长度再切：`_HISTORY[:-0]` 是**空列表**，`del` 它会把整段历史清空。
+    # 这个坑只在「刚好没超长」的那一刻才炸，靠读代码看不出来。
+    if len(_HISTORY) > _MAX_TURNS * 2:
+        del _HISTORY[:-_MAX_TURNS * 2]
+    return result
+
+
+def history() -> list[dict[str, str]]:
+    """最近几轮对话。给测试和 `/api/status` 用。"""
+    return list(_HISTORY)
+
+
+def reset_history() -> None:
+    _HISTORY.clear()
+
+
+def note_spoken(full: str, spoken: str) -> None:
+    """播报结束后校正上下文：只留**用户真听到的那部分**。
+
+    抄 OpenAI `conversation.item.truncate` 的语义——打断时截断音频，**同时**把
+    服务端那段文本记录改短，注释原话是「确保上下文中没有用户不知道的文本」。
+    不这么做的话，模型会接着一段用户根本没听到的话往下说，用户只觉得
+    「它怎么答非所问」，而且完全没法解释。
+    """
+    if not _HISTORY or _HISTORY[-1]["role"] != "assistant":
+        return
+    if _HISTORY[-1]["content"] != full:
+        return                 # 中间又聊过一轮：别动别人的记录
+    if spoken == full:
+        return                 # 一句没漏，不用改
+    _HISTORY[-1]["content"] = spoken + "……（被打断，后面没念）"
 
 
 def chat(
@@ -198,11 +249,11 @@ def dispatch(
         return DispatchResult("fast", raw, name, args, reply, _ms(started), [reply])
 
     if (chat := _small_talk(raw)):
-        return DispatchResult("chat", raw, reply=chat, latency_ms=_ms(started))
+        return _remember(DispatchResult("chat", raw, reply=chat, latency_ms=_ms(started)))
 
     llm = _try_llm(raw, executor, cfg, context or {}, started)
     if llm is not None:
-        return llm
+        return _remember(llm)
 
     plan = heuristic_plan(raw, cfg)
     if not plan:
@@ -365,6 +416,15 @@ def _execute_calls(
     return first_name, first_args
 
 
+def _seed_messages(cfg: Config, context: dict[str, Any], text: str) -> list[dict[str, Any]]:
+    """系统提示 + 最近几轮 + 这一句。
+
+    历史必须排在 system **之后**：有的网关按消息顺序算前缀缓存，放前面会让每一轮
+    都全量重算，白花时间和钱。
+    """
+    return [_system_message(cfg, context), *_HISTORY, {"role": "user", "content": text}]
+
+
 def _llm_route(
     text: str,
     executor: Executor,
@@ -373,7 +433,7 @@ def _llm_route(
     started: float,
     state: dict[str, Any] | None = None,
 ) -> DispatchResult:
-    messages: list[dict[str, Any]] = [_system_message(cfg, context), {"role": "user", "content": text}]
+    messages: list[dict[str, Any]] = _seed_messages(cfg, context, text)
     schemas = [meta.schema for meta in REGISTRY.values()]
     results: list[str] = []
     first_tool, first_args = "", {}

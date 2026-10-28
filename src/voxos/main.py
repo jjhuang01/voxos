@@ -670,39 +670,57 @@ _TTS: dict[str, object] = {"proc": None, "owner": None}
 
 
 def stop_speaking() -> bool:
-    """打断：把正在念的 say 杀掉。没有在念就返回 False。"""
-    proc = _TTS.get("proc")
-    if not isinstance(proc, subprocess.Popen) or proc.poll() is not None:
+    """打断：让正在念的那一串句子停下来。没在念就返回 False。
+
+    不能只看 `proc`：句与句之间有几十毫秒的空档，那一刻上一条 `say` 已经退出，
+    但用户说的「停」仍然是在打断我们——返回 False 会让这句「停」被当成普通指令
+    派发出去，结果是一句「还没学会这句」。所以判的是「有没有人在念」（`owner`）。
+    """
+    if _TTS.get("owner") is None:
         return False
-    proc.terminate()
+    _TTS["stopped"] = True
+    proc = _TTS.get("proc")
+    if isinstance(proc, subprocess.Popen) and proc.poll() is None:
+        proc.terminate()
     return True
 
 
 def _speak(text: str, pipeline: audio.AudioPipeline) -> None:
-    """播报。只有**当前所有者**能在结束时清理共享状态。
+    """播报。一句一句念，念完一句记一句。
 
-    旧实现里任何一条旧线程的 finally 都会把 `_TTS["proc"]` 清成 None，
-    并把回声门提前放行——新的播报还在响，系统却以为它结束了。
+    以前是 `say text[:60]`：一句话被硬切在第 60 个字上，而且**不知道播到哪**，
+    上下文里只能记全文——下一轮模型就接着用户没听到的内容往下说。
+    现在按句念，被打断时 `heard` 里正好是用户真听到的那部分。
+
+    只有**当前所有者**能在结束时清理共享状态：旧实现里任何一条旧线程的 finally
+    都会把 `_TTS["proc"]` 清成 None 并提前放行回声门，新的播报还在响，
+    系统却以为它结束了。
     """
     if not shutil.which("say"):
         return
+    from . import dsp                    # numpy 别拖进 --version 这类快路径
     owner = object()
-    _TTS["owner"] = owner
+    _TTS.update(owner=owner, stopped=False, proc=None)
     pipeline.echo.tts_start()
-    proc = None
+    heard: list[str] = []
     try:
-        proc = subprocess.Popen(["say", "-r", "220", text[:60]])
-        _TTS["proc"] = proc
-        proc.wait(timeout=15)
+        for piece in dsp.sentences(text):
+            if _TTS.get("stopped") or _TTS.get("owner") is not owner:
+                break
+            proc = subprocess.Popen(["say", "-r", "220", piece])
+            _TTS["proc"] = proc
+            if proc.wait(timeout=15) == 0:
+                heard.append(piece)
     except (subprocess.SubprocessError, OSError):
         pass
     finally:
-        if proc is not None and proc.poll() is None:
+        proc = _TTS.get("proc")
+        if isinstance(proc, subprocess.Popen) and proc.poll() is None:
             proc.kill()
         if _TTS.get("owner") is owner:
-            _TTS["proc"] = None
-            _TTS["owner"] = None
+            _TTS.update(proc=None, owner=None, stopped=False)
             pipeline.echo.tts_end()
+            core.note_spoken(text, "".join(heard))
 
 
 def cmd_enroll(args: argparse.Namespace, cfg: Config) -> int:

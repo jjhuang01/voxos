@@ -42,6 +42,19 @@ def base_settings(tmp: Path) -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _clean_history():
+    """每项测试都从「没有上下文」开始。
+
+    多轮历史是**进程级**状态（单用户语音系统就该是这样）。不隔离的话，
+    一条测试往历史里塞了一句，下一条测试的模型调用就会多出两条消息——
+    这种污染不会报错，只会让断言变得莫名其妙。
+    """
+    core.reset_history()
+    yield
+    core.reset_history()
+
+
 @pytest.fixture
 def cfg(tmp_path: Path) -> Config:
     config = Config(copy.deepcopy(base_settings(tmp_path)), root=tmp_path,

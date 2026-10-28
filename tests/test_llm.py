@@ -227,3 +227,133 @@ def test_default_settings_point_at_the_cline_channel():
     assert settings.get("llm.model") == "cline-pass/deepseek-v4.1-flash-1017"
     assert settings.get("llm.thinking") == "disabled"
     assert json.loads(json.dumps(core.llm_extra(settings))) == {"thinking": {"type": "disabled"}}
+
+
+# ------------------------------------------------------------------ 多轮上下文
+
+def _armed(cfg):
+    """把模型「配好」：不发真请求（`chat` 会被替换掉），但 `llm_ready` 要过。"""
+    return cfg.with_overrides(**{"llm.enabled": True,
+                                 "llm.base_url": "https://example.invalid/v1",
+                                 "llm.api_key": "sk-test"})
+
+
+def test_second_turn_sees_the_first(cfg, executor, monkeypatch):
+    """每轮都把历史清空 = 模型永远失忆。
+
+    用户说「再正式一点」「那个文件」时，模型手里只有这一句，无从指代——
+    这不是模型笨，是我们没把话传过去。
+    """
+    seen: list[list[dict]] = []
+
+    def fake(**kw):
+        seen.append([dict(m) for m in kw["messages"]])
+        return {"role": "assistant", "content": f"第{len(seen)}轮的回答"}
+
+    monkeypatch.setattr(core, "chat", fake)
+    armed = _armed(cfg)
+    core.dispatch("帮我把那段说明翻译成英文", cfg=armed, executor=executor)
+    core.dispatch("再正式一点", cfg=armed, executor=executor)
+
+    assert [m["role"] for m in seen[0]] == ["system", "user"]
+    # 历史排在 system **之后**：放前面会让网关的前缀缓存每轮全量重算
+    assert [m["role"] for m in seen[1]] == ["system", "user", "assistant", "user"]
+    assert seen[1][1]["content"] == "帮我把那段说明翻译成英文"
+    assert seen[1][2]["content"] == "第1轮的回答"
+    assert seen[1][3]["content"] == "再正式一点"
+
+
+def test_a_failed_turn_does_not_poison_the_context(cfg, executor):
+    """没配模型时每一句都回「还没学会」，把二十条这种话塞进上下文，
+    模型下次一开口就被带偏——而且这些「回答」本身没有任何信息量。"""
+    for _ in range(3):
+        core.dispatch("帮我订一张去上海的机票", cfg=cfg, executor=executor)
+    assert core.history() == []
+
+
+def test_history_keeps_only_the_last_few_turns(cfg, executor, monkeypatch):
+    """留几轮是为了「指代」和「接着做」，不是为了记住一辈子。
+
+    不设上限的话，一次长对话会把每一轮的 token 都重新算一遍：慢，而且贵。
+    """
+    monkeypatch.setattr(core, "chat", lambda **_: {"role": "assistant", "content": "嗯"})
+    armed = _armed(cfg)
+    for i in range(10):
+        core.dispatch(f"第{i}个请求", cfg=armed, executor=executor)
+
+    hist = core.history()
+    assert len(hist) == core._MAX_TURNS * 2
+    assert hist[0]["content"] == "第4个请求"        # 10 轮留最后 6 轮
+    assert hist[-1]["content"] == "嗯"
+
+
+def test_tool_output_is_not_replayed_as_context(cfg, executor, monkeypatch):
+    """只记「说了什么」，不记「跑了什么」。
+
+    上一轮 `df -h` 的整段输出如果留在上下文里，这一轮的注意力会被它拉走——
+    而且那是几 KB 的 token，每轮都重发一次。
+    """
+    rounds = {"n": 0}
+
+    def fake(**_):
+        rounds["n"] += 1
+        if rounds["n"] == 1:
+            return {"role": "assistant", "content": None,
+                    "tool_calls": [{"id": "1", "type": "function",
+                                    "function": {"name": "tell_time", "arguments": "{}"}}]}
+        return {"role": "assistant", "content": "现在是十点"}
+
+    monkeypatch.setattr(core, "chat", fake)
+    monkeypatch.setattr(core, "_fast_route", lambda *_: None)
+    core.dispatch("现在到底几点了", cfg=_armed(cfg), executor=executor)
+
+    assert [m["role"] for m in core.history()] == ["user", "assistant"]
+    assert core.history()[1]["content"] == "现在是十点"
+
+
+# ------------------------------------------------------------------ 打断与上下文
+
+def test_interrupt_rewrites_the_context_to_what_was_heard(cfg, executor, monkeypatch):
+    """抄 OpenAI `conversation.item.truncate`：截断音频时**同时**把文本记录改短。
+
+    不改的话，模型以为自己把三段话都说完了，下一轮会接着用户根本没听到的
+    第三段往下说——用户只觉得「它怎么答非所问」，而且完全没法解释。
+    """
+    full = "第一句。第二句。第三句。"
+    monkeypatch.setattr(core, "chat", lambda **_: {"role": "assistant", "content": full})
+    core.dispatch("讲个长一点的说明", cfg=_armed(cfg), executor=executor)
+
+    core.note_spoken(full, "第一句。")
+    assert core.history()[-1]["content"] == "第一句。……（被打断，后面没念）"
+
+
+def test_a_fully_heard_reply_is_left_alone(cfg, executor, monkeypatch):
+    """一句没漏就别乱改——上下文里多一行「被打断」会让模型以为自己总被打断。"""
+    full = "好的。"
+    monkeypatch.setattr(core, "chat", lambda **_: {"role": "assistant", "content": full})
+    core.dispatch("你好呀朋友", cfg=_armed(cfg), executor=executor)
+
+    core.note_spoken(full, full)
+    assert core.history()[-1]["content"] == full
+
+
+def test_note_spoken_cannot_clobber_a_later_turn(cfg, executor, monkeypatch):
+    """播报是异步的：`note_spoken` 回来时可能已经又聊过一轮。
+
+    只按「最后一条」改是危险的——那会把**新一轮**的回答改写成上一轮的残句。
+    所以要先确认最后一条还是自己那段文本。
+    """
+    rounds = {"n": 0}
+
+    def fake(**_):
+        rounds["n"] += 1
+        return {"role": "assistant", "content": f"第{rounds['n']}段"}
+
+    monkeypatch.setattr(core, "chat", fake)
+    armed = _armed(cfg)
+    core.dispatch("第一件事", cfg=armed, executor=executor)
+    core.dispatch("第二件事", cfg=armed, executor=executor)
+
+    core.note_spoken("第1段", "第")          # 迟到的回调
+    assert core.history()[-1]["content"] == "第2段"
+
