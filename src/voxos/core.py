@@ -285,6 +285,12 @@ _CHANGE_VERB = re.compile(r"补|加上|加个|改|删|修|实现|重构|替换|�
 # 免得每句话都拦一次确认——那样人就会习惯性点允许。
 _BIG_CHANGE = re.compile(r"重构|大改|重写|整个项目|整块|全部重写|交给 ?(?:claude|aider|codex|coding)", re.I)
 
+# 写日志要的是**动词**，不是「日志」这个词本身。
+# 只按名词匹配会把「看一下日志」「把日志清理一下」「日志在哪」全判成写日志——
+# 读和写是相反的动作，用户想查日志，系统却往日记里写了一条。
+_WRITE_LOG = re.compile(
+    r"(?:写|记)(?:一?[条个下])?(?:开发|今天的)?日志|记录|记一下|记一条|记个")
+
 
 def heuristic_plan(text: str, cfg: Config | None = None) -> list[tuple[str, dict[str, Any]]]:
     """无模型/断网兜底：只认三大高频场景 + 撤销，命中不了就不做（宁可不做，不能乱做）。"""
@@ -295,7 +301,7 @@ def heuristic_plan(text: str, cfg: Config | None = None) -> list[tuple[str, dict
         piece = _LEAD.sub("", piece)
         if not piece:
             continue
-        if re.search(r"日志|记录|记一下|记一条|记个", piece):
+        if _WRITE_LOG.search(piece):
             plan.append(("append_structured_log", {"content": piece}))
         elif _BIG_CHANGE.search(piece):
             # 大改交给 Coding CLI：这是 red_confirm，会真的弹确认卡等你点头
