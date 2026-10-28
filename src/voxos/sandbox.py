@@ -33,7 +33,10 @@ MODES = ("read-only", "workspace-write", "danger-full-access")
 
 # 沙箱自己起不来时内核给的话。用它判断「是不是沙箱的问题」，
 # 而不是把命令本身的失败也当成沙箱失败。
-_APPLY_FAILED = ("sandbox_apply", "Operation not permitted", "sandbox-exec: ")
+#
+# 特意**不认**裸的 `Operation not permitted`：命令自己失败时也会这么说，
+# 认了就会把同一条命令再跑一遍——那是一次多余的副作用，比「没降级」更糟。
+_APPLY_FAILED = ("sandbox_apply", "sandbox-exec: ")
 
 
 def mode(cfg: Config) -> str:
@@ -86,7 +89,7 @@ def failed_by_sandbox(stderr: str) -> bool:
     区分很重要：命令出错要如实报错，沙箱没起来要降级并**说出来**。
     混在一起的结果是用户以为命令有问题，其实是权限。
     """
-    return any(marker in stderr for marker in _APPLY_FAILED[:2])
+    return any(marker in stderr for marker in _APPLY_FAILED)
 
 
 def available() -> bool:

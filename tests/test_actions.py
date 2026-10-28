@@ -33,6 +33,18 @@ def test_network_flag_opens_only_that_hole(cfg):
     assert "(deny network*)" not in sandbox.profile(opened)
 
 
+def test_sandbox_failure_is_told_apart_from_command_failure():
+    """只有 sandbox-exec 自己在抱怨才算「沙箱没起来」。
+
+    认裸的 `Operation not permitted` 会把「命令自己失败」也当成沙箱失败，
+    于是同一条命令被再跑一遍——多出来的那次副作用比不降级更糟。
+    """
+    assert sandbox.failed_by_sandbox("sandbox-exec: sandbox_apply: Operation not permitted")
+    assert sandbox.failed_by_sandbox("sandbox-exec: invalid profile")
+    assert not sandbox.failed_by_sandbox("rm: /etc/hosts: Operation not permitted")
+    assert not sandbox.failed_by_sandbox("fatal: not a git repository")
+
+
 def test_read_only_mode_refuses_to_run_anything(cfg, executor):
     """只读档位不是「命令跑一下试试」，是根本不起进程。"""
     readonly = cfg.with_overrides(**{"workspace.sandbox": "read-only"})
