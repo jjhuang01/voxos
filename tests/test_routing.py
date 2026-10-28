@@ -38,6 +38,15 @@ CASES: list[tuple[str, str, str]] = [
     # 否则确认卡片就是个永远弹不出来的摆设。
     ("delegate_to_coding_cli", "重构整个登录模块", "大改要确认"),
     ("delegate_to_coding_cli", "把重构交给 claude 去做", "点名 CLI"),
+    # 日常指令：这两句是「听不懂」投诉的原话。工具写好了但没登记快通道，
+    # 用户说什么都落到 ignore——能力存在但永远走不到，等于没有。
+    ("open_app", "打开微信", "开应用"),
+    ("open_app", "帮我打开一下终端", "开应用（带语气词）"),
+    ("open_app", "激活微信", "开应用（另一种说法）"),
+    ("open_app", "打开 github.com", "网址"),
+    ("tell_time", "几点了", "问时间"),
+    ("tell_time", "今天星期几", "问星期"),
+    ("tell_time", "现在几号", "问日期"),
     ("delegate_to_coding_cli", "这个项目全部重写一遍", "全量重写"),
 ]
 
@@ -99,3 +108,22 @@ def test_unrecognized_speech_says_the_same_thing_everywhere(cfg):
     reply = main._run_text(runtime, "今天天气不错")
     assert reply == main.NO_ACTION
     assert runtime.recent[0]["reply"] == main.NO_ACTION
+
+
+@pytest.mark.parametrize("text", ["你好啊", "你好", "在吗", "嗨～", "谢谢啦", "你是谁呀"])
+def test_small_talk_is_answered_not_ignored(text: str):
+    """真机第一次用，说「你好啊」连吃五条「没听懂」。
+
+    能力没错，但一个能对话的东西不该把问候当失败——所以问候、道谢、问身份
+    各有自己的出口，且**不算 ignore**（ignore 不朗读，问它一句会变成沉默）。
+    """
+    result = core.dispatch(text, cfg=load())
+    assert result.route == "chat", f"「{text}」落到了 {result.route}"
+    assert result.reply, f"「{text}」没有回话"
+
+
+def test_unknown_speech_still_explains_what_it_can_do():
+    """听不懂时也要给下一步，不能只留一句「没听懂」。"""
+    result = core.dispatch("帮我订一张机票", cfg=load())
+    assert result.route == "ignore"
+    assert "打开应用" in result.reply

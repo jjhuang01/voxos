@@ -55,6 +55,13 @@
   .gear{width:22px;height:22px;border:0;background:transparent;color:var(--dim);
     display:grid;place-items:center;border-radius:6px;cursor:pointer;padding:0}
   .gear:hover{color:var(--ink);background:rgba(255,255,255,.08)}
+  /* 静音键。暂停监听是常驻设备的第一需求，不能藏在面板第二层里 */
+  .mic{width:22px;height:22px;border:0;background:transparent;color:var(--muted);
+    display:grid;place-items:center;border-radius:6px;cursor:pointer;padding:0}
+  .mic:hover{color:var(--ink);background:rgba(255,255,255,.08)}
+  .mic .slash{display:none}
+  .mic.off{color:var(--warn)}
+  .mic.off .slash{display:block}
 
   .pill[data-state="listening"] .dot{background:var(--ok);animation:breathe 1.6s ease-in-out infinite}
   .pill[data-state="listening"] .meter{opacity:1}
@@ -70,6 +77,27 @@
   .pill[data-state="confirm"]{border-color:rgba(255,159,10,.6);box-shadow:0 8px 32px rgba(255,159,10,.18)}
   .pill[data-state="confirm"] .dot{background:var(--warn);animation:pulse 1.2s ease-in-out infinite}
   .pill[data-state="onboard"] .dot{background:var(--warn)}
+  /* 暂停：灰点、字变淡、电平表收起。要一眼看出「它现在不听了」 */
+  .pill[data-state="paused"]{border-color:rgba(255,255,255,.07);background:rgba(20,20,22,.72)}
+  .pill[data-state="paused"] .dot{background:var(--dim)}
+  .pill[data-state="paused"] .label{color:var(--muted)}
+  .pill[data-state="paused"] .meter{opacity:0}
+  /* 「没听懂」是中性色，不是错误色：屋里随便一句话都可能落到这里，
+     用红色会把正常闲聊渲染成故障。 */
+  .pill[data-state="miss"] .dot{background:var(--muted)}
+  .pill[data-state="miss"] .label{color:var(--muted)}
+
+  /* 胶囊下面那两行：上一行是它听到的原话，下一行是它的回应。
+     常驻监听时这才是主要反馈——不用打开面板就知道有没有听对。
+     面板展开时它还在，只是把面板压矮一点（见下面的 :has 规则）。 */
+  .caption{width:100%;max-width:340px;display:flex;flex-direction:column;gap:1px;
+    align-items:center;text-align:center;animation:drop .18s cubic-bezier(.2,.8,.2,1)}
+  .caption[hidden]{display:none}
+  .caption .said,.caption .replied{max-width:100%;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;line-height:1.5}
+  .caption .said{font-size:12px;color:var(--dim)}
+  .caption .replied{font-size:12.5px;color:var(--ink)}
+  .caption .replied[hidden]{display:none}
 
   /* ---------------- 面板 ---------------- */
   .panel{
@@ -84,6 +112,8 @@
   .panel[hidden]{display:none}
   /* 确认卡在面板下方。胶囊窗口只有 420×620，面板吃满高度时卡片会被挤出屏幕——
      而它是限时 8 秒的，必须始终可见。有卡片时把面板压矮。 */
+  /* 胶囊下面多了「听到 / 回应」两行时，面板得让出这块高度，否则底部的保存条会被裁 */
+  .stage:has(.caption:not([hidden])) .panel{max-height:calc(100vh - 122px)}
   .stage:has(.confirm:not([hidden])) .panel{max-height:calc(100vh - 200px)}
   @keyframes drop{from{opacity:0;transform:translateY(-6px) scale(.985)}to{opacity:1;transform:none}}
 
@@ -121,6 +151,15 @@
   .cell .v.ok{color:var(--ok)}
   .cell .v.warn{color:var(--warn)}
   .cell .v small{font-size:11px;color:var(--muted);margin-left:3px}
+  /* 状态页最上面那条总开关：常驻监听是这个产品的主语，得放在第一眼的位置 */
+  .listen{display:flex;align-items:center;gap:12px;margin-bottom:8px;
+    background:rgba(255,255,255,.045);border:1px solid var(--line-soft);
+    border-radius:12px;padding:10px 12px;transition:background .18s,border-color .18s}
+  .listen .l{flex:1;min-width:0}
+  .listen .n{font-size:12.5px}
+  .listen .h{color:var(--dim);font-size:11.5px;margin-top:2px;line-height:1.5}
+  .listen.off{border-color:rgba(255,159,10,.35);background:rgba(255,159,10,.08)}
+  .listen.off .h{color:var(--warn)}
   .ask{display:flex;gap:8px;margin-top:12px}
   .ask input{flex:1;background:rgba(255,255,255,.06);border:1px solid var(--line);
     border-radius:10px;padding:9px 12px;color:var(--ink);font:inherit;font-size:12.5px;outline:none}
@@ -146,6 +185,7 @@
   .tag.llm{background:rgba(10,132,255,.16);color:#63B0FF}
   .tag.offline{background:rgba(255,255,255,.09);color:var(--muted)}
   .tag.ignore{background:rgba(255,159,10,.14);color:#FFB84D}
+  .tag.chat{background:rgba(255,255,255,.1);color:#B9BFC9}
   .empty{color:var(--dim);font-size:12px;text-align:center;padding:26px 0}
 
   /* 设置 */
@@ -238,6 +278,15 @@
     <span class="dot"></span>
     <span class="label" id="label" aria-live="polite">待机</span>
     <span class="meter" aria-hidden="true"><i></i><i></i><i></i></span>
+    <button class="mic" id="mic" title="暂停监听" aria-label="暂停监听">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+        <line x1="12" y1="19" x2="12" y2="22"></line>
+        <path class="slash" d="M3 3l18 18"></path>
+      </svg>
+    </button>
     <button class="gear" id="gear" title="设置" aria-label="设置">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -245,6 +294,11 @@
         <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z"></path>
       </svg>
     </button>
+  </div>
+
+  <div class="caption" id="caption" hidden>
+    <div class="said" id="said"></div>
+    <div class="replied" id="replied" hidden></div>
   </div>
 
   <section class="panel" id="panel" hidden aria-label="VoxOS 控制面板">
@@ -260,16 +314,26 @@
     </div>
     <div class="body">
       <div class="view" data-view="status">
+        <div class="listen" id="listen-row">
+          <div class="l">
+            <div class="n">持续监听</div>
+            <div class="h" id="listen-hint">一直听着，说完就执行，不用打字</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="listen" checked aria-label="持续监听">
+            <span class="track"><span class="knob"></span></span>
+          </label>
+        </div>
         <div class="grid" id="cells"></div>
         <div class="onboard" id="onboard" hidden>
-          <p>还没有声纹档案。录 3 秒，之后只有你的声音能驱动它。</p>
+          <p>还没有声纹档案。说 2~3 句话（句间停半秒），之后只有你的声音能驱动它。</p>
           <button class="btn primary" id="enroll">录入声纹</button>
         </div>
         <div class="ask" id="ask-row">
-          <input id="ask" placeholder="说一句话，或在这里输入…" autocomplete="off" />
+          <input id="ask" placeholder="打字也行（备用）…" autocomplete="off" />
           <button id="send">发送</button>
         </div>
-        <div class="hint" id="hint">点胶囊展开，Esc 收起。危险操作会在这里等你确认。</div>
+        <div class="hint" id="hint">直接说话就行，不用点任何按钮。危险操作会在这里等你确认。</div>
       </div>
 
       <div class="view" data-view="recent" hidden>
@@ -305,11 +369,11 @@ const $ = id => document.getElementById(id);
 const pill = $('pill'), panel = $('panel'), label = $('label');
 
 const STATE_TEXT = {
-  idle:'待机', listening:'聆听中', executing:'执行中', done:'完成',
-  blocked:'已拦截', confirm:'需要确认', onboard:'待设置'
+  idle:'待机', listening:'聆听中', executing:'处理中…', done:'完成',
+  blocked:'已拦截', confirm:'需要确认', onboard:'待设置', paused:'已暂停'
 };
 let current = 'idle', settingsCache = null, dirty = {}, confirmTimeout = 8, pendingConfirmId = '';
-const ROUTE = {fast:'快通道', offline:'离线兜底', llm:'大模型', ignore:'未识别'};
+const ROUTE = {fast:'快通道', offline:'离线兜底', llm:'大模型', chat:'对话', ignore:'未识别'};
 
 /* ---------------- 通信 ---------------- */
 async function api(path, options = {}) {
@@ -350,7 +414,7 @@ function switchTab(name) {
   if (name === 'settings' && !settingsCache) loadSettings();
 }
 
-pill.addEventListener('click', e => { if (e.target.closest('.gear')) return; toggle(); });
+pill.addEventListener('click', e => { if (e.target.closest('button')) return; toggle(); });
 pill.addEventListener('keydown', e => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
 });
@@ -364,12 +428,51 @@ document.addEventListener('keydown', e => {
 });
 
 /* ---------------- 状态渲染 ---------------- */
+/* 胶囊下面那两行。说清「听到了什么 / 它怎么答」——这是常驻监听的主要反馈，
+   不给的话用户只能打开面板翻记录，跟智能音箱的体验差一截。 */
+function setSaid(text) {
+  const el = $('said');
+  el.textContent = text || '';
+  el.hidden = !text;
+  $('caption').hidden = !text && $('replied').hidden;
+}
+
+function setReplied(text) {
+  const el = $('replied');
+  el.textContent = text || '';
+  el.hidden = !text;
+  $('caption').hidden = $('said').hidden && !text;
+}
+
+function clearCaption() { setSaid(''); setReplied(''); }
+
+/* 结果不能一直挂在胶囊上：智能音箱念完就回到「在听」的样子。
+   留 4 秒够看清一句话，再长就成了永久残留。 */
+let settleTimer = 0;
+function settleLater() {
+  clearTimeout(settleTimer);
+  if (current === 'paused') return;
+  settleTimer = setTimeout(() => {
+    if (!['done', 'miss', 'blocked'].includes(current)) return;
+    current = 'listening';
+    pill.dataset.state = 'listening';
+    label.textContent = STATE_TEXT.listening;
+  }, 4000);
+}
+
 function render(event) {
   if (!event || event.state === 'ping') return;
   const state = event.state;
+  clearTimeout(settleTimer);                  // 新事件来了，旧的回落作废
   current = state;
   pill.dataset.state = state;
   label.textContent = event.label || STATE_TEXT[state] || state;
+  if (state === 'executing') { setSaid(event.detail); setReplied(''); }
+  else if (state === 'done' || state === 'blocked' || state === 'miss') {
+    setReplied(event.detail);
+    settleLater();
+  }
+  else if (state === 'idle') { if (event.detail) setSaid(event.detail); else clearCaption(); }
   if (state === 'confirm') {
     $('confirm-q').textContent = event.detail || '这个操作需要你确认';
     pendingConfirmId = event.request || '';   // 回答必须带回这张卡的请求 ID
@@ -404,6 +507,48 @@ document.querySelectorAll('[data-allow]').forEach(button =>
     catch (error) { toast(error.message, true); }
   }));
 
+/* ---------------- 持续监听 ---------------- */
+/* 开关和胶囊上的静音键是同一件事的两处入口：一处给「随手按」，
+   一处给「看状态时顺手改」。两边都走同一个接口，谁先动都一致。 */
+function applyListening(on) {
+  const mic = $('mic');
+  mic.classList.toggle('off', !on);
+  mic.title = on ? '暂停监听' : '继续监听';
+  mic.setAttribute('aria-label', mic.title);
+  $('listen').checked = on;
+  $('listen-row').classList.toggle('off', !on);
+  $('listen-hint').textContent = on
+    ? '一直听着，说完就执行，不用打字'
+    : '已暂停：麦克风还在读，但不识别、不执行';
+  if (!on) {
+    pill.dataset.state = 'paused';
+    label.textContent = STATE_TEXT.paused;
+  } else if (current === 'paused') {          // 恢复时把胶囊从暂停态带回来
+    pill.dataset.state = 'idle';
+    label.textContent = STATE_TEXT.idle;
+    current = 'idle';
+  }
+}
+
+async function setListening(on) {
+  applyListening(on);                          // 先动界面：按一下就要有反应
+  try {
+    const result = await api('/api/listen', {method:'POST', body: JSON.stringify({on})});
+    const live = result.listening !== false;
+    applyListening(live);
+    toast(live ? '继续监听' : '已暂停监听');
+  } catch (error) {
+    applyListening(!on);                       // 服务端没接受，界面必须退回去
+    toast(error.message, true);
+  }
+}
+
+$('mic').addEventListener('click', e => {
+  e.stopPropagation();
+  setListening($('mic').classList.contains('off'));
+});
+$('listen').addEventListener('change', () => setListening($('listen').checked));
+
 /* ---------------- 状态卡 ---------------- */
 async function loadStatus() {
   try {
@@ -420,17 +565,18 @@ async function loadStatus() {
       `<div class="cell"><div class="k">${k}</div><div class="v ${tone}">${v}</div></div>`).join('');
     $('uptime').textContent = `v${status.version} · ${Math.floor((status.uptime_s || 0) / 60)} 分钟`;
     if (status.confirm_timeout_s) confirmTimeout = status.confirm_timeout_s;
+    applyListening(status.listening !== false);   // 老版本没有这个字段，当它是开着的
     setOnboard(!status.enrolled);
   } catch (_) { /* 守护进程没起来时静默 */ }
 }
 
-/* 待录入时输入框是死的：藏起来，把「录 3 秒」顶到第一眼能看到的位置 */
+/* 待录入时输入框是死的：藏起来，把「说几句话」顶到第一眼能看到的位置 */
 function setOnboard(on) {
   $('onboard').hidden = !on;
   $('ask-row').hidden = on;
   $('hint').textContent = on
     ? '录完声纹，胶囊就会开始听你说话。'
-    : '点胶囊展开，Esc 收起。危险操作会在这里等你确认。';
+    : '直接说话就行，不用点任何按钮。危险操作会在这里等你确认。';
 }
 
 async function loadRecent() {
@@ -589,13 +735,13 @@ async function send() {
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
-  render({state:'executing', label:'处理中…'});
+  render({state:'executing', label:'处理中…', detail:text});
   try {
     const data = await api('/command', {method:'POST', body: JSON.stringify({text})});
-    render({state:'done', label: data.reply || '完成'});
+    render({state:'done', label:'完成', detail: data.reply || '完成'});
     loadRecent();
   } catch (error) {
-    render({state:'blocked', label: error.message});
+    render({state:'blocked', label: error.message, detail: error.message});
   }
 }
 $('send').addEventListener('click', send);

@@ -25,32 +25,32 @@ code{background:#f3f4f6;border-radius:5px;padding:1px 6px;font-size:12.5px}
 .note{color:var(--muted);font-size:12.5px;margin-top:10px}
 </style></head><body><div class="wrap">
 <h1>VoxOS 工程验收报告</h1>
-<div class="sub">生成于 2026-10-28T19:41:25 · Python 3.13.12 · 声纹后端 <code>sherpa-cam++</code> · 语料 <code>tts</code></div>
+<div class="sub">生成于 2026-10-28T23:07:02 · Python 3.13.12 · 声纹后端 <code>sherpa-cam++</code> · 语料 <code>tts</code></div>
 <div class="grid">
   <div class="kpi"><div class="n">0.0008ms</div><div class="l">快通道决策 p95</div></div>
-  <div class="kpi"><div class="n">0.478ms</div><div class="l">端到端触发 p95</div></div>
-  <div class="kpi"><div class="n">0.0% / 0.0%</div><div class="l">声纹 FRR / FAR</div></div>
-  <div class="kpi"><div class="n">6119</div><div class="l">源码总行数（21 个模块）</div></div>
+  <div class="kpi"><div class="n">0.535ms</div><div class="l">端到端触发 p95</div></div>
+  <div class="kpi"><div class="n">0.0% / 1.67%</div><div class="l">声纹 FRR / FAR</div></div>
+  <div class="kpi"><div class="n">6622</div><div class="l">源码总行数（22 个模块）</div></div>
 </div>
 <h2>验收结论</h2><div class="card"><table><tr><th>验收项</th><th>实测</th><th>结论</th></tr>
 <tr><td>快通道决策延迟 p95 < 5ms</td><td><code>0.0008ms</code></td><td class="pass">PASS</td></tr>
-<tr><td>端到端触发 p95 < 500ms</td><td><code>0.478ms</code></td><td class="pass">PASS</td></tr>
-<tr><td>静音待机 CPU < 1.5%</td><td><code>0.37%/秒音频</code></td><td class="pass">PASS</td></tr>
+<tr><td>端到端触发 p95 < 500ms</td><td><code>0.535ms</code></td><td class="pass">PASS</td></tr>
+<tr><td>静音待机 CPU < 1.5%</td><td><code>0.34%/秒音频</code></td><td class="pass">PASS</td></tr>
 <tr><td>静音零误触发</td><td><code>0 段</code></td><td class="pass">PASS</td></tr>
 <tr><td>声纹 FRR < 2%</td><td><code>0.0%</code></td><td class="pass">PASS</td></tr>
-<tr><td>声纹 FAR < 1%</td><td><code>0.0%</code></td><td class="pass">PASS</td></tr>
+<tr><td>声纹 FAR < 1%</td><td><code>1.67%</code></td><td class="gap">GAP</td></tr>
 <tr><td>冒名语音被拒（全链路）</td><td><code>1 条被拒</code></td><td class="pass">PASS</td></tr>
 <tr><td>红线禁令全部拦截</td><td><code>8/8</code></td><td class="pass">PASS</td></tr>
 <tr><td>角色隔离（OPS 不可写文件）</td><td><code>True</code></td><td class="pass">PASS</td></tr>
 <tr><td>医疗草稿强制标记</td><td><code>True</code></td><td class="pass">PASS</td></tr>
 <tr><td>跨站 / 无令牌请求被拦截</td><td><code>{'no_token': 401, 'cross_site': 403, 'allowed': 200}</code></td><td class="pass">PASS</td></tr>
 <tr><td>确认通道从语音可达且文案是人话</td><td><code>可达</code></td><td class="pass">PASS</td></tr>
-<tr><td>单函数 ≤ 40 行（src + scripts）</td><td><code>39 行</code></td><td class="pass">PASS</td></tr>
-<tr><td>测试全绿</td><td><code>225 passed, 1 skipped in 20.93s</code></td><td class="pass">PASS</td></tr>
-<tr><td>上下文注入不阻塞派发</td><td><code>0.032ms</code></td><td class="pass">PASS</td></tr>
+<tr><td>单函数 ≤ 40 行（src + scripts）</td><td><code>40 行</code></td><td class="pass">PASS</td></tr>
+<tr><td>测试全绿</td><td><code>248 passed, 1 skipped, 2 warnings in 23.62s</code></td><td class="pass">PASS</td></tr>
+<tr><td>上下文注入不阻塞派发</td><td><code>0.005ms</code></td><td class="pass">PASS</td></tr>
 <tr><td>设置写回保住注释</td><td><code>True</code></td><td class="pass">PASS</td></tr>
 <tr><td>无声纹时给出录入入口</td><td><code>True</code></td><td class="pass">PASS</td></tr>
-<tr><td>本地识别字符错误率 < 10%</td><td><code>2.8%（中文 1.4% / 英文 3.1%，24 句，≥20× 实时）</code></td><td class="pass">PASS</td></tr>
+<tr><td>本地识别字符错误率 < 10%</td><td><code>2.8%（中文 1.4% / 英文 3.1%，24 句，≥30× 实时）</code></td><td class="pass">PASS</td></tr>
 <tr><td>中英混说英文术语召回 ≥ 95%</td><td><code>29.4%（中文音色）/ 47.1%（双语拼接），17 个术语，中文 9.6% 字错</code></td><td class="gap">GAP</td></tr>
 </table><div class="note">判定口径见 <code>PRD.md §4</code> 与 <code>TODO_ROADMAP.md</code>；原始数据见 <code>docs/acceptance.json</code>。</div></div>
 <h2>声纹阈值扫描</h2><div class="card"><table>
@@ -67,30 +67,31 @@ code{background:#f3f4f6;border-radius:5px;padding:1px 6px;font-size:12.5px}
 <tr><th>指标</th><th>值</th></tr>
 <tr><td>接受 / 拒绝</td><td>2 / 1</td></tr>
 <tr><td>录入一致性</td><td>0.9651</td></tr>
-<tr><td>单次派发延迟</td><td>0.59ms, 191.54ms</td></tr>
-<tr><td>处理耗时 / 音频时长</td><td>445.8ms / 0.025× 实时</td></tr>
+<tr><td>单次派发延迟</td><td>0.45ms, 122.9ms</td></tr>
+<tr><td>处理耗时 / 音频时长</td><td>344.5ms / 0.019× 实时</td></tr>
 </table><div class="note">链路：WAV → 自愈源 → 能量 VAD → 端点 → CAM++ 声纹 → STT → 正则快通道 → 工具 → 审计。</div></div>
 <h2>代码度量</h2><div class="card"><table>
 <tr><th>模块</th><th>总行数</th><th>有效代码行</th></tr><tr><td><code>scripts/audit_ui.py</code></td><td>324</td><td>273</td></tr>
 <tr><td><code>scripts/build_ubm.py</code></td><td>38</td><td>26</td></tr>
 <tr><td><code>scripts/enroll_voice.py</code></td><td>43</td><td>32</td></tr>
 <tr><td><code>scripts/fetch_models.py</code></td><td>36</td><td>25</td></tr>
+<tr><td><code>scripts/make_icon.py</code></td><td>104</td><td>78</td></tr>
 <tr><td><code>scripts/release_notes.py</code></td><td>68</td><td>50</td></tr>
 <tr><td><code>scripts/shot.py</code></td><td>288</td><td>243</td></tr>
 <tr><td><code>scripts/soak.py</code></td><td>253</td><td>202</td></tr>
-<tr><td><code>scripts/verify.py</code></td><td>825</td><td>709</td></tr>
+<tr><td><code>scripts/verify.py</code></td><td>837</td><td>714</td></tr>
 <tr><td><code>src/voxos/__init__.py</code></td><td>7</td><td>5</td></tr>
-<tr><td><code>src/voxos/audio.py</code></td><td>593</td><td>470</td></tr>
+<tr><td><code>src/voxos/audio.py</code></td><td>654</td><td>521</td></tr>
 <tr><td><code>src/voxos/config.py</code></td><td>203</td><td>161</td></tr>
-<tr><td><code>src/voxos/core.py</code></td><td>369</td><td>303</td></tr>
+<tr><td><code>src/voxos/core.py</code></td><td>395</td><td>320</td></tr>
 <tr><td><code>src/voxos/corpus.py</code></td><td>224</td><td>183</td></tr>
 <tr><td><code>src/voxos/dsp.py</code></td><td>281</td><td>226</td></tr>
-<tr><td><code>src/voxos/main.py</code></td><td>724</td><td>592</td></tr>
+<tr><td><code>src/voxos/main.py</code></td><td>923</td><td>754</td></tr>
 <tr><td><code>src/voxos/models.py</code></td><td>158</td><td>137</td></tr>
 <tr><td><code>src/voxos/registry.py</code></td><td>191</td><td>158</td></tr>
 <tr><td><code>src/voxos/safety.py</code></td><td>345</td><td>281</td></tr>
-<tr><td><code>src/voxos/settings.py</code></td><td>347</td><td>282</td></tr>
-<tr><td><code>src/voxos/tools.py</code></td><td>341</td><td>272</td></tr>
-<tr><td><code>src/voxos/ui.py</code></td><td>461</td><td>386</td></tr></table>
-<div class="note">最长函数 <code>scripts/verify.py:measure_stt</code>（39 行，预算 40）；类总数 34；工具 10 个；快通道 4 条。</div></div>
+<tr><td><code>src/voxos/settings.py</code></td><td>351</td><td>286</td></tr>
+<tr><td><code>src/voxos/tools.py</code></td><td>425</td><td>339</td></tr>
+<tr><td><code>src/voxos/ui.py</code></td><td>474</td><td>398</td></tr></table>
+<div class="note">最长函数 <code>src/voxos/core.py:dispatch</code>（40 行，预算 40）；类总数 34；工具 12 个；快通道 6 条。</div></div>
 </div></body></html>

@@ -123,16 +123,27 @@ def dispatch(
         reply = executor.execute_safely(name, args, text=raw)
         return DispatchResult("fast", raw, name, args, reply, _ms(started), [reply])
 
+    if (chat := _small_talk(raw)):
+        return DispatchResult("chat", raw, reply=chat, latency_ms=_ms(started))
+
     llm = _try_llm(raw, executor, cfg, context or {}, started)
     if llm is not None:
         return llm
 
     plan = heuristic_plan(raw, cfg)
     if not plan:
-        return DispatchResult("ignore", raw, reply="", latency_ms=_ms(started))
+        return DispatchResult("ignore", raw, reply=NO_ACTION, latency_ms=_ms(started))
     results = [executor.execute_safely(name, args, text=raw) for name, args in plan]
     name, args = plan[0]
     return DispatchResult("offline", raw, name, args, "；".join(results), _ms(started), results)
+
+
+def _small_talk(text: str) -> str:
+    """问候/道谢/问身份：给一句人话，而不是「没听懂」。"""
+    for pattern, reply in _CHAT:
+        if pattern.match(text):
+            return reply
+    return ""
 
 
 def _try_llm(
@@ -308,6 +319,21 @@ _SPLIT = re.compile(
     r"(?:然后|接着|再然后"
     r"|[，,;；]\s*(?:然后|顺便|另外|同时|再说|还有)"
     r"|[;；])")
+
+# 闲聊不该回「没听懂」。真机第一次用就撞上了：用户说「你好啊」，
+# 界面上连着五条「没听懂，什么也没做」——功能没错，但不像个能对话的东西。
+_CHAT: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^(?:你好|您好|嗨|哈喽|hello|hi|在吗|在不在|早上好|中午好|下午好|晚上好)"
+                r"[啊呀呢嘛吧]*[。！!？?～~，,\s]*$", re.I), "在。"),
+    (re.compile(r"^(?:谢谢|多谢|感谢|辛苦了)[啊啦呀您]*[。！!～~]*$"), "不客气。"),
+    (re.compile(r"^(?:你是谁|你叫什么|你能做什么|你会什么|你能干嘛|帮助|help)"
+                r"[啊呀呢]*[。！!？?]*$", re.I),
+     "我是 VoxOS，只听你一个人说话。现在能做：打开应用、问时间、查服务器负载、记日志。"),
+)
+
+# 没匹配到任何能力时的那句话。**只留一份**：终端、接口、历史、界面都说它，
+# 曾经三处各写各的（「(无动作)」「没听懂」），用户看到的就是前后矛盾。
+NO_ACTION = "还没学会这句。能做的有：打开应用、问时间、查服务器负载、记日志。"
 
 # 切段后常留下「同时 / 顺便」这类开头词，会让锚定的快通道正则全部失配。
 _LEAD = re.compile(r"^(?:同时|顺便|另外|还有|再说|然后|接着|再|也|并)[，,：:\s]*")

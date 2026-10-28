@@ -26,7 +26,8 @@ from . import __version__, audio, core, corpus, dsp, settings, tools, ui
 from .config import Config, load
 
 # 一句话没匹配到任何能力时，终端、接口、历史三处必须说同一句话。
-NO_ACTION = "没听懂，什么也没做"
+# 文案只写在 core 里一处，这里只是别名——两处各写一份必然有一天对不上。
+NO_ACTION = core.NO_ACTION
 
 # 识别后端在界面上的人话名（配置里仍是英文标识，不为人机耦合让步）。
 STT_LABELS = {
@@ -202,6 +203,7 @@ def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]
         "threshold": getattr(lock, "threshold", None),
         "role": cfg.get("workspace.role"),
         "dry_run": cfg.flag("workspace.dry_run"),
+        "listening": not _MUTED.is_set(),
         "llm": cfg.flag("llm.enabled"),
         "stt": STT_LABELS.get(backend, backend or "—"),
         "confirm_timeout_s": float(cfg.get("workspace.confirm_timeout_s", 8)),
@@ -270,6 +272,7 @@ def _ui_context(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
         on_enroll=(lambda seconds: _enroll_now(runtime.cfg, lock, seconds, enrolled)) if lock else None,
         on_confirm=runtime.gate.resolve,
         history=lambda: list(runtime.recent),
+        on_listen=lambda on: _set_listening(runtime, on),
     )
 
 
@@ -465,6 +468,26 @@ def cmd_port(_: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+# 持续监听的总开关。关掉之后**仍然继续读设备**——只是不往识别队列里放：
+# 停止读会让 CoreAudio 的缓冲堆起来，恢复时一次性吐出几十秒旧音频。
+_MUTED = threading.Event()
+_RESET_HOOK: dict[str, object] = {"reset": None}
+
+
+def _set_listening(runtime: Runtime, on: bool) -> dict[str, object]:
+    """像智能音箱上的静音键：一按就停，再按就继续。"""
+    if on:
+        reset = _RESET_HOOK.get("reset")
+        if callable(reset):
+            reset()                       # 丢掉暂停前攒的半句话
+        _MUTED.clear()
+        runtime.bus.emit("idle", "待机", "")
+    else:
+        _MUTED.set()
+        runtime.bus.emit("paused", "已暂停监听", "点胶囊 → 状态 → 继续监听")
+    return {"ok": True, "listening": on}
+
+
 def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[str, Path]) -> int:
     """三段式：采集线程 → 识别线程 → 派发主循环。
 
@@ -482,6 +505,7 @@ def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[s
     source = audio.SelfHealingSource(lambda: audio.MicSource(chunk, device=device),
                                      on_event=runtime.bus, on_reset=pipeline.reset)
     _context()                             # 预热：把首次线程启动的开销挪到进循环之前
+    _RESET_HOOK["reset"] = pipeline.reset
     runtime.bus.emit("idle", "待机", "")
     chunks: queue.Queue[object] = queue.Queue(maxsize=64)
     utterances: queue.Queue[object] = queue.Queue(maxsize=4)
@@ -495,11 +519,16 @@ def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[s
 
 
 def _capture_loop(source: object, chunks: queue.Queue[object], stop: threading.Event) -> None:
-    """只做采集：队列满时丢最旧的块，绝不阻塞设备读取。"""
+    """只做采集：队列满时丢最旧的块，绝不阻塞设备读取。
+
+    暂停时继续读、但不入队——见 `_MUTED` 的说明。
+    """
     try:
         for chunk in source:  # type: ignore[union-attr]
             if stop.is_set():
                 break
+            if _MUTED.is_set():
+                continue
             try:
                 chunks.put_nowait(chunk)
             except queue.Full:
@@ -576,9 +605,20 @@ def _dispatch_loop(runtime: Runtime, pipeline: audio.AudioPipeline,
         runtime.bus.emit("executing", "处理中…", utterance.text)
         result = runtime.dispatch(utterance.text)
         runtime.record(utterance.text, result)
-        runtime.bus.emit("done", "完成", result.reply)
-        if result.reply and runtime.cfg.flag("ui.speak", True):
+        state, word = _RESULT_WORD.get(result.route, ("done", "完成"))
+        runtime.bus.emit(state, word, result.reply)
+        # 听不懂的时候只显示、不朗读：常驻监听会把屋里所有闲聊都收进来，
+        # 每句都念一遍「还没学会这句」，很快就变成噪音了。
+        if result.reply and result.route != "ignore" and runtime.cfg.flag("ui.speak", True):
             _speak_async(result.reply, pipeline)
+
+
+# 胶囊上那行字要说清「它到底做了什么」：一律写「完成」的话，
+# 听不懂和真做成了长得一模一样——用户看到的就是「没反应」。
+_RESULT_WORD: dict[str, tuple[str, str]] = {
+    "ignore": ("miss", "没听懂"),
+    "chat": ("done", "回话"),
+}
 
 
 def _speak_async(text: str, pipeline: audio.AudioPipeline) -> None:

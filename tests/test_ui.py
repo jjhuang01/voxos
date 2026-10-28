@@ -266,6 +266,39 @@ def test_confirm_and_enroll_are_wired(server):
         other.server_close()
 
 
+def test_listen_switch_is_wired(server):
+    """「可以关闭」得真的能关：布尔值才收，缺回调要说清楚，别静默成功。"""
+    instance, _ = server
+    seen: list[bool] = []
+    ctx = ui.UiContext(bus=ui.StatusBus(None), token=TOKEN,
+                       on_listen=lambda on: seen.append(on) or {"ok": True, "listening": on})
+    other = ui.serve(ctx, "127.0.0.1", 0, block=False)
+    try:
+        assert _post(other, "/api/listen", {"on": False})[1] == {"ok": True, "listening": False}
+        assert _post(other, "/api/listen", {"on": True})[1] == {"ok": True, "listening": True}
+        assert seen == [False, True]
+        # 字符串 "false" 不能被当成假值：监听开关猜错一次，用户以为关了其实在听
+        status, body = _post(other, "/api/listen", {"on": "false"})
+        assert status == 400 and body["ok"] is False
+        assert _post(other, "/api/listen", {"on": False}, token=None)[0] == 401
+    finally:
+        other.shutdown()
+        other.server_close()
+
+
+def test_listen_switch_says_so_when_unavailable(server):
+    """没有音频循环（比如 `voxos serve`）时，开关要如实说不可用。"""
+    instance, _ = server
+    ctx = ui.UiContext(bus=ui.StatusBus(None), token=TOKEN)
+    other = ui.serve(ctx, "127.0.0.1", 0, block=False)
+    try:
+        status, body = _post(other, "/api/listen", {"on": False})
+        assert status == 400 and "未启用" in body["error"]
+    finally:
+        other.shutdown()
+        other.server_close()
+
+
 # ------------------------------------------------------------------ 资产
 
 def test_earcons_are_synthesized(tmp_path):
@@ -278,11 +311,26 @@ def test_earcons_are_synthesized(tmp_path):
             assert handle.getnframes() > 1000
 
 
-def test_pill_html_has_four_states():
+def test_pill_html_covers_every_state():
+    """`DESIGN_SYSTEM.md` 的状态表就是这份清单：加状态就得改页面，改页面就得改它。
+
+    `miss` / `paused` 是「常驻监听」这一轮补的：前者让「没听懂」不再长得像
+    「做成了」，后者是用户要的「可以关闭」。
+    """
     html = (REPO / "web" / "pill.html").read_text(encoding="utf-8")
-    for state in ("listening", "executing", "done", "blocked", "confirm", "onboard"):
-        assert f'data-state="{state}"' in html or f"{state}:" in html
+    for state in ("idle", "listening", "executing", "done", "blocked", "confirm",
+                  "onboard", "miss", "paused"):
+        assert f'data-state="{state}"' in html or f"{state}:" in html, state
     assert "prefers-reduced-motion" in html
+
+
+def test_pill_has_a_mute_button_and_a_listen_switch():
+    """「一直监听、但我能关」是两个入口：胶囊上的静音键 + 状态页的总开关。"""
+    html = (REPO / "web" / "pill.html").read_text(encoding="utf-8")
+    assert 'id="mic"' in html and 'id="listen"' in html
+    assert "/api/listen" in html
+    # 听到的原话与它的回应，必须各有位置，而不是都塞进胶囊那一行
+    assert 'id="said"' in html and 'id="replied"' in html
 
 
 def test_page_is_read_from_disk_once_until_it_changes(server, monkeypatch):

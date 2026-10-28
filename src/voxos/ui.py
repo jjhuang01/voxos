@@ -185,6 +185,7 @@ class UiContext:
     on_enroll: Callable[[float], dict[str, object]] | None = None
     on_confirm: Callable[[bool], None] | None = None
     history: Callable[[], list[dict[str, object]]] | None = None
+    on_listen: Callable[[bool], dict[str, object]] | None = None
 
 
 _PAGE_CACHE: dict[Path, tuple[float, bytes]] = {}
@@ -338,6 +339,7 @@ class _PillHandler(BaseHTTPRequestHandler):
             "/api/settings/undo": self._undo_settings,
             "/api/enroll": self._enroll,
             "/api/confirm": self._confirm,
+            "/api/listen": self._listen,
         }
         route = routes.get(path)
         return route() if route else self._json({"ok": False, "error": "没有这个接口"}, 404)
@@ -385,6 +387,17 @@ class _PillHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             return self._json({"ok": False, "error": "秒数不合法"}, 400)
         return self._json(result, 200 if result.get("ok") else 400)
+
+    def _listen(self) -> None:
+        """开/关持续监听。关掉之后麦克风照常读（否则设备缓冲会溢出），
+        但音频不再进入 VAD/识别——就像智能音箱上的静音键。"""
+        body = self._body() or {}
+        on = body.get("on")
+        if not isinstance(on, bool):
+            return self._json({"ok": False, "error": "on 必须是布尔值"}, 400)
+        if self.ctx.on_listen is None:
+            return self._json({"ok": False, "error": "未启用监听开关"}, 400)
+        return self._json(self.ctx.on_listen(on))
 
     def _confirm(self) -> None:
         body = self._body() or {}

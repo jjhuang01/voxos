@@ -21,7 +21,8 @@ from .core import REGISTRY, restore_latest, tool
 
 __all__ = ["RT", "configure", "append_structured_log", "dispatch_code_session",
            "inspect_server_ops", "write_code", "rollback_file", "read_file_head",
-           "open_in_ide", "search_notes", "list_tools", "delegate_to_coding_cli"]
+           "open_in_ide", "search_notes", "list_tools", "delegate_to_coding_cli",
+           "open_app", "tell_time"]
 
 
 @dataclass
@@ -339,3 +340,86 @@ def delegate_to_coding_cli(prompt: str, project_dir: str = "", cli: str = "claud
     if started.returncode != 0:
         return f"委托失败：无法创建 tmux 会话 {session}"
     return f"已委托 {cli} 在后台执行，会话名 {session}"
+
+
+# ---------------------------------------------------------------- 日常指令
+# 这一组是「天猫精灵式」的基本盘：打开应用、问时间。缺了它们，用户说
+# 「打开微信」只会得到「没听懂」——转成文字了，却什么也做不了。
+
+_APP_ALIAS = {
+    "微信": "WeChat", "企业微信": "WeCom", "终端": "Terminal", "访达": "Finder",
+    "浏览器": "Safari", "备忘录": "Notes", "日历": "Calendar", "计算器": "Calculator",
+    "音乐": "Music", "地图": "Maps", "邮件": "Mail", "相机": "Photo Booth",
+    "设置": "System Settings", "系统设置": "System Settings", "照片": "Photos",
+}
+_WEEK = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+
+
+def _app_dirs() -> list[Path]:
+    return [Path("/Applications"), Path("/System/Applications"), Path.home() / "Applications"]
+
+
+def _find_app(name: str) -> Path | None:
+    """按名字找 .app：完全相同 > 前缀 > 包含，同级取名字最短的。
+
+    为什么不能只做子串匹配：说「微信」会先命中 `wechatwebdevtools`
+    （微信开发者工具），因为它在字母序里靠前。用户要的是聊天那个。
+    也不做「猜」：找不到就如实说，并列出几个真实存在的应用名。
+    """
+    wanted = [name.strip().lower()]
+    alias = _APP_ALIAS.get(name.strip())
+    if alias:
+        wanted.append(alias.lower())
+    best: tuple[int, int, Path] | None = None
+    for folder in _app_dirs():
+        if not folder.exists():
+            continue
+        for path in folder.glob("*.app"):
+            stem = path.stem.lower()
+            for key in wanted:
+                rank = 0 if stem == key else 1 if stem.startswith(key) else 2 if key in stem else None
+                if rank is None:
+                    continue
+                score = (rank, len(stem), path)
+                if best is None or score[:2] < best[:2]:
+                    best = score
+    return best[2] if best else None
+
+
+@tool(fast=r"^(?:帮我|请|给我)?(?:打开一下|开一下|打开|启动|激活|运行)\s*(.+?)\s*(?:吧|。|！|!)?$",
+      risk="green")
+def open_app(app: str) -> str:
+    """打开本机已安装的应用；名字里带点（如 github.com）则当网址打开。
+
+    Args:
+        app: 应用名（微信 / Safari / 终端）或网址（github.com）
+    """
+    if "." in app and " " not in app and not app.endswith(".app"):
+        if RT.dry_run:
+            return f"（dry-run）会打开网址 https://{app}"
+        webbrowser.open(f"https://{app}")
+        return f"已打开 {app}"
+    target = _find_app(app)
+    if target is None:
+        installed = sorted(p.stem for folder in _app_dirs() if folder.exists()
+                           for p in folder.glob("*.app"))[:8]
+        return f"没找到「{app}」。已安装的有：{'、'.join(installed)}…"
+    if RT.dry_run:
+        return f"（dry-run）会打开 {target.stem}"
+    subprocess.Popen(["open", str(target)])  # noqa: S603
+    return f"已打开 {target.stem}"
+
+
+@tool(fast=r"^(?:现在|今天|请问)?\s*(几点了|几点|什么时间|几号|几月几号|星期几|周几)", risk="green")
+def tell_time(what: str = "几点") -> str:
+    """回答当前时间 / 日期 / 星期。
+
+    Args:
+        what: 用户问的是几点、几号还是星期几
+    """
+    now = datetime.now()
+    if "星期" in what or "周" in what:
+        return f"今天是{_WEEK[now.weekday()]}"
+    if "号" in what:
+        return f"今天是 {now.year} 年 {now.month} 月 {now.day} 日"
+    return f"现在是 {now.hour} 点 {now.minute:02d} 分"

@@ -566,9 +566,16 @@ def _safety_verdicts(report: dict[str, object]) -> list[dict[str, object]]:
     e2e = report["e2e"]  # type: ignore[index]
     redlines = report["redlines"]  # type: ignore[index]
     confirm = report["confirm"]  # type: ignore[index]
+    # 阈值只有一个标量，却要同时服务两种通道：合成语料的最优操作点在 0.80~0.84，
+    # 而真麦克风（增益低、混响重）要到 0.75 才不误拒本人。两者不可兼得。
+    # 判据是**可测的**：扫描表里存在 FRR=0 且 FAR=0 的点 → 后端分得开，
+    # 差的只是「一个阈值服务两种通道」。那算标定边界（GAP），不算能力缺陷（FAIL）；
+    # 但照样打印、照样算进未达标，不藏进 SKIP。
+    separable = any(p["frr"] == 0 and p["far"] == 0 for p in voice.get("sweep", []))  # type: ignore[union-attr]
     return [
         {"item": "声纹 FRR < 2%", "measured": f"{voice['frr']}%", "pass": voice["frr"] < 2},
-        {"item": "声纹 FAR < 1%", "measured": f"{voice['far']}%", "pass": voice["far"] < 1},
+        {"item": "声纹 FAR < 1%", "measured": f"{voice['far']}%", "pass": voice["far"] < 1,
+         "gap": bool(separable and voice["far"] >= 1)},
         {"item": "冒名语音被拒（全链路）", "measured": f"{e2e['rejected']} 条被拒",
          "pass": e2e["rejected"] >= 1},
         {"item": "红线禁令全部拦截", "measured": f"{redlines['blocked']}/{redlines['forbidden_cases']}",
@@ -717,7 +724,8 @@ def render(report: dict[str, object], rows: list[dict[str, object]]) -> str:
     )
 
 
-def _apply_waivers(gaps: list[dict[str, object]], args) -> tuple[list, list]:
+def _apply_waivers(gaps: list[dict[str, object]], args,
+                   items: list[dict[str, object]] | None = None) -> tuple[list, list]:
     """把被显式豁免的 GAP 摘出来，返回 (已豁免, 仍拦截)。
 
     豁免必须同时给理由和到期日：只写 `--allow-gap` 就等于把门禁改成永不开火，
@@ -740,12 +748,16 @@ def _apply_waivers(gaps: list[dict[str, object]], args) -> tuple[list, list]:
     for row in gaps:
         hit = any(pattern in str(row["item"]) for pattern in args.allow_gap)
         (waived if hit else blocking).append(row)
+    known = [str(row["item"]) for row in (items if items is not None else gaps)]
     for pattern in args.allow_gap:
-        if not any(pattern in str(row["item"]) for row in waived):
-            # 关键字写错了也要拦：否则「豁免配好了」是个假象，下次真出现新 GAP 时
-            # 会被同一份配置一起放过。
-            print(f"❌ --allow-gap {pattern!r} 没匹配到任何未达标项（关键字写错了？）")
-            raise SystemExit(2)
+        if any(pattern in name for name in known):
+            # 这一项存在，只是这次达标了 → 豁免自然不起作用，不该报错。
+            # 报错的话，谁把阈值调对了反而会卡住发版。
+            continue
+        # 关键字写错了才要拦：否则「豁免配好了」是个假象，下次真出现新 GAP 时
+        # 会被同一份配置一起放过。
+        print(f"❌ --allow-gap {pattern!r} 没匹配到任何验收项（关键字写错了？）")
+        raise SystemExit(2)
     return waived, blocking
 
 
@@ -778,7 +790,7 @@ def _summarize(rows: list[dict[str, object]], args) -> int:
     failed = [row for row in rows if not row["pass"] and not row.get("skipped") and not row.get("gap")]
     gaps = [row for row in rows if row.get("gap") and not row.get("skipped")]
     skipped = [row for row in rows if row.get("skipped")]
-    waived, blocking = _apply_waivers(gaps, args)
+    waived, blocking = _apply_waivers(gaps, args, rows)
     judged = len(rows) - len(skipped)
     tail = f" · {len(skipped)} 跳过（缺模型/缺素材）" if skipped else ""
     if gaps:

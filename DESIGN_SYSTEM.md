@@ -54,10 +54,17 @@
 | **LISTENING** | 声纹锁定通过、开始收音 | 左侧 `#30D158` 呼吸点（1.6s 周期），右侧三段电平条（静止时也读作波形，不是省略号） | `listen`（木质轻敲，80ms） |
 | **EXECUTING** | 命中路由、工具在跑 | 圆点变 `#0A84FF` 脉冲，边框同色，文案为动作标签 | `think`（柔和气泡，120ms） |
 | **DONE / BLOCKED / CONFIRM** | 工具返回 | 边框变 `#30D158` / `#FF453A` / `#FF9F0A`，文案 `完成 / 已拦截 / 需要确认` | `done` / `warn` / `warn` |
+| **MISS** | 没匹配到任何能力 | 中性灰点，文案 `没听懂`。**不用红色**：屋里随便一句话都可能落到这里，红点会把正常闲聊渲染成故障 | 无（不朗读） |
+| **PAUSED** | 用户按了静音键 | 灰点常亮、文字变淡、电平条收起，文案 `已暂停` | 无 |
 | **ONBOARD** | 尚未录入声纹 | 琥珀点常亮，文案 `待设置`，面板自动展开到引导卡 | `warn` |
 
-状态名与 `STATE_TEXT` 一一对应（`idle/listening/executing/done/blocked/confirm/onboard`），
-测试 `test_pill_html_has_four_states` 会盯着这张表，加状态就得同步改页面。
+状态名与 `STATE_TEXT` 一一对应
+（`idle/listening/executing/done/blocked/confirm/onboard/miss/paused`），
+测试 `test_pill_html_covers_every_state` 会盯着这张表，加状态就得同步改页面。
+
+胶囊下面常驻两行 `caption`：上一行是**它听到的原话**，下一行是**它的回应**。
+这是常驻监听的主要反馈——不给的话，用户只能打开面板翻记录才知道有没有听对。
+`DONE / MISS / BLOCKED` 停 4 秒后自动回落到 `LISTENING`，不留一个永久挂着的「完成」。
 
 配色（CSS 变量，浅色主题下也成立，因为胶囊本身是深色玻璃）：
 

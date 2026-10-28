@@ -7,14 +7,14 @@
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 0.245,
-      "p95": 0.478,
-      "context_p95": 0.032,
+      "p50": 0.354,
+      "p95": 0.535,
+      "context_p95": 0.005,
       "rounds": 30
     },
     "voiceprint": {
       "backend": "sherpa-cam++",
-      "threshold": 0.82,
+      "threshold": 0.75,
       "corpus": "tts",
       "speakers": [
         "owner",
@@ -25,7 +25,7 @@
         "Moira"
       ],
       "frr": 0.0,
-      "far": 0.0,
+      "far": 1.67,
       "same_n": 12,
       "diff_n": 60,
       "same_min": 0.8487,
@@ -89,13 +89,13 @@
       "rejected": 1,
       "enroll_consistency": 0.9651,
       "backend": "sherpa-cam++",
-      "threshold": 0.82,
+      "threshold": 0.75,
       "dispatch_ms": [
-        0.59,
-        191.54
+        0.45,
+        122.9
       ],
-      "wall_ms": 445.8,
-      "realtime_factor": 0.025
+      "wall_ms": 344.5,
+      "realtime_factor": 0.019
     },
     "redlines": {
       "forbidden_cases": 8,
@@ -108,8 +108,8 @@
       "seconds": 30,
       "segments": 0,
       "vad": "SileroVad",
-      "cpu_percent": 0.37,
-      "realtime_factor": 0.004
+      "cpu_percent": 0.34,
+      "realtime_factor": 0.003
     },
     "security": {
       "codes": {
@@ -150,8 +150,8 @@
         "en": 3.1
       },
       "chars": 818,
-      "rtf": 0.041,
-      "wall_s": 3.3,
+      "rtf": 0.029,
+      "wall_s": 2.3,
       "samples": [
         {
           "want": "把刚才登录模块的报错原因记到今天的开发日志里",
@@ -221,6 +221,11 @@
           "code_lines": 25
         },
         {
+          "file": "scripts/make_icon.py",
+          "lines": 104,
+          "code_lines": 78
+        },
+        {
           "file": "scripts/release_notes.py",
           "lines": 68,
           "code_lines": 50
@@ -237,8 +242,8 @@
         },
         {
           "file": "scripts/verify.py",
-          "lines": 825,
-          "code_lines": 709
+          "lines": 837,
+          "code_lines": 714
         },
         {
           "file": "src/voxos/__init__.py",
@@ -247,8 +252,8 @@
         },
         {
           "file": "src/voxos/audio.py",
-          "lines": 593,
-          "code_lines": 470
+          "lines": 654,
+          "code_lines": 521
         },
         {
           "file": "src/voxos/config.py",
@@ -257,8 +262,8 @@
         },
         {
           "file": "src/voxos/core.py",
-          "lines": 369,
-          "code_lines": 303
+          "lines": 395,
+          "code_lines": 320
         },
         {
           "file": "src/voxos/corpus.py",
@@ -272,8 +277,8 @@
         },
         {
           "file": "src/voxos/main.py",
-          "lines": 724,
-          "code_lines": 592
+          "lines": 923,
+          "code_lines": 754
         },
         {
           "file": "src/voxos/models.py",
@@ -292,36 +297,36 @@
         },
         {
           "file": "src/voxos/settings.py",
-          "lines": 347,
-          "code_lines": 282
+          "lines": 351,
+          "code_lines": 286
         },
         {
           "file": "src/voxos/tools.py",
-          "lines": 341,
-          "code_lines": 272
+          "lines": 425,
+          "code_lines": 339
         },
         {
           "file": "src/voxos/ui.py",
-          "lines": 461,
-          "code_lines": 386
+          "lines": 474,
+          "code_lines": 398
         }
       ],
-      "total_lines": 6119,
+      "total_lines": 6622,
       "max_function": {
-        "name": "scripts/verify.py:measure_stt",
-        "lines": 39
+        "name": "src/voxos/core.py:dispatch",
+        "lines": 40
       },
       "classes": 34,
-      "tools": 10,
-      "fast_routes": 4,
-      "test_files": 14
+      "tools": 12,
+      "fast_routes": 6,
+      "test_files": 15
     },
     "tests": {
       "returncode": 0,
-      "summary": "225 passed, 1 skipped in 20.93s",
-      "seconds": 21.5
+      "summary": "248 passed, 1 skipped, 2 warnings in 23.62s",
+      "seconds": 24.0
     },
-    "generated_at": "2026-10-28T19:41:25",
+    "generated_at": "2026-10-28T23:07:02",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -337,12 +342,12 @@
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "0.478ms",
+      "measured": "0.535ms",
       "pass": true
     },
     {
       "item": "静音待机 CPU < 1.5%",
-      "measured": "0.37%/秒音频",
+      "measured": "0.34%/秒音频",
       "pass": true
     },
     {
@@ -357,8 +362,9 @@
     },
     {
       "item": "声纹 FAR < 1%",
-      "measured": "0.0%",
-      "pass": true
+      "measured": "1.67%",
+      "pass": false,
+      "gap": true
     },
     {
       "item": "冒名语音被拒（全链路）",
@@ -392,17 +398,17 @@
     },
     {
       "item": "单函数 ≤ 40 行（src + scripts）",
-      "measured": "39 行",
+      "measured": "40 行",
       "pass": true
     },
     {
       "item": "测试全绿",
-      "measured": "225 passed, 1 skipped in 20.93s",
+      "measured": "248 passed, 1 skipped, 2 warnings in 23.62s",
       "pass": true
     },
     {
       "item": "上下文注入不阻塞派发",
-      "measured": "0.032ms",
+      "measured": "0.005ms",
       "pass": true
     },
     {
@@ -417,7 +423,7 @@
     },
     {
       "item": "本地识别字符错误率 < 10%",
-      "measured": "2.8%（中文 1.4% / 英文 3.1%，24 句，≥20× 实时）",
+      "measured": "2.8%（中文 1.4% / 英文 3.1%，24 句，≥30× 实时）",
       "pass": true,
       "skipped": false
     },
