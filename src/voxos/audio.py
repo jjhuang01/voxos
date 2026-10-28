@@ -424,8 +424,10 @@ def make_stt(cfg: Config, hotwords: list[str] | None = None) -> SttEngine:
     if backend == "local_whisper":
         return LocalWhisperStt(str(cfg.get("stt.model", "small")), hotwords)
     if backend == "sense_voice":
-        return SenseVoiceStt(str(cfg.get("stt.model_dir", ".voxos/models/sense-voice")),
-                             int(cfg.get("stt.num_threads", 2)))
+        # 必须走 cfg.path：model_dir 是相对路径，相对的是数据根，不是当前工作目录。
+        # 写成 cfg.get 会让「在 /tmp 下跑」和「在仓库根跑」解析出两个不同的目录。
+        model_dir = cfg.path("stt.model_dir", ".voxos/models/sense-voice")
+        return SenseVoiceStt(str(model_dir), int(cfg.get("stt.num_threads", 2)))
     return ScriptedStt([])
 
 
@@ -445,7 +447,7 @@ def supports_hotwords(cfg: Config) -> bool:
 
 def refresh_hotwords(cfg: Config, workspace: str | Path | None = None, limit: int | None = None) -> list[str]:
     """扫描工作区文件名/依赖名生成热词表。只对 `HOTWORD_BACKENDS` 里的后端有意义。"""
-    root = Path(os.path.expanduser(str(workspace or cfg.get("workspace.default_code_dir", "~"))))
+    root = Path(os.path.expanduser(str(workspace))) if workspace else cfg.path("workspace.default_code_dir", "~")
     cap = int(limit or cfg.get("audio.hotwords_max", 2000))
     words: list[str] = []
     custom = cfg.res_path("audio.hotwords_path", "config/hotwords.txt")

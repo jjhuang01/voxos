@@ -22,7 +22,7 @@
 | 7 | 角色隔离（OPS 不可写文件） | 必须 | 拒绝并播报「当前角色 OPS 没有…的权限」 | ✅ |
 | 8 | 医疗草稿强制标记 | 必须 | 结果前缀`【未审核草稿】` | ✅ |
 | 9 | 单函数 ≤ 40 行 | 全部 | 最长 **39 行**（`core.dispatch`） | ✅ |
-| 10 | 测试全绿 | 100% | **218 项：217 passed + 1 skipped**（约 25s；skip 是缺 sherpa-onnx 时的互补分支） | ✅ |
+| 10 | 测试全绿 | 100% | **219 项：218 passed + 1 skipped**（约 25s；skip 是缺 sherpa-onnx 时的互补分支） | ✅ |
 | 11 | 跨站 / 无令牌请求被拦截 | 必须 | **401 / 403 / 200** 三个码全对，被拒请求一次都没执行 | ✅ |
 | 12 | 上下文注入不阻塞派发 | p95 < 5ms | **0.01ms**（修复前同步调 osascript 为 271ms） | ✅ |
 | 13 | 设置写回保住注释 | 必须 | 改值、保注释、写到 `--config` 指定文件、非法值零写入 | ✅ |
@@ -117,7 +117,7 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 | 模块 | 行数 | 职责 |
 | :--- | ---: | :--- |
 | `main.py` | 699 | CLI 编排 / 守护循环 / 确认闸门 |
-| `audio.py` | 591 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
+| `audio.py` | 593 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
 | `ui.py` | 461 | 状态总线 / SSE / Earcon / 本地接口 |
 | `core.py` | 369 | 快慢双通道路由 / 多意图切分 / LLM 客户端 |
 | `settings.py` | 347 | 字段模式 / 范围校验 / 保留注释的 TOML 写回 / 撤销 |
@@ -126,10 +126,10 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 | `dsp.py` | 281 | 纯函数信号处理（零 I/O，可离线测） |
 | `corpus.py` | 224 | 验收语料生成 |
 | `registry.py` | 191 | 工具契约 / `@tool` 自省 / 注册表 |
-| `config.py` | 173 | TOML + 环境变量 + 资源根/数据根分离 |
+| `config.py` | 175 | TOML + 环境变量 + 资源根/数据根分离 |
 | `models.py` | 158 | 模型下载 / 校验 / 原子替换（`voxos models`） |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **4187** | 10 个工具 / 4 条快通道 / 218 项测试 |
+| **合计** | **4191** | 10 个工具 / 4 条快通道 / 219 项测试 |
 
 - 最长函数 **39 行**（`scripts/verify.py:measure_stt`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；
@@ -162,6 +162,11 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
   `<prefix>/share/voxos`，`redlines 11`、页面 200 且令牌已注入、错令牌 401
 - 模型完整性：CAM++ / Silero / SenseVoice / tokens 四个文件已按实测值填入 SHA256，下载走 `.part` + 校验后原子替换
 - Silero VAD 真实推理：真实语音检出率 92%，静音误报 0%，算力 3.9ms / 秒音频
+- 从 GitHub Release 装出来的包真能下模型：`gh release download` → `pipx install` →
+  `voxos models --proxy ...` 下齐 268MB（四个文件 SHA256 全对），`voxos doctor` 里
+  声纹模型从「缺失（降级）」变成真实路径
+- 安装布局下 SenseVoice 真实转写：`say` 合成「Siri，检查一下服务器负载」→ int8 模型
+  在**任意工作目录**下都能找到模型并转写（这条测出了一个真 bug，见下）
 
 **未验证（不要当成已实现）**
 | 项 | 为什么没测 | 风险 |
@@ -186,7 +191,7 @@ cd voxos
 make setup                         # 首次：建 .venv 并装依赖（约 20s）
 python scripts/fetch_models.py     # 首次：CAM++ 与 Silero（约 28MB，必需）
                                    #       默认含 SenseVoice（229MB，可选）；--no-asr 只取声纹与 VAD
-make test                          # 218 passed
+make test                          # 219 passed
 make verify                        # 回归模式：18 通过 + 1 项 GAP
 make verify-release                # 发布门禁：GAP / SKIP 也算不通过
 make demo                          # 真实语音端到端（沙箱写盘）

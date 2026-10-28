@@ -33,6 +33,9 @@ voxos models --no-asr
 voxos doctor
 ```
 
+> 顺序不能反：`pipx install --force` 会**重建 venv**，把 inject 进去的依赖一起清掉。
+> 升级版本时按 `install --force` → `inject` → `doctor` 三步走，别只看第一条命令的退出码。
+
 装完就有的命令：
 
 ```bash
@@ -43,7 +46,8 @@ voxos run                 # 守护进程 + 胶囊
 voxos text "Siri，检查一下服务器负载"   # 不打字说话，直接打字
 ```
 
-**数据落在哪**：模型、声纹、日志、快照、状态都在 `~/.voxos/`（可用 `VOXOS_HOME` 改），
+**数据落在哪**：模型、声纹、日志、快照、状态都在 `~/.voxos/`
+（`VOXOS_HOME` 换的是**家目录**，默认 `$HOME`，设成 `/data/u` 就落到 `/data/u/.voxos/`），
 不在安装目录里——`pipx upgrade` 重建 venv 时不会把你 267MB 的模型一起删掉。
 只读资源（红线策略、胶囊页面）跟着安装走。
 
@@ -58,7 +62,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 218 项测试
+make test                                    # 219 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
 ```
@@ -207,7 +211,7 @@ voxos/
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 218 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/文档自洽
+└── tests/                  # 219 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/文档自洽
 ```
 
 ## 四条关键设计决策

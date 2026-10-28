@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from voxos import audio, corpus
-from voxos.config import load
+from voxos.config import Config, load
 
 REPO = Path(__file__).resolve().parents[1]
 MODEL_DIR = REPO / ".voxos" / "models" / "sense-voice"
@@ -70,6 +70,27 @@ def test_hotwords_only_apply_to_backends_that_support_them():
     assert audio.supports_hotwords(cfg.with_overrides(**{"stt.backend": "local_whisper"}))
     assert not audio.supports_hotwords(cfg.with_overrides(**{"stt.backend": "sense_voice"}))
     assert not audio.supports_hotwords(cfg.with_overrides(**{"stt.backend": "scripted"}))
+
+
+def test_relative_model_dir_resolves_against_data_root(tmp_path: Path, monkeypatch):
+    """相对 model_dir 要按**数据根**解析，不能按当前工作目录。
+
+    这条是装完之后真跑才发现的：`pipx install` 后模型在 `~/.voxos/models`，
+    而 `cfg.get("stt.model_dir")` 原样返回 `.voxos/models/sense-voice`——
+    只有恰好在 `$HOME` 下启动才找得到，换个目录就报「缺 model.int8.onnx」。
+    """
+    seen: list[str] = []
+
+    class Recorder:
+        def __init__(self, model_dir, num_threads=2):  # noqa: ANN001
+            seen.append(str(model_dir))
+
+    monkeypatch.setattr(audio, "SenseVoiceStt", Recorder)
+    data_root = tmp_path / "home"
+    cfg = Config({"stt": {"backend": "sense_voice", "model_dir": ".voxos/models/sense-voice"}},
+                 root=tmp_path, data_root=data_root)
+    audio.make_stt(cfg)
+    assert seen == [str(data_root / ".voxos" / "models" / "sense-voice")]
 
 
 def test_special_tags_are_stripped():

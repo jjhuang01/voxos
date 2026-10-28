@@ -31,7 +31,9 @@ def _default_data_root() -> Path:
     还可能根本不可写。所以源码布局照旧（数据就在仓库里），安装布局落到家目录，
     `.voxos/models/...` 自然变成 `~/.voxos/models/...`。
 
-    可用 `VOXOS_HOME` 覆盖（多实例、CI、测试）。
+    可用 `VOXOS_HOME` 覆盖（多实例、CI、测试）。它替换的是**家目录**，不是
+    `.voxos` 本身：设成 `/data/u` 之后，配置里的 `.voxos/models` 落到
+    `/data/u/.voxos/models`。这样配置里的路径写法不必随根目录变化。
     """
     override = os.environ.get("VOXOS_HOME")
     if override:
