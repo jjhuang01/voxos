@@ -148,7 +148,7 @@
 
 ### Task 1.8 工程化
 
-- [x] 328 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
+- [x] 336 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
       `scripts/audit_ui.py` 12 项界面回归（`make audit-ui`），`scripts/soak.py` 长稳（`make soak`）。
 - [x] 全模块单函数 ≤ 40 行（最长 40 行，`core.dispatch`）、核心五模块共 8 个类、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README。
@@ -349,11 +349,25 @@
       **长句解码线性变慢**（0.5s→22ms，12s→283ms，实测见 `docs/VOICE.md §3.2`）。
       验收：首字 < 300ms；胶囊有实时字幕；12s 长句解码不再线性。
 
-- [ ] **Task 2.11 TTS 流式 + 首字节降级（P1，等 API key）**。
-      买**豆包语音合成 2.0 流式**（火山）；`CosyVoice2` 自托管与系统 `say` 作降级。
-      工程上三件事：①**按句流式**——LLM 产出第一个句子就送 TTS，不等全文；
-      ②**首字节超时降级**——>1.5s 没出首字节就切备用供应商；
-      ③**保留本地兜底**——断网也能出声。
+- [~] **Task 2.11 TTS 流式 + 首字节降级（P1，客户端已就绪，等 API Key）**。
+      **0.1.27 已写好 `src/voxos/tts.py`**，接口形状照官方文档抄（《HTTP Chunked/SSE
+      单向流式-V3》），不是猜的：`POST /api/v3/tts/unidirectional`，
+      `X-Api-Key`（新版控制台）或 `X-Api-App-Id`+`X-Api-Access-Key`（旧版），
+      `X-Api-Resource-Id: seed-tts-2.0`，body 里 `audio_params.format = "pcm"`。
+      响应是一串首尾相接的 JSON，音频块 `{"code":0,"data":"<base64>"}`，
+      结束 `{"code":20000000}`。
+
+      三个决定：①用**单向流式 HTTP** 不用双向 WebSocket——我们已经是「一整句拿到手
+      再送合成」，双向那条是给「边生成边灌字」用的，现在换等于多养一个长连接；
+      ②要 `pcm` 不要默认 `mp3`，流式播放不想再解一层码；③`tts.py` **不碰播放设备**，
+      所以能拿假 HTTP 服务器完整测出来（8 项，见 `tests/test_tts.py`）。
+
+      明天买到 Key 之后只剩一步：改 `~/.voxos/settings.toml` 的 `[tts]` 三行，
+      `voxos doctor` 的「语音合成」那行就会变。**没配 Key 的机器行为一个字都不变**，
+      云端失败自动退回系统 `say` 并把原因留在 `doctor` 里。
+
+      还差：真机听感验收、「边生成边播」（要 LLM 流式 + WebSocket 双向）、
+      CosyVoice2 本地兜底。
       验收：大模型路径「说完到出声」< 1.5s；拔网线仍能出声。
 
 - [x] **Task 2.12 打断时截断上下文（0.1.26 已完成）**。

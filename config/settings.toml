@@ -65,6 +65,18 @@ prompts_dir = "config/prompts"        # 随包提示词（升级会换掉）
 user_prompts_dir = ".voxos/prompts"   # 你自己的覆盖版（升级不丢，存盘即生效）
 extra_body = ""               # 其它渠道私有字段，JSON 字符串，如 '{"reasoning_effort":"low"}'
 
+[tts]
+provider = "say"              # say | doubao。**默认 say**：没买接口的机器行为一个字都不变
+# 豆包语音合成 2.0（火山引擎）。接口形状来自官方文档《HTTP Chunked/SSE 单向流式-V3》
+api_key = ""                  # 新版控制台：填这一项就够
+app_id = ""                   # 旧版控制台：app_id + access_key 两个都要
+access_key = ""
+resource_id = "seed-tts-2.0"  # 决定模型版本与计费商品；声音复刻是 seed-icl-2.0
+speaker = "zh_female_shuangkuaisisi_moon_bigtts"
+sample_rate = 24000           # 必须和播放端一致；改这里不用改代码
+timeout_s = 8                 # 同时管连接与读：首字节迟迟不来会抛超时 → 退回系统 say
+uid = "voxos"                 # 请求体里的 user.uid，服务端用来算用量归属
+
 [workspace]
 daily_log_dir = "~/Documents/DevLogs"
 default_code_dir = "~/Projects"

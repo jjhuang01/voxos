@@ -32,6 +32,7 @@ __all__ = [
     "RiskLevel", "Tool", "Verdict", "REGISTRY", "FAST_ROUTES", "tool", "build_schema",
     "Guard", "Executor", "ensure_tools", "snapshot_file", "restore_latest", "human_name",
     "llm_ready", "llm_extra", "provider", "history", "reset_history",
+    "note_spoken", "note_tts_failure", "tts_failure",
 ]
 
 
@@ -102,6 +103,23 @@ def note_spoken(full: str, spoken: str) -> None:
     if spoken == full:
         return                 # 一句没漏，不用改
     _HISTORY[-1]["content"] = spoken + "……（被打断，后面没念）"
+
+
+_TTS_FAILURE: dict[str, str] = {}
+
+
+def note_tts_failure(reason: str) -> None:
+    """云端合成失败了。**必须记下来**。
+
+    用户听到的是系统 `say` 的机器腔，但「为什么不是那个好听的声音」得能查到——
+    否则下一次只会觉得「这个功能时好时坏」，而且没有任何线索。
+    """
+    _TTS_FAILURE["last"] = (reason or "").strip()[:200]
+
+
+def tts_failure() -> str:
+    """最近一次云端合成失败的原因（没失败过就是空串）。"""
+    return _TTS_FAILURE.get("last", "")
 
 
 def chat(

@@ -650,7 +650,7 @@ def _dispatch_loop(runtime: Runtime, pipeline: audio.AudioPipeline,
         # 听不懂的时候只显示、不朗读：常驻监听会把屋里所有闲聊都收进来，
         # 每句都念一遍「还没学会这句」，很快就变成噪音了。
         if result.reply and result.route != "ignore" and runtime.cfg.flag("ui.speak", True):
-            _speak_async(result.reply, pipeline)
+            _speak_async(result.reply, pipeline, runtime.cfg)
 
 
 # 胶囊上那行字要说清「它到底做了什么」：一律写「完成」的话，
@@ -661,9 +661,12 @@ _RESULT_WORD: dict[str, tuple[str, str]] = {
 }
 
 
-def _speak_async(text: str, pipeline: audio.AudioPipeline) -> None:
-    """TTS 放到后台：说 3 秒不能把麦克风采集卡住 3 秒。"""
-    threading.Thread(target=_speak, args=(text, pipeline), daemon=True).start()
+def _speak_async(text: str, pipeline: audio.AudioPipeline, cfg: Config) -> None:
+    """TTS 放到后台：说 3 秒不能把麦克风采集卡住 3 秒。
+
+    `cfg` 每次现传：设置页改了 TTS 供应商，下一句就该生效，不用重启。
+    """
+    threading.Thread(target=_speak, args=(text, pipeline, cfg), daemon=True).start()
 
 
 _TTS: dict[str, object] = {"proc": None, "owner": None}
@@ -685,7 +688,34 @@ def stop_speaking() -> bool:
     return True
 
 
-def _speak(text: str, pipeline: audio.AudioPipeline) -> None:
+def _say_locally(piece: str) -> bool:
+    """系统 `say` 念一句。返回是否念完。"""
+    proc = subprocess.Popen(["say", "-r", "220", piece])
+    _TTS["proc"] = proc
+    return proc.wait(timeout=15) == 0
+
+
+def _say_one(piece: str, cfg: Config, owner: object) -> bool:
+    """念一句：云端优先，云端不行就退回系统 `say`。
+
+    **降级必须是自动的**：TTS 服务挂了、Key 过期、断网，用户听到的应该是
+    「机器腔的一句话」，而不是「一片安静」——安静会让人以为整台机器死了。
+    """
+    from . import tts                     # 只有真要出声时才导入
+    if tts.available(cfg):
+        try:
+            return tts.speak(piece, cfg, lambda: _is_stale(owner))
+        except Exception as exc:          # noqa: BLE001 - 任何失败都该退回本地
+            core.note_tts_failure(str(exc))
+    return _say_locally(piece)
+
+
+def _is_stale(owner: object) -> bool:
+    """这一轮播报还该继续吗：被打断了，或者已经换人了。"""
+    return bool(_TTS.get("stopped")) or _TTS.get("owner") is not owner
+
+
+def _speak(text: str, pipeline: audio.AudioPipeline, cfg: Config) -> None:
     """播报。一句一句念，念完一句记一句。
 
     以前是 `say text[:60]`：一句话被硬切在第 60 个字上，而且**不知道播到哪**，
@@ -696,20 +726,18 @@ def _speak(text: str, pipeline: audio.AudioPipeline) -> None:
     都会把 `_TTS["proc"]` 清成 None 并提前放行回声门，新的播报还在响，
     系统却以为它结束了。
     """
-    if not shutil.which("say"):
-        return
-    from . import dsp                    # numpy 别拖进 --version 这类快路径
+    from . import dsp, tts               # numpy 别拖进 --version 这类快路径
+    if not tts.available(cfg) and not shutil.which("say"):
+        return                           # 两条路都没有：一句话也念不出来
     owner = object()
     _TTS.update(owner=owner, stopped=False, proc=None)
     pipeline.echo.tts_start()
     heard: list[str] = []
     try:
         for piece in dsp.sentences(text):
-            if _TTS.get("stopped") or _TTS.get("owner") is not owner:
+            if _is_stale(owner):
                 break
-            proc = subprocess.Popen(["say", "-r", "220", piece])
-            _TTS["proc"] = proc
-            if proc.wait(timeout=15) == 0:
+            if _say_one(piece, cfg, owner):
                 heard.append(piece)
     except (subprocess.SubprocessError, OSError):
         pass
@@ -937,6 +965,7 @@ def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
         ("声纹模型", str(cfg.path("audio.speaker_model", "")) if cfg.path("audio.speaker_model", "").exists() else "缺失（降级）"),
         ("声纹档案", "已录入" if cfg.path("audio.voiceprint_profiles").exists() else "未录入"),
         ("LLM", _llm_note(cfg)),
+        ("语音合成", _tts_note(cfg)),
         ("识别后端", _hotword_note(cfg, [])),
         ("输入设备", _mic_note(cfg)),
         ("VAD 后端", _vad_note(cfg)),
@@ -1031,6 +1060,17 @@ def _llm_note(cfg: Config) -> str:
     if ready:
         return f"{cfg.get('llm.model')} @ {cfg.get('llm.base_url')}（思考 {cfg.get('llm.thinking', 'auto')}）"
     return f"{why}（走快通道 + 离线兜底）"
+
+
+def _tts_note(cfg: Config) -> str:
+    """念出来的是谁的声音。降级到系统 `say` 时要说清为什么——不然只会觉得时好时坏。"""
+    from . import tts
+
+    ok, why = tts.probe(cfg)
+    if ok:
+        return why
+    last = core.tts_failure()
+    return f"{why}（上次失败：{last}）" if last else why
 
 
 def _hotword_note(cfg: Config, words: list[str]) -> str:

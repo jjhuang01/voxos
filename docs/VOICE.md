@@ -366,9 +366,56 @@ $ .venv/bin/python scripts/voice_bench.py endpoint --real
 **建议**：买**豆包语音合成 2.0 流式**。理由：中文自然度第一梯队、支持流式、
 支持声音复刻（将来做「你自己的声音」不用换供应商）。工程上要做的三件事：
 
-1. **按句流式**：LLM 一产出第一个句子就送 TTS，不等全文。
-2. **首字节超时降级**：>1.5s 没出首字节就切备用供应商，别让用户干等。
-3. **保留本地兜底**：`say` / CosyVoice 自托管，断网也能出声（现在已有 `say`）。
+1. **按句流式**：LLM 一产出第一个句子就送 TTS，不等全文。→ 已做（`dsp.sentences`）
+2. **首字节超时降级**：没出首字节就切备用供应商，别让用户干等。→ 已做（见下）
+3. **保留本地兜底**：`say` / CosyVoice 自托管，断网也能出声。→ 已做（`say`）
+
+#### 客户端已经写好了（0.1.27），明天只差一个 Key
+
+`src/voxos/tts.py`。接口形状**照官方文档抄的**，不是猜的
+（《HTTP Chunked/SSE 单向流式-V3》）：
+
+```
+POST https://openspeech.bytedance.com/api/v3/tts/unidirectional
+Header  X-Api-Key（新版控制台）  或  X-Api-App-Id + X-Api-Access-Key（旧版）
+        X-Api-Resource-Id: seed-tts-2.0
+Body    {"user": {"uid": "voxos"},
+         "req_params": {"text": "...", "speaker": "zh_female_shuangkuaisisi_moon_bigtts",
+                        "audio_params": {"format": "pcm", "sample_rate": 24000}}}
+响应    一串首尾相接的 JSON：音频块 {"code":0,"data":"<base64>"}，
+        结束 {"code":20000000,"message":"ok"}，出错是别的 code
+```
+
+三个刻意的决定：
+
+- **用「单向流式 HTTP」而不是「双向流式 WebSocket」。** 双向那条是为「边想边说」
+  设计的（LLM 还在生成就往里灌字），我们现在的链路是「一整句已经拿到手 → 送合成」，
+  单向就够，少一个长连接要维护。等真要做「边生成边播」再换。
+- **要 `pcm` 不要默认的 `mp3`。** 流式播放要的就是裸采样，不想再解一层码，
+  也不想在流边界上多一个解码缓冲。
+- **`tts.py` 不碰播放设备。** 它只负责「文本 → PCM 字节流」，播放留在 `main._speak`。
+  这样这一层能拿一个假 HTTP 服务器完整测出来——**不需要麦克风，也不需要真 Key**。
+
+明天拿到 Key 之后要做的只有一步——改 `~/.voxos/settings.toml` 里那三行：
+
+```toml
+[tts]
+provider = "doubao"
+api_key = "你的 Key"
+speaker = "zh_female_shuangkuaisisi_moon_bigtts"   # 换成你买的音色 ID
+```
+
+然后 `voxos doctor`，「语音合成」那一行会从
+`系统 say（未启用云端合成）` 变成 `豆包 seed-tts-2.0 / <音色>`。
+改完不用重启：`_speak` 每次播报都会重新读配置。
+
+> 目前没有 `voxos settings set` 这个子命令（设置页也只管它认识的字段），
+> 所以 TTS 这几项是手改文件。这是有意的：**在真跑通之前不给你一个假装能用的按钮。**
+
+`tts.available()` 不成立时**一切照旧走系统 `say`**——没买接口的机器行为一个字都不变。
+云端失败（Key 过期 / 断网 / 服务抖动）会自动退回 `say` 并在 `doctor` 里留下原因：
+用户听到的应该是「机器腔的一句话」，而不是「一片安静」——安静会让人以为整台机器死了。
+
 
 ### 6.4 降噪 / AEC
 
