@@ -22,7 +22,7 @@
 | 7 | 角色隔离（OPS 不可写文件） | 必须 | 拒绝并播报「当前角色 OPS 没有…的权限」 | ✅ |
 | 8 | 医疗草稿强制标记 | 必须 | 结果前缀`【未审核草稿】` | ✅ |
 | 9 | 单函数 ≤ 40 行 | 全部 | 最长 **40 行**（`core.dispatch`），贴着预算顶 | ✅ |
-| 10 | 测试全绿 | 100% | **310 项：309 passed + 1 skipped**（约 24s；skip 是缺 sherpa-onnx 时的互补分支） | ✅ |
+| 10 | 测试全绿 | 100% | **311 项：310 passed + 1 skipped**（约 24s；skip 是缺 sherpa-onnx 时的互补分支） | ✅ |
 | 11 | 跨站 / 无令牌请求被拦截 | 必须 | **401 / 403 / 200** 三个码全对，被拒请求一次都没执行 | ✅ |
 | 12 | 上下文注入不阻塞派发 | p95 < 5ms | **0.01ms**（修复前同步调 osascript 为 271ms） | ✅ |
 | 13 | 设置写回保住注释 | 必须 | 改值、保注释、写到 `--config` 指定文件、非法值零写入 | ✅ |
@@ -152,10 +152,10 @@ FRR = FAR = 0 的点，说明后端分得开，差的只是「一个阈值服务
 | `models.py` | 158 | 模型下载 / 校验 / 原子替换（`voxos models`） |
 | `scheduler.py` | 154 | 定时任务：落 JSON + 5 秒轮询线程，存那句话本身 |
 | `prompts.py` | 123 | 内置提示词系统：三层来源 / 角色叠加 / 按 mtime 热更新 |
-| `sandbox.py` | 192 | 命令沙箱：抄 codex 的 seatbelt 三档（`read-only` / `workspace-write` / `danger-full-access`） |
+| `sandbox.py` | 201 | 命令沙箱：抄 codex 的 seatbelt 三档（`read-only` / `workspace-write` / `danger-full-access`） |
 | `messaging.py` | 91 | 发消息：微信没有 AppleScript 字典，只能生成 System Events 按键脚本 |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **5738** | 18 个工具 / 10 条快通道 / 310 项测试 |
+| **合计** | **5747** | 18 个工具 / 10 条快通道 / 311 项测试 |
 
 - 最长函数 **40 行**（`src/voxos/core.py:dispatch`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；

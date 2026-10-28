@@ -18,8 +18,12 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 - **可写根画错了**。`workspace-write` 原来只放行 `~/Projects` + `~/Documents/DevLogs`
   + 临时目录——用户在自己项目里说「跑一下测试」，pytest 连 `.pytest_cache` 都写不
   进去，报错和「命令有 bug」长得一模一样。现在按 codex 的语义补上**启动目录**，
-  并新增 `workspace.write_roots` 配置项。`/` 和家目录本身不算：App 由
-  LaunchServices 拉起时 cwd 就是 `/`，算进去等于不设边界。
+  并新增 `workspace.write_roots` 配置项。
+
+  排除条件也踩了一次坑：一开始写成「cwd 必须在家目录下才算」，于是项目放在外置盘
+  （`/Volumes/Work/…`）或 `/opt` 的人照样被拒。最终规则是**只排 `/`、家目录本身、
+  以及家目录的祖先**——`cd /Users` 之后一条 `(subpath "/Users")` 就等于放行整个
+  家目录，那个必须排；外置盘本来受 Unix 权限和 SIP 管，放开不会凭空多出写权限。
 
 - **`/dev` 从整段放行改成逐个节点**。`(subpath "/dev")` 等于允许
   `dd of=/dev/disk2`（要 root 才生效，但没必要开）。现在只开

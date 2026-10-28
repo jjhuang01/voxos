@@ -101,13 +101,22 @@ def _as_list(raw: object) -> list[str]:
 
 
 def _start_dir() -> Path | None:
-    """从哪个目录启动的。`/` 和家目录本身返回 None——那两个等于没有边界。"""
+    """从哪个目录启动的。`/`、家目录本身、以及**家目录的祖先**返回 None。
+
+    为什么要排祖先而不只是家目录：`cd /Users` 再跑，cwd 是 `/Users`，
+    一条 `(subpath "/Users")` 就等于放行整个家目录——边界看着还在，其实没了。
+
+    反过来，**不能要求 cwd 必须在家目录下**：项目放在外置盘（`/Volumes/Work/…`）
+    或 `/opt` 是常见做法，排掉的话用户在自己的项目里跑测试会被莫名拒绝，
+    而报错和「命令有 bug」长得一样。那些位置本来就受 Unix 权限和 SIP 管，
+    seatbelt 放开也不会凭空多出写权限。
+    """
     try:
         start = Path.cwd()
     except OSError:                     # cwd 被删了
         return None
     home = Path.home()
-    return start if start not in (Path("/"), home) and home in start.parents else None
+    return None if start == home or start in home.parents else start
 
 
 def profile(cfg: Config) -> str:

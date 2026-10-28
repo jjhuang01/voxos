@@ -35,22 +35,38 @@ def test_network_flag_opens_only_that_hole(cfg):
 
 
 def test_start_dir_is_a_write_root_but_slash_is_not(cfg, monkeypatch):
-    """启动目录要能写，但 `/` 和家目录本身不能算——那两个等于没有边界。
+    """启动目录要能写，但 `/`、家目录、以及家目录的**祖先**都不能算。
 
     真实症状：用户在自己项目里说「跑一下测试」，pytest 连 `.pytest_cache`
     都写不进去。命令没错，是边界画错了（codex 的 workspace-write 也是 cwd 起步）。
-    而 App 由 LaunchServices 拉起时 cwd 就是 `/`，所以「有 cwd 就放行」必须
-    排除它，否则每个从 Finder 打开的命令都是全开。
+
+    排祖先不只是为了 `/`：`cd /Users` 之后一条 `(subpath "/Users")` 就等于放行
+    整个家目录，边界看着还在，其实没了。
+
+    这里直接钉 `_start_dir()` 而不去 chdir：`~/Documents` 在 CI 的 Linux runner
+    上不存在，chdir 会抛 FileNotFoundError——测试本身不该依赖某个目录恰好存在。
     """
     inside = Path.home() / "Documents"
-    monkeypatch.chdir(inside)
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda cls: inside))
     assert inside.resolve() in sandbox.writes_roots(cfg)
 
-    monkeypatch.chdir("/")
-    assert Path("/").resolve() not in sandbox.writes_roots(cfg)
+    for blocked in (Path("/"), Path.home(), *Path.home().parents):
+        monkeypatch.setattr(Path, "cwd", classmethod(lambda cls, b=blocked: b))
+        assert blocked.resolve() not in sandbox.writes_roots(cfg)
 
-    monkeypatch.chdir(Path.home())
-    assert Path.home().resolve() not in sandbox.writes_roots(cfg)
+
+def test_start_dir_outside_home_still_counts(cfg, monkeypatch):
+    """项目在外置盘 / `/opt` 下也要能写。
+
+    要求 cwd 必须在家目录下是个看似稳妥、实际很坏的规则：用户在自己的项目里
+    跑测试会被莫名拒绝，而报错和「命令有 bug」长得一样。这里直接钉
+    `_start_dir()`，不去真建目录——`tmp_path` 落在 `$TMPDIR` 里，那本来就是
+    可写根，断言会白白通过。
+    """
+    external = Path("/Volumes/Work/proj")
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda cls: external))
+    assert sandbox._start_dir() == external
+    assert external in sandbox.writes_roots(cfg)
 
 
 def test_dev_is_not_opened_wholesale(cfg):
