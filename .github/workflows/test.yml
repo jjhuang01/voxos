@@ -3,6 +3,7 @@ name: test
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -36,7 +37,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install build
-      - run: python -m build
+      - name: 构建 wheel 与 sdist
+        run: python -m build
       - name: 脱离源码目录做安装冒烟
         run: |
           python -m venv /tmp/voxos-smoke
@@ -44,3 +46,10 @@ jobs:
           cd /tmp
           /tmp/voxos-smoke/bin/voxos tools
           /tmp/voxos-smoke/bin/python -c "from voxos.config import load; c=load(); assert c.get('audio.chunk_size')"
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: voxos-dist
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 90
