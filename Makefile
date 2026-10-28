@@ -5,7 +5,7 @@ PIP_INDEX ?= https://pypi.tuna.tsinghua.edu.cn/simple
 PIP := $(VENV)/bin/python -m pip install -q -i $(PIP_INDEX) --timeout 15 --retries 2
 export PYTHONPATH := src
 
-.PHONY: setup test verify demo doctor tools audit-ui soak clean
+.PHONY: setup test verify verify-release demo doctor tools audit-ui soak clean
 
 # 一条命令把可跑的仓库变成能跑的仓库：建 .venv 并装齐依赖
 setup:
@@ -24,6 +24,11 @@ test:
 verify:
 	@$(PY) -c "import numpy" 2>/dev/null || { echo "❌ 缺 numpy —— 先跑 make setup"; exit 1; }
 	$(PY) scripts/verify.py
+
+# 发布门禁：GAP / SKIP 不再放行。回归用 `make verify`，发版前必须过这条。
+verify-release:
+	@$(PY) -c "import numpy" 2>/dev/null || { echo "❌ 缺 numpy —— 先跑 make setup"; exit 1; }
+	$(PY) scripts/verify.py --release
 
 demo:
 	@$(PY) -c "import numpy" 2>/dev/null || { echo "❌ 缺 numpy —— 先跑 make setup"; exit 1; }

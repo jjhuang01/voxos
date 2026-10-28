@@ -3,7 +3,7 @@
 > 本文所有数字均由 `scripts/verify.py` 实测产生，不是估算值。
 > 原始数据：`docs/acceptance.json`｜可视化：`docs/ACCEPTANCE.html`｜复现：`make verify`
 
-**结论：18 / 18 项通过。**
+**结论：18 项通过，1 项未达标（中英混说术语召回）。**
 
 生成时间：2026-10-28｜环境：macOS (darwin) / Python 3.13.12 / numpy 2.5.4 / sherpa-onnx 2.0.1
 
@@ -14,7 +14,7 @@
 | # | 验收项 | 门槛 | 实测 | 结论 |
 | :-- | :--- | :--- | :--- | :--- |
 | 1 | 快通道决策延迟 p95 | < 5ms | **0.0008ms**（2000 次） | ✅ |
-| 2 | 端到端触发延迟 p95 | < 500ms | **0.371ms**（30 次，含写日志 + 审计两次落盘） | ✅ |
+| 2 | 端到端触发延迟 p95 | < 500ms | **0.443ms**（30 次，含写日志 + 审计两次落盘；无代理环境另测得 0.371ms） | ✅ |
 | 3 | 声纹误拒率 FRR | < 2% | **0%**（12 次同人试验） | ✅ |
 | 4 | 声纹误受率 FAR | < 1% | **0%**（60 次异人试验） | ✅ |
 | 5 | 冒名语音被拒（全链路） | ≥ 1 条 | **1 条被拒**，本人 2 条正常执行 | ✅ |
@@ -22,7 +22,7 @@
 | 7 | 角色隔离（OPS 不可写文件） | 必须 | 拒绝并播报「当前角色 OPS 没有…的权限」 | ✅ |
 | 8 | 医疗草稿强制标记 | 必须 | 结果前缀`【未审核草稿】` | ✅ |
 | 9 | 单函数 ≤ 40 行 | 全部 | 最长 **39 行**（`core.dispatch`） | ✅ |
-| 10 | 测试全绿 | 100% | **173 passed**（约 20s） | ✅ |
+| 10 | 测试全绿 | 100% | **202 passed**（约 25s） | ✅ |
 | 11 | 跨站 / 无令牌请求被拦截 | 必须 | **401 / 403 / 200** 三个码全对，被拒请求一次都没执行 | ✅ |
 | 12 | 上下文注入不阻塞派发 | p95 < 5ms | **0.01ms**（修复前同步调 osascript 为 271ms） | ✅ |
 | 13 | 设置写回保住注释 | 必须 | 改值、保注释、写到 `--config` 指定文件、非法值零写入 | ✅ |
@@ -116,19 +116,19 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 
 | 模块 | 行数 | 职责 |
 | :--- | ---: | :--- |
-| `main.py` | 543 | CLI 编排 / 守护循环 / 确认闸门 |
-| `audio.py` | 546 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
-| `ui.py` | 372 | 状态总线 / SSE / Earcon / 本地接口 |
-| `core.py` | 332 | 快慢双通道路由 / 多意图切分 / LLM 客户端 |
-| `settings.py` | 293 | 字段模式 / 范围校验 / 保留注释的 TOML 写回 / 撤销 |
-| `tools.py` | 290 | 10 个原子工具 |
+| `main.py` | 680 | CLI 编排 / 守护循环 / 确认闸门 |
+| `audio.py` | 591 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
+| `ui.py` | 449 | 状态总线 / SSE / Earcon / 本地接口 |
+| `core.py` | 356 | 快慢双通道路由 / 多意图切分 / LLM 客户端 |
+| `settings.py` | 345 | 字段模式 / 范围校验 / 保留注释的 TOML 写回 / 撤销 |
+| `tools.py` | 324 | 10 个原子工具 |
 | `dsp.py` | 281 | 纯函数信号处理（零 I/O，可离线测） |
-| `safety.py` | 282 | 红线网关 / 快照 / 执行器 / 审计 |
-| `registry.py` | 144 | 工具契约 / `@tool` 自省 / 注册表 |
+| `safety.py` | 341 | 红线网关 / 快照 / 执行器 / 审计 |
+| `registry.py` | 191 | 工具契约 / `@tool` 自省 / 注册表 |
 | `corpus.py` | 224 | 验收语料生成 |
-| `config.py` | 102 | TOML + 环境变量 |
+| `config.py` | 120 | TOML + 环境变量 |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **3416** | 10 个工具 / 4 条快通道 / 173 项测试 |
+| **合计** | **3909** | 10 个工具 / 4 条快通道 / 202 项测试 |
 
 - 最长函数 **39 行**（`core.dispatch`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；
@@ -172,9 +172,10 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 cd voxos
 make setup                         # 首次：建 .venv 并装依赖（约 20s）
 python scripts/fetch_models.py     # 首次：CAM++ 与 Silero（约 28MB，必需）
-                                   #       加 --all 连 SenseVoice（229MB，可选，缺了就退回 scripted）
-make test                          # 173 passed
-make verify                        # 18/19（1 项 GAP：中英混说术语召回），产出 docs/acceptance.json
+                                   #       默认含 SenseVoice（229MB，可选）；--no-asr 只取声纹与 VAD
+make test                          # 202 passed
+make verify                        # 回归模式：18 通过 + 1 项 GAP
+make verify-release                # 发布门禁：GAP / SKIP 也算不通过
 make demo                          # 真实语音端到端（沙箱写盘）
 make audit-ui                      # 界面回归 12 条（需先 voxos serve）
 make soak MINUTES=30               # 长稳采样，产出 RSS/CPU 曲线

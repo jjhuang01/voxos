@@ -124,10 +124,16 @@ def dispatch(
         return DispatchResult("fast", raw, name, args, reply, _ms(started), [reply])
 
     if cfg.flag("llm.enabled", False) and cfg.get("llm.base_url"):
+        # 记录「已经真的执行过工具」：此后任何失败都不能再走一遍离线规划，
+        # 否则一次派发会因为总结阶段网络抖动被执行两次。
+        state: dict[str, Any] = {"executed": False, "results": []}
         try:
-            return _llm_route(raw, executor, cfg, context or {}, started)
+            return _llm_route(raw, executor, cfg, context or {}, started, state)
         except Exception as exc:
             executor.on_event("blocked", "模型不可用", str(exc))
+            if state["executed"]:
+                return DispatchResult("llm", raw, reply=f"已执行，但总结失败：{exc}",
+                                      latency_ms=_ms(started), results=list(state["results"]))
 
     plan = heuristic_plan(raw, cfg)
     if not plan:
@@ -217,14 +223,27 @@ def _execute_calls(
     results: list[str],
     text: str,
 ) -> tuple[str, dict[str, Any]]:
-    """执行一回合内的所有 tool_call，把结果回填到对话里供模型总结。"""
+    """执行一回合内的所有 tool_call，把结果回填到对话里供模型总结。
+
+    解析失败**不执行**：把坏参数换成 `{}` 会调用带默认参数的工具，
+    一次格式错误就变成一次真实动作。
+    """
     first_name, first_args = "", {}
     for call in calls:
-        name = call["function"]["name"]
+        name = str(call.get("function", {}).get("name", ""))
+        raw = call.get("function", {}).get("arguments")
         try:
-            args = json.loads(call["function"].get("arguments") or "{}")
-        except json.JSONDecodeError:
-            args = {}
+            args = json.loads(raw or "{}")
+        except (json.JSONDecodeError, TypeError):
+            result = "参数不匹配：模型返回的工具参数不是合法 JSON，已拒绝执行"
+            results.append(result)
+            messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result})
+            continue
+        if not isinstance(args, dict):
+            result = "参数不匹配：模型返回的工具参数必须是 JSON 对象，已拒绝执行"
+            results.append(result)
+            messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": result})
+            continue
         first_name, first_args = first_name or name, first_args or args
         result = executor.execute_safely(name, args, text=text)
         results.append(result)
@@ -238,6 +257,7 @@ def _llm_route(
     cfg: Config,
     context: dict[str, Any],
     started: float,
+    state: dict[str, Any] | None = None,
 ) -> DispatchResult:
     messages: list[dict[str, Any]] = [_system_message(cfg, context), {"role": "user", "content": text}]
     schemas = [meta.schema for meta in REGISTRY.values()]
@@ -262,8 +282,12 @@ def _llm_route(
             return DispatchResult("llm", text, first_tool, first_args,
                                   content or "；".join(results), _ms(started), results)
         messages.append(message)
+        if state is not None:
+            state["executed"] = True
         name, args = _execute_calls(calls, messages, executor, results, text)
         first_tool, first_args = first_tool or name, first_args or args
+        if state is not None:
+            state["results"] = list(results)
     return DispatchResult("llm", text, first_tool, first_args, "；".join(results), _ms(started), results)
 
 

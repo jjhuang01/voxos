@@ -8,11 +8,22 @@
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
+
+def _default_root() -> Path:
+    """资源根：源码布局用仓库根；普通安装退到 `<prefix>/share/voxos`。"""
+    source_root = Path(__file__).resolve().parents[2]
+    if (source_root / "config").exists():
+        return source_root
+    installed = Path(sys.prefix) / "share" / "voxos"
+    return installed if (installed / "config").exists() else source_root
+
+
+ROOT = _default_root()
 
 # 环境变量 -> 配置点（演示与 CI 用，避免改文件）
 ENV_MAP = {
@@ -27,6 +38,9 @@ ENV_MAP = {
 }
 
 _TRUE = {"1", "true", "yes", "on"}
+# 这些键即使配置文件里没有，也必须按布尔解析环境变量：
+# 否则 `VOXOS_DRY_RUN=false` 会变成非空字符串，flag() 反而返回 True。
+_BOOL_KEYS = {("llm", "enabled"), ("workspace", "dry_run")}
 
 
 class Config:
@@ -57,7 +71,10 @@ class Config:
         return expanded if expanded.is_absolute() else (self.root / expanded)
 
     def flag(self, dotted: str, default: bool = False) -> bool:
-        return bool(self.get(dotted, default))
+        value = self.get(dotted, default)
+        if isinstance(value, str):
+            return value.strip().lower() in _TRUE
+        return bool(value)
 
     def with_overrides(self, **dotted_values: Any) -> "Config":
         """返回副本，用于测试注入。"""
@@ -77,7 +94,7 @@ def _apply_env(data: dict[str, Any]) -> None:
         if raw is None:
             continue
         node = data.setdefault(section, {})
-        if isinstance(node.get(key), bool):
+        if (section, key) in _BOOL_KEYS or isinstance(node.get(key), bool):
             node[key] = raw.strip().lower() in _TRUE
         else:
             node[key] = raw
@@ -97,6 +114,7 @@ def load(path: str | Path | None = None) -> Config:
 def load_redlines(path: str | Path | None = None) -> dict[str, Any]:
     target = Path(path) if path else ROOT / "config" / "redlines.toml"
     if not target.exists():
-        return {"forbidden": [], "risk": {}, "roles": {}}
+        # 缺策略不是「没有规则」，而是「无法证明任何操作安全」：Guard 会据此拒绝一切。
+        return {"forbidden": [], "risk": {}, "roles": {}, "missing": True}
     with open(target, "rb") as handle:
         return tomllib.load(handle)

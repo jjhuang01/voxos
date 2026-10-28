@@ -197,8 +197,19 @@ def test_backup_lands_next_to_the_config_not_in_the_repo(tmp_path: Path):
     source.write_text("[audio]\nvoiceprint_threshold = 0.80\n", encoding="utf-8")
     cfg = load(source)
     settings.apply(cfg, {"audio.voiceprint_threshold": 0.9})
-    assert settings.backup_path(source) == tmp_path / ".voxos" / "settings.bak"
+    assert settings.backup_path(source).parent == tmp_path / ".voxos"
     assert settings.backup_path(source).exists()
+
+
+def test_two_configs_do_not_share_one_undo_slot(tmp_path: Path):
+    """同目录两份配置共用一个 settings.bak，会让「撤销 A」实际恢复 B。"""
+    first, second = tmp_path / "a.toml", tmp_path / "b.toml"
+    first.write_text('[llm]\nmodel = "A"\n', encoding="utf-8")
+    second.write_text('[llm]\nmodel = "B"\n', encoding="utf-8")
+    assert settings.backup_path(first) != settings.backup_path(second)
+    settings.apply(load(first), {"llm.model": "A2"})
+    settings.apply(load(second), {"llm.model": "B2"})
+    assert settings.restore(first).get("llm.model") == "A"
 
 
 def test_save_roundtrip_all_fields(tmp_path: Path):

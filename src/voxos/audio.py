@@ -83,10 +83,14 @@ class MicSource:
             yield np.asarray(block, dtype=np.float32).reshape(-1)
 
     def close(self) -> None:
+        # stop 失败也必须继续 close：旧实现一个异常就把释放整个跳过。
         try:
             self._stream.stop()
+        except Exception as exc:  # 设备已拔出时 stop 也会抛
+            print(f"[voxos] 停止音频流失败（继续关闭）：{exc}")
+        try:
             self._stream.close()
-        except Exception as exc:  # 设备已拔出时 close 也会抛
+        except Exception as exc:
             print(f"[voxos] 关闭音频流失败（忽略）：{exc}")
 
     def __exit__(self, *exc_info: object) -> None:
@@ -97,11 +101,13 @@ class SelfHealingSource:
     """自愈重连：蓝牙耳机摘下 / USB 声卡拔出 / 合盖休眠后自动恢复监听。"""
 
     def __init__(self, factory: Callable[[], object], backoff_s: float = 2.0,
-                 on_event: Callable[[str, str, str], None] | None = None, max_retries: int = 0) -> None:
+                 on_event: Callable[[str, str, str], None] | None = None, max_retries: int = 0,
+                 on_reset: Callable[[], None] | None = None) -> None:
         self._factory = factory
         self._backoff = backoff_s
         self._on_event = on_event or (lambda *_: None)
         self._max_retries = max_retries
+        self._on_reset = on_reset or (lambda: None)
 
     def __iter__(self) -> Iterator[np.ndarray]:
         import time
@@ -111,22 +117,42 @@ class SelfHealingSource:
             source = None
             try:
                 source = self._factory()
+                # 有些设备源（MicSource）把 start 放在 __enter__ 里。旧实现
+                # 只构造、不进入上下文，真实监听路径读到的是「未启动的流」。
+                enter = getattr(source, "__enter__", None)
+                if callable(enter):
+                    entered = enter()
+                    if entered is not None and hasattr(entered, "__iter__"):
+                        source = entered
                 for chunk in source:  # type: ignore[union-attr]
                     failures = 0
                     yield chunk
             except Exception as exc:
                 failures += 1
+                # 断流前后的音频不能拼成一句话：先让管道丢掉半截缓冲。
+                self._on_reset()
                 self._on_event("blocked", "音频设备异常", f"{exc}（{failures} 次，{self._backoff:.0f}s 后重连）")
                 if self._max_retries and failures >= self._max_retries:
                     raise
                 time.sleep(self._backoff)
             finally:
-                close = getattr(source, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        pass
+                self._release(source)
+
+    @staticmethod
+    def _release(source: object) -> None:
+        exit_context = getattr(source, "__exit__", None)
+        if callable(exit_context):
+            try:
+                exit_context(None, None, None)
+                return
+            except Exception:
+                pass
+        close = getattr(source, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
 
 def concat_with_silence(parts: Iterable[np.ndarray], gap_ms: float = 1200) -> np.ndarray:
@@ -202,6 +228,7 @@ class SileroVad:
         self._h[:] = 0.0
         self._c[:] = 0.0
         self._state[:] = 0.0
+        self._context[:] = 0.0          # v5 的 64 样本上下文也必须清，否则断流后仍带旧音频
         self._pending = np.zeros(0, dtype=np.float32)
 
 
@@ -302,6 +329,8 @@ class ScriptedStt:
 
 class OpenAiStt:
     """云端 Whisper 兼容接口；热词通过 prompt 注入。"""
+
+    remote = True                                  # 音频会离开本机：必须先过声纹
 
     def __init__(self, base_url: str, api_key: str, model: str = "whisper-1",
                  hotwords: list[str] | None = None, timeout: float = 30.0) -> None:
@@ -469,6 +498,13 @@ class AudioPipeline:
         )
         self.mask_mode = self.cfg.flag("audio.mask_mode", False)
 
+    def reset(self) -> None:
+        """设备断流后清掉句级状态：旧缓冲、端点状态和 VAD 上下文都不能跨断流。"""
+        self._ep.reset()
+        reset = getattr(self.vad, "reset", None)
+        if callable(reset):
+            reset()
+
     def run(self, source: Iterable[np.ndarray]) -> Iterator[Utterance]:
         buffer: list[np.ndarray] = []
         last_partial_ms = 0.0
@@ -488,10 +524,11 @@ class AudioPipeline:
             if result is None:                      # 半截话：继续收音，不清缓冲
                 last_partial_ms = sum(item.size for item in buffer) / dsp.SR * 1000.0
                 continue
-            yield result
+            # 先清缓冲再 yield：消费者暂停期间不该继续持有整段 PCM。
             buffer.clear()
             self._ep.reset()
             last_partial_ms = 0.0
+            yield result
         if buffer:
             yield self._finalize(buffer)             # 收尾必产一段，缓冲随之清空
 
@@ -513,6 +550,11 @@ class AudioPipeline:
         audio_ms = audio.size / dsp.SR * 1000.0
         if audio_ms - last_partial_ms < self.partial_interval_ms:
             return None                            # 还没到复查点，省一次 STT
+        if getattr(self.stt, "remote", False):
+            # 远端识别会把音频上传。身份没确认之前，一个字节都不该离开本机。
+            ok, score = self.lock.verify(audio)
+            if not ok:
+                return self._drop(audio_ms, score, "声纹不匹配，已丢弃")
         if not self._ep.should_end(self.stt.transcribe(audio, final=False)):
             return None                            # 半截话，继续等（语义尾词等待）
         return self._finalize(buffer)              # 终稿重新解码，保证文本权威
@@ -532,7 +574,10 @@ class AudioPipeline:
         ok, score = self.lock.verify(audio)
         if not ok:
             return self._drop(audio_ms, score, "声纹不匹配，已丢弃")
-        text = self.stt.transcribe(audio, final=True)
+        try:
+            text = self.stt.transcribe(audio, final=True)
+        except Exception as exc:                   # 单句识别失败不能杀死整条监听
+            return self._drop(audio_ms, score, f"识别失败：{exc}")
         if not text.strip():
             return self._drop(audio_ms, score, "空转写，已丢弃")
         if not self.echo.allow_text(text):

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .config import Config, load, load_redlines
-from .registry import REGISTRY, RiskLevel, Tool, ensure_tools
+from .registry import REGISTRY, RiskLevel, Tool, ensure_tools, validate_args
 
 __all__ = ["Verdict", "Guard", "Executor", "human_name", "snapshot_file", "restore_latest"]
 
@@ -40,13 +41,18 @@ class Guard:
     def __init__(self, redlines: dict[str, Any] | None = None, role: str = "DEVELOPER") -> None:
         redlines = redlines if redlines is not None else load_redlines()
         self.role = role
+        self.missing = bool(redlines.get("missing"))
         self.forbidden = [re.compile(p, re.IGNORECASE) for p in redlines.get("forbidden", [])]
         self.irreversible = [(re.compile(p, re.IGNORECASE), label)
                              for p, label in redlines.get("confirm", {}).items()]
         self.risk = {k: RiskLevel(str(v).upper()) for k, v in redlines.get("risk", {}).items()}
-        self.policy = dict(redlines.get("roles", {}).get(role, {"allow": ["*"], "draft": False}))
+        # 未知角色必须失败关闭：拼错一个角色名不能等于「拿到全部权限」。
+        self.policy = dict(redlines.get("roles", {}).get(role, {"allow": [], "draft": False}))
 
     def inspect(self, name: str, args: dict[str, Any]) -> Verdict:
+        if self.missing:
+            return Verdict(RiskLevel.RED_FORBIDDEN,
+                           "安全策略文件缺失，已拒绝全部工具；请恢复 config/redlines.toml")
         payload = f"{name} {json.dumps(args, ensure_ascii=False, default=str)}"
         for pattern in self.forbidden:
             if pattern.search(payload):
@@ -90,20 +96,29 @@ def human_name(name: str) -> str:
 # ---------------------------------------------------------------- 快照与回滚
 
 def snapshot_file(path: Path, backup_root: Path) -> Path | None:
-    """写盘前快照：`<backup>/<时间戳>/<文件名>` + `meta.json`（记录原始绝对路径）。"""
-    if not path.exists():
-        return None
+    """写盘前快照：`<backup>/<时间戳>/<文件名>` + `meta.json`（记录原始绝对路径）。
+
+    正文与元数据必须用不同路径：目标文件本身就叫 `meta.json` 时，旧实现会让
+    元数据覆盖唯一的备份正文，回滚把用户文件变成一段 JSON。
+    文件尚不存在也留一条 `exists=false` 记录，这样「新建」也能撤销。
+    """
+    exists = path.exists()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     batch = backup_root / stamp
     batch.mkdir(parents=True, exist_ok=True)
-    target = batch / path.name
-    shutil.copy2(path, target)
+    stored = "data.bin" if path.name == "meta.json" else path.name
+    target = batch / stored
+    digest = ""
+    if exists:
+        shutil.copy2(path, target)
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
     (batch / "meta.json").write_text(
-        json.dumps({"original": str(path.resolve()), "name": path.name, "ts": stamp}, ensure_ascii=False),
+        json.dumps({"original": str(path.resolve()), "name": path.name, "stored": stored,
+                    "exists": exists, "sha256": digest, "ts": stamp}, ensure_ascii=False),
         encoding="utf-8",
     )
     (backup_root / "LATEST").write_text(str(batch), encoding="utf-8")
-    return target
+    return target if exists else None
 
 
 def _latest_batch(backup_root: Path, filename: str | None = None) -> Path:
@@ -124,13 +139,31 @@ def _batch_meta(meta_path: Path) -> dict[str, Any]:
 
 
 def restore_latest(backup_root: Path, filename: str | None = None) -> Path:
-    """把最近一次快照写回原路径，返回被恢复的原始文件路径。"""
+    """把最近一次快照写回原路径，返回被恢复的原始文件路径。
+
+    回滚本身也要可撤销：覆盖前先把当前版本再存一份。备份正文要校验摘要，
+    并且只接受「原始路径的 basename 与元数据 name 一致」的批次，避免被
+    篡改的 meta 指向任意文件。
+    """
     batch = _latest_batch(backup_root, filename)
     meta = _batch_meta(batch / "meta.json")
-    original = Path(meta.get("original", batch / str(meta.get("name", ""))))
-    source = batch / str(meta.get("name", original.name))
+    original = Path(str(meta.get("original", "")))
+    stored = str(meta.get("stored") or meta.get("name") or "")
+    if not original.is_absolute() or not stored or Path(stored).name != stored:
+        raise ValueError("快照元数据不完整，已拒绝回滚")
+    if original.name != str(meta.get("name", "")):
+        raise ValueError("快照元数据与目标文件名不一致，已拒绝回滚")
+    if not meta.get("exists", True):
+        original.unlink(missing_ok=True)
+        return original
+    source = batch / stored
     if not source.exists():
         raise FileNotFoundError(f"快照文件丢失：{source}")
+    expected = str(meta.get("sha256") or "")
+    if expected and hashlib.sha256(source.read_bytes()).hexdigest() != expected:
+        raise ValueError("快照内容校验失败，已拒绝回滚")
+    if original.exists():
+        snapshot_file(original, backup_root)
     original.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, original)
     return original
@@ -159,32 +192,42 @@ class Executor:
         self.backup_dir.mkdir(parents=True, exist_ok=True)
 
     # -- 公开入口 ---------------------------------------------------------
-    def execute_safely(self, name: str, args: dict[str, Any] | None = None, *, text: str = "") -> str:
-        args = dict(args or {})
+    def execute_safely(self, name: str, args: object = None, *, text: str = "") -> str:
+        """唯一执行入口。参数在这里先过 Schema，再进红线、确认、快照。"""
+        raw_args = {} if args is None else args
+        if not isinstance(raw_args, dict):
+            raw_args = {}
         started = time.perf_counter()
         meta = REGISTRY.get(name)
         if meta is None:
             ensure_tools()
             meta = REGISTRY.get(name)
         if meta is None:
-            return self._record(name, args, "未知工具", RiskLevel.RED_FORBIDDEN, started, text, "")
-        verdict = self.guard.inspect(name, args)  # type: ignore[union-attr]
+            return self._record(name, raw_args, "未知工具", RiskLevel.RED_FORBIDDEN, started, text, "")
+        invalid = validate_args(meta, args)
+        if invalid:
+            self.on_event("blocked", "参数不匹配", invalid)
+            return self._record(name, raw_args, f"参数不匹配：{invalid}",
+                                RiskLevel.RED_FORBIDDEN, started, text, "")
+        verdict = self.guard.inspect(name, raw_args)  # type: ignore[union-attr]
         if verdict.level is RiskLevel.RED_FORBIDDEN:
             self.on_event("blocked", "已拦截", verdict.reason)
-            return self._record(name, args, f"⛔ {verdict.reason}", verdict.level, started, text, "")
-        if verdict.level is RiskLevel.RED_CONFIRM and not self._ask(name, args, verdict):
+            return self._record(name, raw_args, f"⛔ {verdict.reason}", verdict.level, started, text, "")
+        if verdict.level is RiskLevel.RED_CONFIRM and not self._ask(name, raw_args, verdict):
             self.on_event("blocked", "已取消", verdict.reason)
-            return self._record(name, args, "已取消（未获得二次确认）", verdict.level, started, text, "")
-        result = self._run(meta, args)
+            return self._record(name, raw_args, "已取消（未获得二次确认）", verdict.level, started, text, "")
+        result = self._run(meta, raw_args)
         if verdict.draft:
             result = f"【未审核草稿】{result}"
-        return self._record(name, args, result, verdict.level, started, text, meta.backup_arg)
+        return self._record(name, raw_args, result, verdict.level, started, text, meta.backup_arg)
 
     # -- 内部 -------------------------------------------------------------
     def _ask(self, name: str, args: dict[str, Any], verdict: Verdict) -> bool:
-        self.on_event("confirm", "需要确认", verdict.reason)
+        # 确认事件由确认通道发出：那里才知道本次请求的 ID。
+        # 这里再发一次会让界面出现一张没有 ID、点了也没用的卡。
         if self.confirm is None:
-            return False  # 没有确认通道 = 一律不放行
+            self.on_event("blocked", "已拦截", "没有确认通道，按拒绝处理")
+            return False
         try:
             return bool(self.confirm(name, args, verdict))
         except Exception as exc:  # 确认通道自身异常也要 fail-closed
@@ -217,7 +260,9 @@ class Executor:
     def _snapshot(self, meta: Tool, args: dict[str, Any]) -> None:
         if not meta.backup_arg:
             return
-        raw = str(args.get(meta.backup_arg) or "")
+        # 必须和 tools._resolve 用同一套解析（含 strip），否则「 demo.py 」
+        # 会写到 demo.py、备份却找一个叫「 demo.py 」的文件，等于没备份。
+        raw = str(args.get(meta.backup_arg) or "").strip()
         if not raw:
             return
         path = Path(raw).expanduser()
@@ -244,7 +289,9 @@ class Executor:
             "args": {k: _shorten(v) for k, v in args.items()},
             "risk": level.value,
             "ms": round(elapsed, 3),
-            "ok": not result.startswith(("⛔", "执行异常", "参数不匹配", "已取消")),
+            # 成功不能靠「没命中某个中文前缀」推断：锁超时、业务错误、
+            # 草稿包裹的异常都曾因此被记成 ok=true。
+            "ok": _ok_text(result),
             "result": _shorten(result),
             "backup": backup_arg,
         })
@@ -273,6 +320,18 @@ def _label(name: str) -> str:
         "read_file_head": "读文件…",
         "open_in_ide": "打开 IDE…",
     }.get(name, f"{name}…")
+
+
+_FAILURE_PREFIXES = ("⛔", "执行异常", "参数不匹配", "已取消", "错误：", "没有可回滚",
+                     "快照", "上一条修改类指令还在执行", "未找到", "文件不存在")
+
+
+def _ok_text(result: str) -> bool:
+    """工具结果是不是成功。草稿前缀先剥掉，避免异常被【未审核草稿】藏住。"""
+    text = str(result).lstrip()
+    while text.startswith("【未审核草稿】"):
+        text = text[len("【未审核草稿】"):].lstrip()
+    return not text.startswith(_FAILURE_PREFIXES)
 
 
 def _shorten(value: Any, limit: int = 120) -> str:

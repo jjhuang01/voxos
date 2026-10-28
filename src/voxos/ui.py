@@ -22,7 +22,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 __all__ = ["StatusBus", "Event", "UiContext", "serve", "make_token",
            "play", "ensure_earcons", "EARCONS"]
@@ -42,6 +42,7 @@ class Event:
     detail: str = ""
     ts: str = ""
     seq: int = 0
+    request: str = ""       # 确认请求 ID：回答必须带上它，否则会串到别的操作
 
 
 class StatusBus:
@@ -54,14 +55,15 @@ class StatusBus:
         self._lock = threading.Lock()
         self._seq = 0
 
-    def emit(self, state: str, label: str = "", detail: str = "") -> Event:
+    def emit(self, state: str, label: str = "", detail: str = "", request: str = "") -> Event:
         with self._lock:
             self._seq += 1
-            event = Event(state, label, detail, datetime.now().isoformat(timespec="milliseconds"), self._seq)
+            event = Event(state, label, detail, datetime.now().isoformat(timespec="milliseconds"),
+                          self._seq, request)
             self._events.append(event)
             subscribers = list(self._subs)
         for subscriber in subscribers:
-            subscriber.put(event)
+            _offer(subscriber, event)
         if self.path:
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +96,26 @@ class StatusBus:
     def history(self) -> list[dict[str, object]]:
         with self._lock:
             return [asdict(event) for event in self._events]
+
+
+def _offer(channel: queue.Queue[Event], event: Event) -> None:
+    """非阻塞投递：一个卡住的界面不能把音频、执行和确认一起拖死。
+
+    队列满时丢最旧的一条再放新的——状态是「最新值有意义」，不是账本。
+    """
+    try:
+        channel.put_nowait(event)
+        return
+    except queue.Full:
+        pass
+    try:
+        channel.get_nowait()
+    except queue.Empty:
+        pass
+    try:
+        channel.put_nowait(event)
+    except queue.Full:
+        pass
 
 
 # ------------------------------------------------------------------ 微音效
@@ -144,6 +166,7 @@ class UiContext:
 
     bus: StatusBus
     token: str = ""
+    allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "::1")
     pill_file: Path | None = None
     on_command: Callable[[str], str] | None = None
     settings_get: Callable[[], list[dict[str, object]]] | None = None
@@ -173,6 +196,8 @@ class _PillHandler(BaseHTTPRequestHandler):
     """
 
     protocol_version = "HTTP/1.1"
+    timeout = 30                     # 慢连接不能无限占住一个线程
+    MAX_BODY = 1_000_000
     ctx: UiContext
     _payload: dict[str, object] | None = None
 
@@ -205,19 +230,47 @@ class _PillHandler(BaseHTTPRequestHandler):
 
     def _read_body(self) -> dict[str, object] | None:
         try:
-            raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return None
+        if length < 0 or length > self.MAX_BODY:
+            # 必须把已声明的那段读完再拒绝，否则长连接会被残留字节写花。
+            remaining = max(0, min(length, 8_000_000))
+            while remaining > 0:
+                piece = self.rfile.read(min(65536, remaining))
+                if not piece:
+                    break
+                remaining -= len(piece)
+            return None
+        try:
+            raw = self.rfile.read(length)
             payload = json.loads(raw.decode("utf-8") or "{}")
         except (ValueError, UnicodeDecodeError):
             return None
         return payload if isinstance(payload, dict) else None
 
+    def _host_name(self) -> str:
+        return (urlsplit("//" + self.headers.get("Host", "")).hostname or "").lower()
+
+    def _trusted_host(self) -> bool:
+        """Host 是客户端自报的，不能拿它自己证明自己。
+
+        只接受本机名字的 allowlist；否则一个指向 127.0.0.1 的恶意域名
+        （DNS rebinding）也能读到注入了令牌的页面。
+        """
+        return self._host_name() in {name.lower() for name in self.ctx.allowed_hosts}
+
     def _guard(self) -> bool:
-        """同源 + 令牌。失败时直接回 403，调用方不用再判。"""
-        origin = self.headers.get("Origin")
-        host = self.headers.get("Host", "")
-        if origin and origin != f"http://{host}":
-            self._json({"ok": False, "error": "跨站请求已拒绝"}, 403)
+        """可信 Host + 同源 + 令牌。失败时直接回 403，调用方不用再判。"""
+        if not self._trusted_host():
+            self._json({"ok": False, "error": "不受信任的 Host"}, 403)
             return False
+        origin = self.headers.get("Origin")
+        if origin:
+            parsed = urlsplit(origin)
+            if parsed.scheme != "http" or (parsed.hostname or "").lower() != self._host_name():
+                self._json({"ok": False, "error": "跨站请求已拒绝"}, 403)
+                return False
         token = self.ctx.token
         if not token:
             return True
@@ -230,6 +283,8 @@ class _PillHandler(BaseHTTPRequestHandler):
         return True
 
     def _page(self) -> None:
+        if not self._trusted_host():
+            return self._json({"ok": False, "error": "不受信任的 Host"}, 403)
         path = self.ctx.pill_file
         if not path or not path.exists():
             return self._send(200, b"<h1>voxos</h1>", "text/html; charset=utf-8")
@@ -237,11 +292,13 @@ class _PillHandler(BaseHTTPRequestHandler):
         with _CACHE_LOCK:
             cached = _PAGE_CACHE.get(path)
         if not cached or cached[0] != mtime:
-            html = path.read_bytes().replace(b"__VOXOS_TOKEN__", self.ctx.token.encode())
+            # 缓存**模板**，不缓存注入了令牌的成品：同一进程换一个 context
+            # （嵌入式启动、多实例）时，旧令牌会发给新页面，接口随即 401。
             with _CACHE_LOCK:
-                _PAGE_CACHE[path] = (mtime, html)
-            cached = (mtime, html)
-        return self._send(200, cached[1], "text/html; charset=utf-8")
+                _PAGE_CACHE[path] = (mtime, path.read_bytes())
+            cached = _PAGE_CACHE[path]
+        body = cached[1].replace(b"__VOXOS_TOKEN__", self.ctx.token.encode())
+        return self._send(200, body, "text/html; charset=utf-8")
 
     # ---------------------------------------------------------- 路由
     def do_GET(self) -> None:  # noqa: N802
@@ -285,14 +342,18 @@ class _PillHandler(BaseHTTPRequestHandler):
         try:
             reply = self.ctx.on_command(str(body.get("text", "")))
         except Exception as exc:  # 回调异常也要回一个可读响应，不能让胶囊转圈
-            reply = f"执行异常：{exc}"
+            return self._json({"ok": False, "reply": f"执行异常：{exc}"})
         return self._json({"ok": True, "reply": reply})
 
-    def _read_settings(self) -> None:
-        """设置 + 还有没有一步可退。撤销按钮的存在与否由这里说了算，不由前端猜。"""
+    def _read_settings(self) -> dict[str, object]:
+        """设置 + 还有没有一步可退。只返回数据，发送由路由层统一做一次。
+
+        旧实现在这里直接 `_json(...)`，`do_GET` 又把 None 发了一遍——
+        一个请求两个响应，长连接上的下一个请求就会读到错位的响应。
+        """
         groups = self.ctx.settings_get() if self.ctx.settings_get else []
         undo = bool(self.ctx.settings_can_undo and self.ctx.settings_can_undo())
-        return self._json({"groups": groups, "undo": undo})
+        return {"groups": groups, "undo": undo}
 
     def _save_settings(self) -> None:
         body = self._body()
@@ -319,9 +380,25 @@ class _PillHandler(BaseHTTPRequestHandler):
 
     def _confirm(self) -> None:
         body = self._body() or {}
+        allow = body.get("allow")
+        request_id = body.get("id", "")
+        if not isinstance(allow, bool):
+            return self._json({"ok": False, "error": "allow 必须是布尔值"}, 400)
+        if not isinstance(request_id, str):
+            return self._json({"ok": False, "error": "确认 ID 不合法"}, 400)
         if self.ctx.on_confirm is not None:
-            self.ctx.on_confirm(bool(body.get("allow")))
+            accepted = self._call_confirm(allow, request_id)
+            if accepted is False:
+                return self._json({"ok": False, "error": "确认已失效或已被回答"}, 409)
         return self._json({"ok": True})
+
+    def _call_confirm(self, allow: bool, request_id: str) -> object:
+        """兼容只接收 allow 的旧回调；新回调返回 False 表示这次回答无效。"""
+        assert self.ctx.on_confirm is not None
+        try:
+            return self.ctx.on_confirm(allow, request_id)  # type: ignore[call-arg]
+        except TypeError:
+            return self.ctx.on_confirm(allow)
 
     # ---------------------------------------------------------- SSE
     def _stream(self) -> None:

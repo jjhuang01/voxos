@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import webbrowser
@@ -110,13 +111,25 @@ def dispatch_code_session(
         return f"未安装 tmux，无法派发。手动执行：{' '.join(inner)}"
     if RT.dry_run:
         return f"（dry-run）将在 {session_name} 会话执行：{' '.join(inner)}"
+    # tmux 的 send-keys 是把文本送进一个**活着的 shell**，外层 subprocess 用 argv
+    # 不等于最终执行安全。这里先按 shell 规则引用每个参数，再以 -l 原样发送；
+    # 否则一句带空格的话就会被拆成多个参数，`$(...)` 也会被 shell 展开。
+    command = shlex.join(inner)
     exists = subprocess.run(["tmux", "has-session", "-t", session_name],
                             capture_output=True, timeout=5).returncode == 0
     if not exists or new_session:
-        subprocess.run(["tmux", "new-session", "-d", "-s", session_name, "-c", str(project)],
-                       check=False, timeout=10)
-    subprocess.run(["tmux", "send-keys", "-t", session_name, " ".join(inner), "Enter"],
-                   check=False, timeout=10)
+        created = subprocess.run(["tmux", "new-session", "-d", "-s", session_name, "-c", str(project)],
+                                 check=False, timeout=10)
+        if created.returncode != 0:
+            return f"派发失败：无法创建 tmux 会话 {session_name}"
+    sent = subprocess.run(["tmux", "send-keys", "-t", session_name, "-l", "--", command],
+                          check=False, timeout=10)
+    if sent.returncode != 0:
+        return f"派发失败：无法向 {session_name} 写入指令"
+    entered = subprocess.run(["tmux", "send-keys", "-t", session_name, "Enter"],
+                             check=False, timeout=10)
+    if entered.returncode != 0:
+        return f"派发失败：指令已写入但没能提交（{session_name}）"
     return f"已派发到编程会话 {session_name}"
 
 
@@ -216,7 +229,14 @@ def read_file_head(file_path: str, lines: int = 40) -> str:
     if not target.exists():
         return f"文件不存在：{target}"
     _remember(target)
-    head = target.read_text(encoding="utf-8", errors="replace").splitlines()[: max(1, int(lines))]
+    # 逐行读前 N 行：旧实现先 read_text() 整个文件再切片，读 2GB 日志等于把内存打满。
+    limit = max(1, min(int(lines), 500))
+    head: list[str] = []
+    with open(target, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            head.append(line.rstrip("\n"))
+            if len(head) >= limit:
+                break
     return f"{target.name}（前 {len(head)} 行）\n" + "\n".join(head)
 
 
@@ -253,7 +273,14 @@ def search_notes(query: str, root: str = "") -> str:
     if not base.exists():
         return f"目录不存在：{base}"
     hits: list[str] = []
-    for path in sorted(base.rglob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)[:200]:
+    # 先限量再排序：`sorted(rglob(...))` 会把整棵目录树先读进内存，结果上限
+    # 只是输出上限，不是资源上限。
+    candidates: list[Path] = []
+    for path in base.rglob("*.md"):
+        candidates.append(path)
+        if len(candidates) >= 2000:
+            break
+    for path in sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)[:200]:
         for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             if query and query in line:
                 hits.append(f"{path.name}:{number} {line.strip()[:60]}")
@@ -285,6 +312,13 @@ def delegate_to_coding_cli(prompt: str, project_dir: str = "", cli: str = "claud
         return f"（dry-run）将在 {workdir} 执行：{' '.join(command)}"
     if not shutil.which("tmux") or not shutil.which(cli):
         return f"缺少 tmux 或 {cli}，无法委托"
-    subprocess.run(["tmux", "new-session", "-d", "-s", "voxos_delegate", "-c", str(workdir),
-                    " ".join(command)], check=False, timeout=10)
-    return f"已委托 {cli} 在后台执行，会话名 voxos_delegate"
+    session = "voxos_delegate"
+    if subprocess.run(["tmux", "has-session", "-t", session],
+                      capture_output=True, timeout=5).returncode == 0:
+        # 同名会话还在跑时再 new-session 会失败，旧实现却照样说「已委托」。
+        return f"已有同名会话 {session} 在运行，未重复委托"
+    started = subprocess.run(["tmux", "new-session", "-d", "-s", session, "-c", str(workdir),
+                              shlex.join(command)], check=False, timeout=10)
+    if started.returncode != 0:
+        return f"委托失败：无法创建 tmux 会话 {session}"
+    return f"已委托 {cli} 在后台执行，会话名 {session}"

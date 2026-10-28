@@ -246,7 +246,14 @@ def _score_mixed(engine: object, root: Path, clips: list[dict[str, str]]) -> dic
         heard = engine.transcribe(corpus.load_clip(root, entry))  # type: ignore[attr-defined]
         want_terms, got_terms = _terms(entry["text"]), _terms(heard)
         total += len(want_terms)
-        hits += sum(1 for term in want_terms if any(_close(term, got) for got in got_terms))
+        # 一对一对齐：同一个输出词不能被两个参考词重复认领。
+        used: set[int] = set()
+        for term in want_terms:
+            for index, got in enumerate(got_terms):
+                if index not in used and _close(term, got):
+                    used.add(index)
+                    hits += 1
+                    break
         want_zh, got_zh = _cjk(entry["text"]), _cjk(heard)
         zh_errors += _edit_distance(got_zh, want_zh)
         zh_chars += len(want_zh)
@@ -290,7 +297,13 @@ def _cjk(text: str) -> str:
 
 
 def _close(want: str, got: str) -> bool:
-    """术语算不算识别对了：允许长度相关的少量字符差（`merge` 少个 e 仍算对）。"""
+    """术语算不算识别对了。
+
+    长词允许少量字符差（`merge` 少个 e 仍算对）；短词必须完全一致——
+    `git` 与 `fit` 编辑距离只有 1，按比例容错会把最关键的短命令判成正确。
+    """
+    if len(want) <= 4:
+        return got == want
     return _edit_distance(got, want) <= max(1, len(want) // 4)
 
 
@@ -604,10 +617,10 @@ def _quality_verdicts(report: dict[str, object]) -> list[dict[str, object]]:
          "measured": (f"{mixed['recall']}%（中文音色）/ {mixed['recall_bilingual']}%（双语拼接），"
                       f"{mixed['terms']} 个术语，中文 {mixed['zh_cer']}% 字错")
                      if mixed["available"] else mixed.get("why", "跳过"),
-         "pass": (max(mixed["recall"], mixed["recall_bilingual"] or 0) >= 95
-                  if mixed["available"] else False),
+         # 两套语料都是真实现象，不能取最大值挑好看的：任一套没到 95% 就没达标。
+         "pass": (_passes_all(mixed) if mixed["available"] else False),
          "skipped": not mixed["available"],
-         "gap": True},
+         "gap": bool(mixed["available"]) and not _passes_all(mixed)},
     ]
 
 HTML = """<!DOCTYPE html>
@@ -707,6 +720,8 @@ def render(report: dict[str, object], rows: list[dict[str, object]]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--refresh-corpus", action="store_true")
+    parser.add_argument("--release", action="store_true",
+                        help="发布门禁：GAP / SKIP 也算不通过（回归模式仍只拦 FAIL）")
     args = parser.parse_args()
     SANDBOX.mkdir(parents=True, exist_ok=True)
     report = build_report(args.refresh_corpus)
@@ -730,7 +745,19 @@ def main() -> int:
         tail += f" · {len(gaps)} 项未达标（能力边界，见 REVIEW §22）"
     print(f"{judged - len(failed) - len(gaps)}/{judged} 通过{tail}"
           f" · 报告 docs/ACCEPTANCE.html")
-    return 1 if failed else 0
+    if failed:
+        return 1
+    if args.release and (gaps or skipped):
+        print("发布门禁：存在未达标或未测量的必测项，按不通过处理")
+        return 1
+    return 0
+
+
+def _passes_all(mixed: dict[str, object]) -> bool:
+    """所有可用的混说测量都要 ≥95%；只有一套时按那一套算。"""
+    values = [mixed.get("recall"), mixed.get("recall_bilingual")]
+    measured = [float(value) for value in values if value is not None]
+    return bool(measured) and all(value >= 95 for value in measured)
 
 
 def _label(row: dict[str, object]) -> str:

@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Literal, Union, get_args, get_origin, get_type_hints
 
-__all__ = ["RiskLevel", "Tool", "REGISTRY", "FAST_ROUTES", "tool", "build_schema", "ensure_tools"]
+__all__ = ["RiskLevel", "Tool", "REGISTRY", "FAST_ROUTES", "tool", "build_schema",
+           "ensure_tools", "validate_args"]
 
 
 class RiskLevel(str, Enum):
@@ -135,6 +136,52 @@ def tool(
         return fn
 
     return decorator
+
+
+def _type_error(prop: dict[str, Any], value: Any) -> str:
+    """单个参数的类型/枚举校验；通过返回空串。"""
+    kind = prop.get("type", "string")
+    if kind == "string":
+        if not isinstance(value, str):
+            return "应为字符串"
+    elif kind == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            return "应为整数"
+    elif kind == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return "应为数字"
+    elif kind == "boolean":
+        if not isinstance(value, bool):
+            return "应为布尔值"
+    elif kind == "array":
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return "应为字符串数组"
+    allowed = prop.get("enum")
+    if allowed and value not in allowed:
+        return f"只能取 {' / '.join(str(item) for item in allowed)}"
+    return ""
+
+
+def validate_args(meta: Tool, args: object) -> str:
+    """执行侧校验：模型输出是不可信输入，Schema 生成不等于 Schema 强制。
+
+    返回空串表示通过；否则返回可以直接说给用户听的错误。
+    """
+    if not isinstance(args, dict):
+        return "参数必须是 JSON 对象"
+    schema = meta.schema["function"]["parameters"]
+    props: dict[str, Any] = schema.get("properties", {})
+    unknown = [key for key in args if key not in props]
+    if unknown:
+        return f"未知参数：{'、'.join(sorted(unknown))}"
+    missing = [key for key in schema.get("required", []) if key not in args]
+    if missing:
+        return f"缺少参数：{'、'.join(missing)}"
+    for key, value in args.items():
+        error = _type_error(props[key], value)
+        if error:
+            return f"{key} {error}"
+    return ""
 
 
 def ensure_tools() -> None:

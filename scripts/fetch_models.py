@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import subprocess
 import sys
@@ -48,22 +49,52 @@ MODELS = {
 OPTIONAL = {"sense-voice/model.int8.onnx", "sense-voice/tokens.txt"}
 
 
-def download(url: str, target: Path, proxy: str | None) -> bool:
-    if proxy:
-        result = subprocess.run(
-            ["curl", "-fsSL", "--http1.1", "--max-time", "300", "-x", proxy, "-o", str(target), url],
-            capture_output=True, text=True,
-        )
-        return result.returncode == 0
-    opener = urllib.request.build_opener()
+def verify(path: Path, spec: dict) -> bool:
+    """下载结果是否可信：大小、非全零、可选 SHA256。只看大小会被稀疏文件骗过。"""
+    if not path.exists() or path.stat().st_size < spec["min_bytes"]:
+        return False
+    with open(path, "rb") as handle:
+        head = handle.read(4096)
+    if not any(head):
+        print("  校验失败：文件开头全是零，不是有效模型")
+        return False
+    expected = spec.get("sha256")
+    if expected:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        if digest.hexdigest().lower() != expected.lower():
+            print("  校验失败：SHA256 与清单不一致")
+            return False
+    return True
+
+
+def download(url: str, target: Path, proxy: str | None, spec: dict) -> bool:
+    """先写 `.part`，校验通过再原子替换；失败不破坏已有好模型。"""
+    part = target.with_name(target.name + ".part")
+    part.unlink(missing_ok=True)
     try:
-        with opener.open(url, timeout=120) as response, open(target, "wb") as handle:
-            while chunk := response.read(1 << 16):
-                handle.write(chunk)
-        return True
+        if proxy:
+            result = subprocess.run(
+                ["curl", "-fsSL", "--http1.1", "--max-time", "300", "-x", proxy, "-o", str(part), url],
+                capture_output=True, text=True,
+            )
+            ok = result.returncode == 0
+        else:
+            opener = urllib.request.build_opener()
+            with opener.open(url, timeout=120) as response, open(part, "wb") as handle:
+                while chunk := response.read(1 << 16):
+                    handle.write(chunk)
+            ok = True
     except Exception as exc:  # 网络问题种类很多，统一报告
         print(f"  直连失败：{exc}")
-        return False
+        ok = False
+    if ok and verify(part, spec):
+        os.replace(part, target)
+        return True
+    part.unlink(missing_ok=True)
+    return False
 
 
 def main() -> int:
@@ -82,12 +113,12 @@ def main() -> int:
             continue
         target = TARGET / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists() and target.stat().st_size >= spec["min_bytes"] and not args.force:
+        if verify(target, spec) and not args.force:
             print(f"✓ {name} 已存在（{target.stat().st_size / 1e6:.1f}MB）")
             continue
         print(f"↓ {name}：{spec['desc']}")
-        ok = download(spec["url"], target, args.proxy) or download(spec["url"], target, None)
-        if ok and target.stat().st_size >= spec["min_bytes"]:
+        ok = download(spec["url"], target, args.proxy, spec) or download(spec["url"], target, None, spec)
+        if ok and verify(target, spec):
             print(f"✓ {name}（{target.stat().st_size / 1e6:.1f}MB）")
         else:
             target.unlink(missing_ok=True)

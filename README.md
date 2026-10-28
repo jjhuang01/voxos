@@ -4,7 +4,7 @@
 > 说一句话，它知道你要写日志、写代码还是查运维，然后真的去做，做完用一句话回报你。
 
 没有主窗口，没有聊天记录页。它的形态是一个后台守护进程 + 一个 36px 悬浮胶囊。
-声纹不对的语音直接丢弃，危险操作在架构上不可能发生。
+声纹不对的语音直接丢弃；危险操作默认没有入口，改动类操作必须二次确认。
 
 ```
 你说：Siri，我要写日志，今天把登录接口的空值校验补上了
@@ -21,7 +21,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
 python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 173 项测试
+make test                                    # 202 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
 ```
@@ -170,7 +170,7 @@ voxos/
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 173 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/文档自洽
+└── tests/                  # 202 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/文档自洽
 ```
 
 ## 四条关键设计决策

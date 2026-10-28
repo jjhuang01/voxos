@@ -11,8 +11,12 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import shutil
+import threading
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -153,14 +157,19 @@ def _coerce(field: Field, raw: Any) -> tuple[Any, str]:
         return None, f"{field.label}：只能取 {' / '.join(field.options)}"
     if len(text) > 500:
         return None, f"{field.label}：太长（上限 500 字符）"
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        # U+007F 这类控制字符能通过旧校验，写进 TOML 后整个文件解析失败。
+        return None, f"{field.label}：不能包含控制字符"
     return text, ""
 
 
 def _coerce_number(field: Field, raw: Any) -> tuple[Any, str]:
     try:
         value = int(raw) if field.kind == "int" else round(float(raw), 4)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None, f"{field.label}：需要一个数字"
+    if not math.isfinite(value):
+        return None, f"{field.label}：需要一个有限数字"
     low, high = field.minimum, field.maximum
     if (low is not None and value < low) or (high is not None and value > high):
         return None, f"{field.label}：应在 {low} ~ {high} 之间"
@@ -176,6 +185,7 @@ def _cross_check(clean: dict[str, Any]) -> list[str]:
 # ------------------------------------------------------------------ 写回
 
 BACKUP_NAME = "settings.bak"
+_LOCK = threading.RLock()
 
 
 def target_of(cfg: Config) -> Path:
@@ -183,28 +193,61 @@ def target_of(cfg: Config) -> Path:
     return cfg.source or cfg.root / "config" / "settings.toml"
 
 
-def save(changes: dict[str, Any], path: Path) -> None:
-    """就地改值：只替换等号右边，保留缩进、对齐与行尾注释。"""
+def _render(changes: dict[str, Any], path: Path) -> str:
+    """只改等号右边，保留缩进、对齐与行尾注释；返回完整候选文本。"""
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     for key, value in changes.items():
         section, name = key.split(".", 1)
         lines = _write_value(lines, section, name, _literal(value))
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n"
+
+
+def _atomic_write(path: Path, text: str, mode: int | None = None) -> None:
+    """同目录临时文件 + fsync + os.replace：中途失败不会留下半个配置。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def save(changes: dict[str, Any], path: Path) -> None:
+    """就地改值：先渲染并解析成功，再原子替换。"""
+    text = _render(changes, path)
+    tomllib.loads(text)                      # 语法不成立就不碰原文件
+    mode = (path.stat().st_mode & 0o777) if path.exists() else 0o600
+    _atomic_write(path, text, mode)
 
 
 def backup_path(target: Path) -> Path:
-    """备份放在配置同目录的 `.voxos/` 下，跟着 `--config` 走，不污染仓库根。"""
-    return target.parent / ".voxos" / BACKUP_NAME
+    """备份放在配置同目录的 `.voxos/` 下，跟着 `--config` 走，不污染仓库根。
+
+    文件名必须带目标身份：同目录放两份配置时，共用一个 settings.bak
+    会让「撤销 A」实际恢复 B。
+    """
+    name = BACKUP_NAME if target.name == "settings.toml" else f"settings.{target.stem}.bak"
+    return target.parent / ".voxos" / name
 
 
 def restore(target: Path) -> Config:
     """回到上一次保存之前。备份用掉就删掉——撤销只退一步，退完这一步就没得再退。"""
-    backup = backup_path(target)
-    if not backup.exists():
-        raise FileNotFoundError("没有可撤销的保存记录")
-    target.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
-    backup.unlink()                          # 写成功才消费，写失败备份还在
-    return load(target)
+    with _LOCK:
+        backup = backup_path(target)
+        if not backup.exists():
+            raise FileNotFoundError("没有可撤销的保存记录")
+        text = backup.read_text(encoding="utf-8")
+        tomllib.loads(text)                  # 备份坏了也不能写回目标
+        mode = (target.stat().st_mode & 0o777) if target.exists() else 0o600
+        _atomic_write(target, text, mode)
+        backup.unlink()                      # 写成功才消费，写失败备份还在
+        return load(target)
 
 
 def can_undo(cfg: Config) -> bool:
@@ -280,14 +323,23 @@ def _insert_line(lines: list[str], section: str, name: str, literal: str) -> lis
 
 
 def apply(cfg: Config, changes: dict[str, Any], path: Path | None = None) -> tuple[Config, list[str]]:
-    """校验 → 备份 → 写盘 → 重新加载。校验失败时一个字节都不写。"""
+    """校验 → 备份 → 写盘 → 重新加载。校验失败时一个字节都不写。
+
+    整个序列在同一把锁里；候选文本先解析成功才替换目标，保存与撤销
+    不会互相穿插，也不会出现「写成功了但读不回来」。
+    """
     clean, errors = validate(changes)
     if errors or not clean:
         return cfg, errors
     target = target_of(cfg) if path is None else path
-    if target.exists():                       # 留一份上一次的，供「撤销」用
-        backup = backup_path(target)
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
-    save(clean, target)
-    return load(target), []
+    with _LOCK:
+        mode = (target.stat().st_mode & 0o777) if target.exists() else 0o600
+        if target.exists():                   # 留一份上一次的，供「撤销」用
+            backup = backup_path(target)
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(target, backup)      # copy2 保权限，不把 0600 变 0644
+            os.chmod(backup, mode)
+        text = _render(clean, target)
+        tomllib.loads(text)
+        _atomic_write(target, text, mode)
+        return load(target), []

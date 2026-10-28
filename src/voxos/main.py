@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 import argparse
+import math
+import queue
+import secrets
 import shutil
 import subprocess
 import sys
@@ -33,35 +36,56 @@ STT_LABELS = {
 # ------------------------------------------------------------------ 运行态
 
 class ConfirmGate:
-    """确认闸门：终端与胶囊谁先回答谁生效；无人回答按拒绝处理（失败关闭）。"""
+    """确认闸门：每个请求有自己的 ID 与事件；无人回答按拒绝处理（失败关闭）。
+
+    共享一个 Event + 一个 answer 会让「一次点击」批准两个请求，也会让
+    针对旧请求的迟到回答批准新请求。这里按 request id 隔离，且只接受首答。
+    """
 
     def __init__(self, bus: ui.StatusBus, timeout: float) -> None:
         self.bus = bus
         self.timeout = timeout
-        self._event = threading.Event()
-        self._answer = False
+        self._lock = threading.Lock()
+        self._waiters: dict[str, threading.Event] = {}
+        self._answers: dict[str, bool] = {}
+        self._current = ""
 
     def ask(self, name: str, args: dict[str, object], verdict: core.Verdict) -> bool:
-        self._event.clear()
-        self._answer = False
-        self.bus.emit("confirm", "需要确认", verdict.reason)
+        request_id = secrets.token_urlsafe(6)
+        event = threading.Event()
+        with self._lock:
+            self._waiters[request_id] = event
+            self._current = request_id
+        self.bus.emit("confirm", "需要确认", verdict.reason, request=request_id)
         if sys.stdin is not None and sys.stdin.isatty():
-            threading.Thread(target=self._read_terminal, daemon=True).start()
-        answered = self._event.wait(self.timeout)
+            threading.Thread(target=self._read_terminal, args=(request_id,), daemon=True).start()
+        answered = event.wait(self.timeout)
+        with self._lock:
+            allow = bool(self._answers.pop(request_id, False)) if answered else False
+            self._waiters.pop(request_id, None)
+            if self._current == request_id:
+                self._current = ""
         if not answered:
             self.bus.emit("blocked", "确认超时", "按拒绝处理")
-        return self._answer
+        return allow
 
-    def resolve(self, allow: bool) -> None:
-        self._answer = allow
-        self._event.set()
+    def resolve(self, allow: bool, request_id: str = "") -> bool:
+        """回答一个**仍在等待**的请求。过期 ID、重复回答都返回 False。"""
+        with self._lock:
+            target = request_id or self._current
+            event = self._waiters.get(target)
+            if event is None or target in self._answers:
+                return False
+            self._answers[target] = bool(allow)
+            event.set()
+            return True
 
-    def _read_terminal(self) -> None:
+    def _read_terminal(self, request_id: str) -> None:
         try:
             line = sys.stdin.readline()
         except (OSError, ValueError):
             return
-        self.resolve(line.strip().lower() in ("y", "yes", "确认"))
+        self.resolve(line.strip().lower() in ("y", "yes", "确认"), request_id)
 
 
 class Runtime:
@@ -75,8 +99,12 @@ class Runtime:
         self.recent: deque[dict[str, object]] = deque(maxlen=8)
         self.started = time.time()
 
-    def _build(self) -> core.Executor:
-        return core.Executor(cfg=self.cfg, on_event=self.bus, confirm=self.gate.ask)
+    def _build(self, lock: threading.Lock | None = None) -> core.Executor:
+        executor = core.Executor(cfg=self.cfg, on_event=self.bus, confirm=self.gate.ask)
+        if lock is not None:
+            # 执行锁必须跨配置重载长寿命：换一把锁等于允许两套写操作并行。
+            executor._lock = lock
+        return executor
 
     def dispatch(self, text: str, context: dict[str, object] | None = None) -> core.DispatchResult:
         return core.dispatch(text, executor=self.executor, cfg=self.cfg,
@@ -90,10 +118,11 @@ class Runtime:
         })
 
     def reload(self, new_cfg: Config) -> None:
+        lock = self.executor._lock
         self.cfg = new_cfg
         tools.configure(new_cfg)
         self.gate.timeout = float(new_cfg.get("workspace.confirm_timeout_s", 8))
-        self.executor = self._build()
+        self.executor = self._build(lock=lock)
 
 
 # ------------------------------------------------------------------ 隐式上下文
@@ -179,15 +208,26 @@ def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]
 
 def _enroll_now(cfg: Config, lock: dsp.SpeakerLock, seconds: float,
                 done: threading.Event | None = None) -> dict[str, object]:
-    """从麦克风录一段并写盘。失败也要给出人能看懂的原因。"""
+    """从麦克风录一段并写盘。失败也要给出人能看懂的原因。
+
+    先把新声纹算在副本上，保存成功后才提交到运行态；保存失败不能出现
+    「内存里已经是新身份、重启后又变回旧身份」的分裂。
+    """
+    if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 1 <= seconds <= 10:
+        return {"ok": False, "error": "录音时长需在 1~10 秒之间"}
     try:
-        samples = _record(seconds)
+        samples = _record(float(seconds))
     except Exception as exc:                       # 无麦克风/无权限
         return {"ok": False, "error": f"录音失败：{exc}"}
     if not samples:
         return {"ok": False, "error": "没有采集到音频"}
-    consistency = lock.enroll(samples)             # type: ignore[arg-type]
-    lock.save(cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
+    previous = dict(lock.profiles)
+    try:
+        consistency = lock.enroll(samples)         # type: ignore[arg-type]
+        lock.save(cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
+    except Exception as exc:
+        lock.profiles = previous
+        return {"ok": False, "error": f"声纹保存失败：{exc}"}
     if done is not None:
         done.set()
     return {"ok": True, "consistency": round(float(consistency), 3), "samples": len(samples)}
@@ -321,29 +361,117 @@ def cmd_run(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[str, Path]) -> int:
-    """主循环：只做「取一句话 → 派发 → 回报」，别的都丢给线程。"""
+    """三段式：采集线程 → 识别线程 → 派发主循环。
+
+    旧实现是单线程 `for utterance in pipeline.run(source)`：模型、确认、
+    工具任何一个慢下来，麦克风就停止读取，设备缓冲区溢出、句子被吞。
+    现在采集与识别各有一个有界队列，慢的只有派发，不会回头卡住设备。
+    """
     hotwords = audio.refresh_hotwords(cfg) if audio.supports_hotwords(cfg) else []
-    pipeline = audio.AudioPipeline(cfg=cfg, stt=audio.make_stt(cfg, hotwords), lock=lock,
-                                   vad=audio.make_vad(cfg), on_event=runtime.bus)
+    pipeline = audio.AudioPipeline(
+        cfg=cfg, stt=audio.make_stt(cfg, hotwords), lock=lock,
+        vad=audio.make_vad(cfg), on_event=runtime.bus,
+        echo=dsp.EchoGate(decay_ms=float(cfg.get("audio.echo_decay_ms", 300))))
     source = audio.SelfHealingSource(lambda: audio.MicSource(int(cfg.get("audio.chunk_size", 512))),
-                                     on_event=runtime.bus)
+                                     on_event=runtime.bus, on_reset=pipeline.reset)
     _context()                             # 预热：把首次线程启动的开销挪到进循环之前
     runtime.bus.emit("idle", "待机", "")
-    for utterance in pipeline.run(source):
-        if not utterance.accepted:
+    chunks: queue.Queue[object] = queue.Queue(maxsize=64)
+    utterances: queue.Queue[object] = queue.Queue(maxsize=4)
+    stop = threading.Event()
+    threading.Thread(target=_capture_loop, args=(source, chunks, stop), daemon=True).start()
+    threading.Thread(target=_recognize_loop, args=(pipeline, chunks, utterances, stop), daemon=True).start()
+    try:
+        return _dispatch_loop(runtime, pipeline, utterances, sounds, stop)
+    finally:
+        stop.set()
+
+
+def _capture_loop(source: object, chunks: queue.Queue[object], stop: threading.Event) -> None:
+    """只做采集：队列满时丢最旧的块，绝不阻塞设备读取。"""
+    try:
+        for chunk in source:  # type: ignore[union-attr]
+            if stop.is_set():
+                break
+            try:
+                chunks.put_nowait(chunk)
+            except queue.Full:
+                try:
+                    chunks.get_nowait()
+                    chunks.put_nowait(chunk)
+                except (queue.Empty, queue.Full):
+                    pass
+    except Exception as exc:
+        _put_latest(chunks, exc)
+    finally:
+        _put_latest(chunks, None)
+
+
+def _recognize_loop(pipeline: audio.AudioPipeline, chunks: queue.Queue[object],
+                    utterances: queue.Queue[object], stop: threading.Event) -> None:
+    """只做 VAD/声纹/识别：把整句交给派发线程，自己继续处理下一块音频。"""
+    def feed():
+        while True:
+            item = chunks.get()
+            if item is None:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
+    try:
+        for utterance in pipeline.run(feed()):
+            while not stop.is_set():
+                try:
+                    utterances.put(utterance, timeout=0.2)
+                    break
+                except queue.Full:
+                    continue
+    except Exception as exc:
+        _put_latest(utterances, exc)
+    finally:
+        _put_latest(utterances, None)
+
+
+def _put_latest(channel: queue.Queue[object], item: object) -> None:
+    try:
+        channel.put_nowait(item)
+    except queue.Full:
+        try:
+            channel.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            channel.put_nowait(item)
+        except queue.Full:
+            pass
+
+
+def _dispatch_loop(runtime: Runtime, pipeline: audio.AudioPipeline,
+                   utterances: queue.Queue[object], sounds: dict[str, Path],
+                   stop: threading.Event) -> int:
+    while True:
+        item = utterances.get()
+        if item is None:
+            return 0
+        if isinstance(item, Exception):
+            runtime.bus.emit("blocked", "音频处理异常", str(item))
+            return 1
+        utterance = item
+        if not utterance.accepted:  # type: ignore[attr-defined]
             continue
         if pipeline.echo.is_interrupt(utterance.text) and stop_speaking():
             runtime.bus.emit("idle", "已停止", utterance.text)
             continue
-        if cfg.flag("ui.earcons", True):
+        # 读 runtime.cfg 而不是启动时的快照：设置页改了开关，下一句就该生效。
+        if runtime.cfg.flag("ui.earcons", True):
             ui.play(sounds["listen"])
         runtime.bus.emit("executing", "处理中…", utterance.text)
         result = runtime.dispatch(utterance.text)
         runtime.record(utterance.text, result)
         runtime.bus.emit("done", "完成", result.reply)
-        if result.reply and cfg.flag("ui.speak", True):
+        if result.reply and runtime.cfg.flag("ui.speak", True):
             _speak_async(result.reply, pipeline)
-    return 0
 
 
 def _speak_async(text: str, pipeline: audio.AudioPipeline) -> None:
@@ -351,21 +479,28 @@ def _speak_async(text: str, pipeline: audio.AudioPipeline) -> None:
     threading.Thread(target=_speak, args=(text, pipeline), daemon=True).start()
 
 
-_TTS: dict[str, subprocess.Popen | None] = {"proc": None}
+_TTS: dict[str, object] = {"proc": None, "owner": None}
 
 
 def stop_speaking() -> bool:
     """打断：把正在念的 say 杀掉。没有在念就返回 False。"""
     proc = _TTS.get("proc")
-    if proc is None or proc.poll() is not None:
+    if not isinstance(proc, subprocess.Popen) or proc.poll() is not None:
         return False
     proc.terminate()
     return True
 
 
 def _speak(text: str, pipeline: audio.AudioPipeline) -> None:
+    """播报。只有**当前所有者**能在结束时清理共享状态。
+
+    旧实现里任何一条旧线程的 finally 都会把 `_TTS["proc"]` 清成 None，
+    并把回声门提前放行——新的播报还在响，系统却以为它结束了。
+    """
     if not shutil.which("say"):
         return
+    owner = object()
+    _TTS["owner"] = owner
     pipeline.echo.tts_start()
     proc = None
     try:
@@ -377,8 +512,10 @@ def _speak(text: str, pipeline: audio.AudioPipeline) -> None:
     finally:
         if proc is not None and proc.poll() is None:
             proc.kill()
-        _TTS["proc"] = None
-        pipeline.echo.tts_end()
+        if _TTS.get("owner") is owner:
+            _TTS["proc"] = None
+            _TTS["owner"] = None
+            pipeline.echo.tts_end()
 
 
 def cmd_enroll(args: argparse.Namespace, cfg: Config) -> int:

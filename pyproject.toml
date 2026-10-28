@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voxos"
-version = "0.1.6"
+version = "0.1.7"
 description = "只听你一个人说话的语音操作系统 Agent：本地声纹锁 + 快慢双通道路由 + 极简胶囊"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,6 +25,11 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# 运行资源不在 src 包里：不声明它们，普通安装会缺默认配置、红线策略和胶囊页面。
+[tool.setuptools.data-files]
+"share/voxos/config" = ["config/settings.toml", "config/redlines.toml", "config/hotwords.txt"]
+"share/voxos/web" = ["web/pill.html"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

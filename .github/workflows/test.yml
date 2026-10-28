@@ -1,0 +1,46 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 安装最小依赖
+        run: |
+          python -m pip install -U pip
+          python -m pip install -e ".[dev]"
+      - name: 最小依赖测试（缺可选依赖时必须优雅降级）
+        run: python -m pytest -q
+      - name: 安装完整依赖
+        run: python -m pip install -e ".[dev,models,audio]"
+      - name: 完整依赖测试
+        run: python -m pytest -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install build
+      - run: python -m build
+      - name: 脱离源码目录做安装冒烟
+        run: |
+          python -m venv /tmp/voxos-smoke
+          /tmp/voxos-smoke/bin/pip install dist/*.whl
+          cd /tmp
+          /tmp/voxos-smoke/bin/voxos tools
+          /tmp/voxos-smoke/bin/python -c "from voxos.config import load; c=load(); assert c.get('audio.chunk_size')"

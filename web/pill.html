@@ -308,7 +308,7 @@ const STATE_TEXT = {
   idle:'待机', listening:'聆听中', executing:'执行中', done:'完成',
   blocked:'已拦截', confirm:'需要确认', onboard:'待设置'
 };
-let current = 'idle', settingsCache = null, dirty = {}, confirmTimeout = 8;
+let current = 'idle', settingsCache = null, dirty = {}, confirmTimeout = 8, pendingConfirmId = '';
 const ROUTE = {fast:'快通道', offline:'离线兜底', llm:'大模型', ignore:'未识别'};
 
 /* ---------------- 通信 ---------------- */
@@ -372,6 +372,7 @@ function render(event) {
   label.textContent = event.label || STATE_TEXT[state] || state;
   if (state === 'confirm') {
     $('confirm-q').textContent = event.detail || '这个操作需要你确认';
+    pendingConfirmId = event.request || '';   // 回答必须带回这张卡的请求 ID
     $('confirm').hidden = false;
     startCountdown();
     open();
@@ -396,8 +397,10 @@ function startCountdown() {
 document.querySelectorAll('[data-allow]').forEach(button =>
   button.addEventListener('click', async () => {
     const allow = button.dataset.allow === '1';
+    const id = pendingConfirmId;
+    pendingConfirmId = '';
     $('confirm').hidden = true;
-    try { await api('/api/confirm', {method:'POST', body: JSON.stringify({allow})}); }
+    try { await api('/api/confirm', {method:'POST', body: JSON.stringify({allow, id})}); }
     catch (error) { toast(error.message, true); }
   }));
 
