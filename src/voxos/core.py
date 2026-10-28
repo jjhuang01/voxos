@@ -123,17 +123,9 @@ def dispatch(
         reply = executor.execute_safely(name, args, text=raw)
         return DispatchResult("fast", raw, name, args, reply, _ms(started), [reply])
 
-    if cfg.flag("llm.enabled", False) and cfg.get("llm.base_url"):
-        # 记录「已经真的执行过工具」：此后任何失败都不能再走一遍离线规划，
-        # 否则一次派发会因为总结阶段网络抖动被执行两次。
-        state: dict[str, Any] = {"executed": False, "results": []}
-        try:
-            return _llm_route(raw, executor, cfg, context or {}, started, state)
-        except Exception as exc:
-            executor.on_event("blocked", "模型不可用", str(exc))
-            if state["executed"]:
-                return DispatchResult("llm", raw, reply=f"已执行，但总结失败：{exc}",
-                                      latency_ms=_ms(started), results=list(state["results"]))
+    llm = _try_llm(raw, executor, cfg, context or {}, started)
+    if llm is not None:
+        return llm
 
     plan = heuristic_plan(raw, cfg)
     if not plan:
@@ -141,6 +133,27 @@ def dispatch(
     results = [executor.execute_safely(name, args, text=raw) for name, args in plan]
     name, args = plan[0]
     return DispatchResult("offline", raw, name, args, "；".join(results), _ms(started), results)
+
+
+def _try_llm(
+    text: str, executor: Executor, cfg: Config, context: dict[str, Any], started: float
+) -> DispatchResult | None:
+    """慢通道。不可用或失败时返回 None，交回给离线规划。
+
+    一旦本轮已经真的执行过工具，失败就**不再**回落离线规划：否则一次派发会因为
+    总结阶段的网络抖动被执行第二遍，副作用翻倍。
+    """
+    if not (cfg.flag("llm.enabled", False) and cfg.get("llm.base_url")):
+        return None
+    state: dict[str, Any] = {"executed": False, "results": []}
+    try:
+        return _llm_route(text, executor, cfg, context, started, state)
+    except Exception as exc:
+        executor.on_event("blocked", "模型不可用", str(exc))
+        if not state["executed"]:
+            return None
+        return DispatchResult("llm", text, reply=f"已执行，但总结失败：{exc}",
+                              latency_ms=_ms(started), results=list(state["results"]))
 
 
 def _multi_intent(

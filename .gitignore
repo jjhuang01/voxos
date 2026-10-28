@@ -9,3 +9,7 @@ config/hotwords.txt.generated
 dist/
 build/
 .DS_Store
+
+# 审计跑批产生的临时工作目录（浏览器 profile、隔离沙箱），不是交付物
+outputs/audit-*/
+outputs/audit-browser-*/

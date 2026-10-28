@@ -50,6 +50,7 @@ code_cli = "claude"           # 编程会话内执行的 CLI：claude | aider | 
 grafana_url = ""              # 说“看看监控”时打开的看板地址，留空则不打开
 backup_dir = ".voxos_backup"
 dry_run = true                # true = 不真的派发 tmux/IDE/浏览器，只打印将执行的命令
+allow_outside_roots = false   # true = 允许读写工作区外的绝对路径（等于放弃工作区边界）
 role = "DEVELOPER"            # DEVELOPER | OPS | DOCTOR
 log_template = "- **[{time}] [{category}]** ({project}) {content}"
 confirm_timeout_s = 8

@@ -243,6 +243,8 @@ class Executor:
                 return str(meta.fn(**args))
         except TimeoutError:
             return "上一条修改类指令还在执行，请稍后再说一次"
+        except PermissionError as exc:
+            return f"⛔ {exc}"
         except TypeError as exc:
             return f"参数不匹配：{exc}"
         except Exception as exc:  # 工具内部异常不得冒泡到音频线程
@@ -268,6 +270,8 @@ class Executor:
         path = Path(raw).expanduser()
         if not path.is_absolute():  # 与 tools._resolve 保持同一套相对路径规则
             path = self.cfg.path("workspace.default_code_dir", "~/Projects") / path
+        if not self.cfg.path_allowed(path):
+            return                     # 工具随后会拒绝；不要把工作区外的文件读进备份
         if path.exists():
             snapshot_file(path, self.backup_dir)
 

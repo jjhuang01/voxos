@@ -48,9 +48,11 @@ def configure(cfg: Config) -> Runtime:
 
 def _resolve(raw: str) -> Path:
     path = Path(os.path.expanduser(raw.strip()))
-    if path.is_absolute():
-        return path
-    return RT.cfg.path("workspace.default_code_dir", "~/Projects") / path
+    if not path.is_absolute():
+        path = RT.cfg.path("workspace.default_code_dir", "~/Projects") / path
+    if not RT.cfg.path_allowed(path):
+        raise PermissionError(f"路径不在允许的工作区内：{path}")
+    return path
 
 
 def _remember(path: Path) -> None:
@@ -269,7 +271,10 @@ def search_notes(query: str, root: str = "") -> str:
         query: 关键词
         root: 检索根目录，留空则用日志目录
     """
-    base = Path(os.path.expanduser(root)) if root else RT.cfg.path("workspace.daily_log_dir", "~/Documents/DevLogs")
+    if root:
+        base = _resolve(root)
+    else:
+        base = RT.cfg.path("workspace.daily_log_dir", "~/Documents/DevLogs")
     if not base.exists():
         return f"目录不存在：{base}"
     hits: list[str] = []

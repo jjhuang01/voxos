@@ -29,25 +29,46 @@
 | A21 | 页面缓存只存模板，令牌按请求注入 | `test_page_cache_never_reuses_another_context_token` |
 | A23 | `make verify` 为回归模式；`make verify-release` 让 GAP/SKIP 失败；GAP 标签不再覆盖达标 | 代码 + 文档 |
 | A24 | 短术语必须精确匹配；一个输出词只能认领一次；混说达标要求两套语料都 ≥95% | `verify.py` 逻辑 |
+| A19 | 工作区路径 allowlist：`cfg.path_allowed()` 默认只放行代码目录/日志目录及其子目录，相对路径一律锚到代码目录；越界抛 `PermissionError`，不落快照、不执行 | `test_outside_workspace_path_is_refused` / `test_tool_exception_does_not_escape` |
 | A25 | 审计 `ok` 不再靠前缀猜；请求体 1MB 上限与 30s 连接超时；文件头逐行读、笔记搜索先限量 | 代码 + `test_tool_failure_is_not_recorded_as_success` |
-| A26 | 补 `LICENSE`（Apache-2.0 全文）、`SECURITY.md`、CI 矩阵与 wheel 冒烟；模型下载临时文件 + 大小/非零/可选 SHA256 + 原子替换 | CI + `fetch_models.verify` |
+| A22 | 声明 `data-files`（config + web）、安装根回退；真实构建 wheel 并在空目录脱源安装冒烟 | 下方「wheel 脱源实测」 |
+| A26 | 补 `LICENSE`（Apache-2.0 全文）、`SECURITY.md`、CI 矩阵与 wheel 冒烟；模型下载写 `.part`、校验大小/非零/SHA256 后原子替换；四个模型已填实测 SHA256 | `fetch_models.verify` + CI |
 | A27 | 验收结论改为「18 通过 + 1 未达标」；删除不存在的 `--all`；收窄 README/REDLINES 的安全承诺；度量表同步 | `tests/test_docs.py` |
 
 ## 部分关闭（剩余边界写在这里）
 
 - **A16**：线程解耦与断流重置已做；真实麦克风的溢出率、8 小时、热插拔/蓝牙/休眠仍未实测。
-- **A19**：快照元数据已加完整性与 basename 校验；**工作区路径 allowlist 未做**——绝对路径仍是显式能力，不能当沙箱。外部 CLI 的副作用仍不受本进程完全管控。
-- **A22**：已声明 `data-files` 并提供安装根回退；**尚未构建 wheel 做脱源安装验证**（本机环境缺 `setuptools`），CI 里已加该步骤。
+- **A19**：路径边界已收紧到「默认工作区 allowlist」，`workspace.allow_outside_roots = true` 是显式的放弃边界开关。仍属**进程内**约束：外部 CLI（tmux 里跑的东西）的副作用不受本进程管控，也不试图沙箱化。
 - **A25**：结构化 `ToolResult` 未引入，仍以文本 + 审计布尔表达；线程/订阅全局配额未做。
-- **A26**：模型 SHA256 字段已支持但**尚未填入官方摘要**；许可证与第三方模型来源清单仍需人工核对。
+- **A26**：四个模型的 SHA256 已按实际下载文件填入；**第三方模型许可证与来源清单仍需人工核对**，这不是代码能替人做的判断。
+
+## wheel 脱源实测（0.1.7）
+
+```bash
+python -m build --wheel            # dist/voxos-0.1.7-py3-none-any.whl
+python -m venv /tmp/voxos-smoke/venv
+/tmp/voxos-smoke/venv/bin/pip install dist/voxos-0.1.7-py3-none-any.whl
+cd /tmp && /tmp/voxos-smoke/venv/bin/voxos tools
+```
+
+观察到的结果：
+
+- `voxos tools` 正常列出工具，不依赖源码树。
+- 资源根解析为 `/private/tmp/voxos-smoke/share/voxos`（安装布局回退生效）。
+- `chunk 512`、`redlines 11` 从安装目录读到。
+- 页面返回 200、31131 字节、令牌已注入、无 `__VOXOS_TOKEN__` 残留。
+- 错令牌访问 `/api/settings` 返回 401。
 
 ## 验证
 
 ```bash
-make test            # 202 passed
-make verify          # 回归模式：18 通过 + 1 未达标
-make verify-release  # 发布门禁：当前应失败（混说未达标）
+make test            # 205 passed
+make verify          # 回归模式：18 通过 + 1 未达标（混说术语召回，能力边界）
+make verify-release  # 发布门禁：退出码 1（GAP 也算不通过），这是**预期**结果
 ```
+
+`verify-release` 现在返回 1 不是回归——它拦住的是「真人混说 95% 尚未达标」这件事，
+而这件事只能靠真人语料解决，不能靠改代码。门禁在说谎才可怕，失败是它在正常工作。
 
 原审计探针 `outputs/audit_probes.py` 保留为**基线证据**：它按 0.1.6 的缺陷写断言，
 修复后多数会变成 `PROBE_ERROR`，这是预期结果，不是回归失败。

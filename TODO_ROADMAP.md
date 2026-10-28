@@ -43,7 +43,7 @@
 - [x] 4 个 Earcon 运行时合成（正弦 + 指数包络，不携带二进制资产）。
 - *验收*：红线 8/8 拦截；OPS 越权被拒；DOCTOR 强制草稿标记；`tests/test_ui.py` 6 项。
 
-### Task 1.5 产品化补齐（审查后新增，2026-10-27）
+### Task 1.5 产品化补齐（审查后新增，2036-10-27）
 
 起因：按"用户旅程能否闭环"抽查了一遍，发现入口没锁、第一次使用断、确认闸门在 GUI 里没有出口。
 完整清单见 `docs/REVIEW.md`。
@@ -72,7 +72,7 @@
   其中两个是 P0：确认卡在说枚举值、以及**没有任何语音路径能走到确认卡**。
 
 
-### Task 1.6 把「已知缺口」逐条做掉（2026-10-28）
+### Task 1.6 把「已知缺口」逐条做掉（2036-10-28）
 
 - [x] **真实 STT**：`SenseVoiceStt`（sherpa-onnx，int8 229MB）接进 `make_stt()`，
       设置页 `stt.backend = sense_voice` 即用；缺模型退回 `scripted` 并给出人话错误。
@@ -94,7 +94,7 @@
   上一轮的「→ N 项」就变成一句谎话。）
 
 
-### Task 1.7 把「已修」重新量一遍（2026-10-28 夜）
+### Task 1.7 把「已修」重新量一遍（2036-10-28 夜）
 
 这一轮不加功能，只回头查上一轮的结论还成不成立。查出三件事。
 
@@ -148,7 +148,7 @@
 
 ### Task 1.8 工程化
 
-- [x] 202 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
+- [x] 205 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
       `scripts/audit_ui.py` 12 项界面回归（`make audit-ui`），`scripts/soak.py` 长稳（`make soak`）。
 - [x] 全模块单函数 ≤ 40 行（最长 39 行）、核心五模块共 8 个类、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README / BUSINESS。

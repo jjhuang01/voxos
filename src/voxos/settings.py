@@ -86,6 +86,8 @@ SCHEMA: tuple[Field, ...] = (
           options=("DEVELOPER", "OPS", "DOCTOR")),
     Field("workspace.daily_log_dir", "日志目录", "str", "workspace", "写日志工具的目标目录。"),
     Field("workspace.default_code_dir", "代码目录", "str", "workspace", "续接编程会话的根目录。"),
+    Field("workspace.allow_outside_roots", "允许工作区外路径", "bool", "workspace",
+          "默认关闭。开启后语音指令可读写任意绝对路径，等于放弃工作区边界。"),
     Field("workspace.dry_run", "演练模式", "bool", "workspace",
           "开启时不真的派发 tmux / IDE / 浏览器，只打印将执行的命令。"),
     Field("workspace.confirm_timeout_s", "确认超时", "int", "workspace",

@@ -22,7 +22,7 @@
 | 7 | 角色隔离（OPS 不可写文件） | 必须 | 拒绝并播报「当前角色 OPS 没有…的权限」 | ✅ |
 | 8 | 医疗草稿强制标记 | 必须 | 结果前缀`【未审核草稿】` | ✅ |
 | 9 | 单函数 ≤ 40 行 | 全部 | 最长 **39 行**（`core.dispatch`） | ✅ |
-| 10 | 测试全绿 | 100% | **202 passed**（约 25s） | ✅ |
+| 10 | 测试全绿 | 100% | **205 passed**（约 25s） | ✅ |
 | 11 | 跨站 / 无令牌请求被拦截 | 必须 | **401 / 403 / 200** 三个码全对，被拒请求一次都没执行 | ✅ |
 | 12 | 上下文注入不阻塞派发 | p95 < 5ms | **0.01ms**（修复前同步调 osascript 为 271ms） | ✅ |
 | 13 | 设置写回保住注释 | 必须 | 改值、保注释、写到 `--config` 指定文件、非法值零写入 | ✅ |
@@ -119,24 +119,28 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 | `main.py` | 680 | CLI 编排 / 守护循环 / 确认闸门 |
 | `audio.py` | 591 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
 | `ui.py` | 449 | 状态总线 / SSE / Earcon / 本地接口 |
-| `core.py` | 356 | 快慢双通道路由 / 多意图切分 / LLM 客户端 |
-| `settings.py` | 345 | 字段模式 / 范围校验 / 保留注释的 TOML 写回 / 撤销 |
-| `tools.py` | 324 | 10 个原子工具 |
+| `core.py` | 369 | 快慢双通道路由 / 多意图切分 / LLM 客户端 |
+| `settings.py` | 347 | 字段模式 / 范围校验 / 保留注释的 TOML 写回 / 撤销 |
+| `tools.py` | 329 | 10 个原子工具 |
 | `dsp.py` | 281 | 纯函数信号处理（零 I/O，可离线测） |
-| `safety.py` | 341 | 红线网关 / 快照 / 执行器 / 审计 |
+| `safety.py` | 345 | 红线网关 / 快照 / 执行器 / 审计 |
 | `registry.py` | 191 | 工具契约 / `@tool` 自省 / 注册表 |
 | `corpus.py` | 224 | 验收语料生成 |
-| `config.py` | 120 | TOML + 环境变量 |
+| `config.py` | 138 | TOML + 环境变量 |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **3909** | 10 个工具 / 4 条快通道 / 202 项测试 |
+| **合计** | **3951** | 10 个工具 / 4 条快通道 / 205 项测试 |
 
-- 最长函数 **39 行**（`core.dispatch`），预算 40 行，无超限函数。
+- 最长函数 **39 行**（`scripts/verify.py:measure_stt`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；
   `audio.py` 的 13 个类全是可替换后端，各自只有一个职责。
 - 核心链路（registry/safety/core/config）**零第三方依赖**；numpy 仅用于音频。
 - 首版 `core.py` 曾达 598 行，按 `CODING_PHILOSOPHY.md §8` 拆为 `registry/safety/core` 三个深模块。
 - 这一轮 `core.dispatch` 因为加多意图分支一度涨到 43 行，超了预算——被验收项 #9 当场逮住，
   把分支提成 `_multi_intent()` 才回到 39 行。这条规则不是写在文档里好看的。
+- 审计修复又把它顶到 45 行（加了「已执行副作用」状态记录），再次被同一项逮住，
+  提出 `_try_llm()` 后回到 37 行。**同一个坑踩两次**，所以这一轮补了
+  `tests/test_docs.py::test_no_function_exceeds_the_line_budget`——让 `pytest` 也拦，
+  不必等到整轮验收才发现。
 
 ---
 
@@ -148,8 +152,14 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 - 全链路：真实 WAV → Silero VAD → 端点 → 声纹 → STT(脚本化) → 快通道 → 工具 → 落盘 → 审计
 - 全链路：真实 WAV → SenseVoice-Small int8 真实转写 → 路由 → 工具（字符错误率 2.8%，36× 实时）
 - 安全矩阵 12 个场景、角色隔离、确认闸门
+- 工作区路径边界：工作区外绝对路径被 `⛔` 拒绝，不落快照、不执行
 - UI：状态总线、SSE、`/state`、`/command`、Earcon 合成、胶囊 HTML 结构
 - UI 视觉：`scripts/shot.py` 驱动真实页面截 10 个状态，并用 `getBoundingClientRect` 当探针
+- 界面回归：`scripts/audit_ui.py` **12/12 通过**（真实 `voxos serve` + headless Chrome）
+- `voxos demo` 端到端：2 条接受、1 条声纹拒绝，日志与运维工具正常
+- wheel 脱源安装：`dist/voxos-0.1.7-py3-none-any.whl` 装进空 venv，资源根解析到
+  `<prefix>/share/voxos`，`redlines 11`、页面 200 且令牌已注入、错令牌 401
+- 模型完整性：CAM++ / Silero / SenseVoice / tokens 四个文件已按实测值填入 SHA256，下载走 `.part` + 校验后原子替换
 - Silero VAD 真实推理：真实语音检出率 92%，静音误报 0%，算力 3.9ms / 秒音频
 
 **未验证（不要当成已实现）**
@@ -160,6 +170,8 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 | 真麦克风 8 小时长稳 | 需要授权与长时间占用设备 | `scripts/soak.py` 跑了 25 分钟管道层：内存跨度 0.8MB、CPU 11.7%、无缓冲堆积（见 REVIEW §25）；设备热插拔/休眠唤醒未测 |
 | 面罩/低语模式 | 无硬件 | `mask_mode` 的 EQ/AGC 只做了信号级单测 |
 | LLM 慢通道 | 未接真实模型（无 Key） | 多轮 tool_calls 只在代码路径与错误兜底上测过 |
+| 浏览器攻击链 | 只做了 Host/Origin/令牌的构造请求级验证 | DNS rebinding、真实 XSS 链未在浏览器里跑过 |
+| 第三方模型许可证 | 需人工核对上游仓库声明 | 代码能校验摘要，不能替人判断许可 |
 
 > 「拖拽 / 长按 / 动效逐帧」这一项删掉了：界面里没有 `pointerdown`/`mousedown`/`touchstart`，
 > 既没有拖拽也没有长按，原来那条待办是对着不存在的交互写的（见 `docs/REVIEW.md §23`）。
@@ -173,7 +185,7 @@ cd voxos
 make setup                         # 首次：建 .venv 并装依赖（约 20s）
 python scripts/fetch_models.py     # 首次：CAM++ 与 Silero（约 28MB，必需）
                                    #       默认含 SenseVoice（229MB，可选）；--no-asr 只取声纹与 VAD
-make test                          # 202 passed
+make test                          # 205 passed
 make verify                        # 回归模式：18 通过 + 1 项 GAP
 make verify-release                # 发布门禁：GAP / SKIP 也算不通过
 make demo                          # 真实语音端到端（沙箱写盘）

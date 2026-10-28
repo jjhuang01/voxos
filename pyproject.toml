@@ -28,7 +28,7 @@ where = ["src"]
 
 # 运行资源不在 src 包里：不声明它们，普通安装会缺默认配置、红线策略和胶囊页面。
 [tool.setuptools.data-files]
-"share/voxos/config" = ["config/settings.toml", "config/redlines.toml", "config/hotwords.txt"]
+"share/voxos/config" = ["config/settings.toml", "config/redlines.toml"]
 "share/voxos/web" = ["web/pill.html"]
 
 [tool.pytest.ini_options]

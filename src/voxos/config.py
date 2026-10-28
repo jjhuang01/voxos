@@ -76,6 +76,24 @@ class Config:
             return value.strip().lower() in _TRUE
         return bool(value)
 
+    def path_allowed(self, path: str | Path) -> bool:
+        """这个路径是否在允许的工作区内。
+
+        默认只允许「代码目录」与「日志目录」及其子目录；绝对路径本身不是越权，
+        但一个只听语音的 Agent 不应该因为转写里出现 `/etc/passwd` 就去读它。
+        确需访问外部目录时，显式打开 `workspace.allow_outside_roots`。
+        """
+        if self.flag("workspace.allow_outside_roots", False):
+            return True
+        target = Path(os.path.expanduser(str(path))).resolve()
+        roots = [self.path("workspace.default_code_dir", "~/Projects"),
+                 self.path("workspace.daily_log_dir", "~/Documents/DevLogs")]
+        for root in roots:
+            base = root.expanduser().resolve()
+            if target == base or base in target.parents:
+                return True
+        return False
+
     def with_overrides(self, **dotted_values: Any) -> "Config":
         """返回副本，用于测试注入。"""
         data = {k: (dict(v) if isinstance(v, dict) else v) for k, v in self.data.items()}

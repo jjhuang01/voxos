@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import sys
@@ -103,3 +104,39 @@ def test_source_line_table_matches_reality():
     actual_total = sum(len(p.read_text(encoding="utf-8").splitlines())
                        for p in (ROOT / "src/voxos").glob("*.py"))
     assert int(total.group(1)) == actual_total, f"合计写 {total.group(1)}，实际 {actual_total}"
+
+
+def _function_lengths() -> list[tuple[str, int]]:
+    """源码和脚本一起量：只扫 `src/` 会让这条规矩管不到真正干活的脚本。"""
+    found: list[tuple[str, int]] = []
+    for path in sorted(list((ROOT / "src/voxos").glob("*.py"))
+                       + list((ROOT / "scripts").glob("*.py"))):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                length = (node.end_lineno or node.lineno) - node.lineno + 1
+                found.append((f"{path.relative_to(ROOT)}:{node.name}", length))
+    return found
+
+
+def test_no_function_exceeds_the_line_budget():
+    """「单函数 ≤ 40 行」是验收项 #9，但以前只有 `make verify` 管它。
+
+    结果就是：审计修复把 `core.dispatch` 顶到 45 行时，`pytest` 一声不响，
+    要等到整轮验收才发现。规矩应该在**最近的地方**拦，不是在最远的地方。
+    """
+    budget = 40
+    offenders = [f"  {name} = {length} 行"
+                 for name, length in _function_lengths() if length > budget]
+    assert not offenders, f"超过 {budget} 行的函数：\n" + "\n".join(offenders)
+
+
+def test_acceptance_names_the_real_longest_function():
+    """验收表里「最长函数 N 行（`xxx`）」不能是上一轮的记忆。"""
+    text = (ROOT / "docs/ACCEPTANCE.md").read_text(encoding="utf-8")
+    match = re.search(r"最长函数 \*\*(\d+) 行\*\*（`([^`]+)`）", text)
+    assert match, "验收表里没写最长函数"
+    name, length = max(_function_lengths(), key=lambda pair: pair[1])
+    assert (int(match.group(1)), match.group(2)) == (length, name), (
+        f"文档写 {match.group(1)} 行（{match.group(2)}），"
+        f"实际最长是 {length} 行（{name}）")

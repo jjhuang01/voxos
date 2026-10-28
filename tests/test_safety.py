@@ -195,8 +195,15 @@ def test_events_emitted_in_order(cfg, bus):
 
 def test_tool_exception_does_not_escape(cfg, bus):
     executor = core.Executor(cfg=cfg, on_event=bus)
-    result = executor.execute_safely("read_file_head", {"file_path": "/nonexistent/xx.py"})
+    result = executor.execute_safely("read_file_head", {"file_path": "never-there.py"})
     assert "不存在" in result
+
+
+def test_outside_workspace_path_is_refused(cfg, bus):
+    """绝对路径不是默认能力：语音里出现 /etc/passwd 不能变成一次读取。"""
+    executor = core.Executor(cfg=cfg, on_event=bus)
+    result = executor.execute_safely("read_file_head", {"file_path": "/etc/hosts"})
+    assert result.startswith("⛔") and "工作区" in result
 
 
 def test_concurrent_writes_are_serialized(cfg, bus, tmp_path):

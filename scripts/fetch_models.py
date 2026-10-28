@@ -25,23 +25,27 @@ MODELS = {
                "speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
         "min_bytes": 20_000_000,
         "desc": "CAM++ 中文声纹嵌入（192 维，CPU 20ms 内完成推理）",
+            "sha256": "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11",
     },
     "silero_vad.onnx": {
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
         "min_bytes": 500_000,
         "desc": "Silero VAD（512 定长窗口，实时率约 0.4%）",
+            "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
     },
     "sense-voice/model.int8.onnx": {
         "url": "https://huggingface.co/csukuangfj/"
                "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx",
         "min_bytes": 200_000_000,
         "desc": "SenseVoice 离线识别（int8，中英日韩粤，239MB）",
+            "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
     },
     "sense-voice/tokens.txt": {
         "url": "https://huggingface.co/csukuangfj/"
                "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt",
         "min_bytes": 200_000,
         "desc": "SenseVoice 词表",
+            "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
     },
 }
 
