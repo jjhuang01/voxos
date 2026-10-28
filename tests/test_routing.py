@@ -11,6 +11,18 @@ from voxos import core
 from voxos.config import Config, load
 
 
+def test_command_phrase_is_not_stolen_by_open_app():
+    """「运行命令 ls」不能被「运行 xx」那条打开应用的正则吃掉。
+
+    快通道是**先注册先匹配**：`open_app` 认「运行 / 打开 / 启动」，如果
+    `run_command` 也认「运行」，它排在后面就永远轮不到——用户说「运行命令 ls」
+    会得到「没找到「命令 ls」」。所以命令只认「执行 / 跑」。
+    """
+    assert core._fast_route("执行命令 echo hi") == ("run_command", {"command": "echo hi"})
+    assert core._fast_route("跑命令 echo hi") == ("run_command", {"command": "echo hi"})
+    assert core._fast_route("运行微信")[0] == "open_app"
+
+
 def offline() -> Config:
     """真实配置，但把慢通道关掉。
 

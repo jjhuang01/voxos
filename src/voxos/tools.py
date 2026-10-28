@@ -433,7 +433,7 @@ def tell_time(what: str = "几点") -> str:
 # 边界不靠自己写正则判断（shell 是一棵树，绕法无穷），而是交给 macOS 自带的
 # seatbelt；发消息这种只能模拟按键的事，照抄社区跑通的做法并如实说清代价。
 
-@tool(fast=r"^(?:执行|运行|跑)(?:一下)?(?:终端)?命令[：:\s]+(.+)$", risk="yellow")
+@tool(fast=r"^(?:执行|跑)(?:一下)?(?:终端)?命令[：:\s]+(.+)$", risk="yellow")
 def run_command(command: str, timeout: int = 0) -> str:
     """在本机执行一条 shell 命令（默认关在 macOS 沙箱里，只能写工作区和临时目录）。
 
