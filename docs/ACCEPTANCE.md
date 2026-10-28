@@ -158,7 +158,7 @@ Meijia 中文女声、Samantha / Karen / Moira 英文女声、Daniel 英文男�
 - UI 视觉：`scripts/shot.py` 驱动真实页面截 10 个状态，并用 `getBoundingClientRect` 当探针
 - 界面回归：`scripts/audit_ui.py` **12/12 通过**（真实 `voxos serve` + headless Chrome）
 - `voxos demo` 端到端：2 条接受、1 条声纹拒绝，日志与运维工具正常
-- wheel 脱源安装：`dist/voxos-0.1.10-py3-none-any.whl` 装进空 venv，资源根解析到
+- wheel 脱源安装：`dist/voxos-0.1.12-py3-none-any.whl` 装进空 venv，资源根解析到
   `<prefix>/share/voxos`，`redlines 11`、页面 200 且令牌已注入、错令牌 401
 - 模型完整性：CAM++ / Silero / SenseVoice / tokens 四个文件已按实测值填入 SHA256，下载走 `.part` + 校验后原子替换
 - Silero VAD 真实推理：真实语音检出率 92%，静音误报 0%，算力 3.9ms / 秒音频
