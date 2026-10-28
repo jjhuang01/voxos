@@ -188,7 +188,6 @@ voxos/
 ├── PROMPTS_AND_ROUTING.md  # 快慢双通道、热词、Prompt、Session 寻址
 ├── DESIGN_SYSTEM.md        # 胶囊四态、Earcon、声学补偿、无障碍
 ├── TODO_ROADMAP.md         # 分阶段验收清单（含真实完成状态）
-├── BUSINESS.md             # Lean Canvas / 4P / 演进与风险
 ├── docs/ACCEPTANCE.md      # 实测验收报告（数字来自 scripts/verify.py）
 ├── config/
 │   ├── settings.toml       # 全局配置（TOML，标准库解析）

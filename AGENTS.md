@@ -21,7 +21,7 @@
 | 新增工具、改风险等级、碰文件系统 | `REDLINES.md`（安全红线，不可协商） |
 | 改 UI、音效、配色、动效 | `DESIGN_SYSTEM.md` |
 | 决定"现在该做什么" | `TODO_ROADMAP.md` |
-| 商业化、定价、指标 | `BUSINESS.md` |
+| 商业化、定价、指标 | `BUSINESS.md`（**本地文档，不入库**） |
 
 ## 3. 给代码生成模型的死命令（Coding Iron Rules）
 

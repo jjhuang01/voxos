@@ -11,8 +11,9 @@ build/
 .DS_Store
 
 # 审计跑批产生的临时工作目录（浏览器 profile、隔离沙箱），不是交付物
-outputs/audit-*/
-outputs/audit-browser-*/
+outputs/
+# 商业文档（定价/指标/竞品）：只留本地，不进公开仓库
+BUSINESS.md
 
 # 本地工作记忆，不进仓库
 .workbuddy-ai/
