@@ -105,8 +105,10 @@ def _unwrap(body: dict[str, Any]) -> dict[str, Any]:
 def llm_ready(cfg: Config) -> tuple[bool, str]:
     """慢通道现在能不能真的发出去；不能就说明缺哪一样。
 
-    只做**报告**不做拦截：拦截会让「开了但没配 Key」的机器悄悄退回离线兜底，
-    用户以为模型在思考，其实一个请求都没发出去。所以照常发、照常失败、照常显示。
+    `_try_llm` 用它做闸门：缺 Key 就一个请求都不发，省掉一次注定失败的等待。
+    但**闸门必须有出口**——状态页、`voxos doctor`、`voxos llm` 都把 `why` 显示出来。
+    否则「开了但没配 Key」会悄悄退回离线兜底，用户以为模型在思考，
+    其实一个请求都没发出去。
     """
     if not cfg.flag("llm.enabled", False):
         return False, "未启用"
