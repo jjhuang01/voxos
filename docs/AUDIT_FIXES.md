@@ -30,7 +30,7 @@
 | A23 | `make verify` 为回归模式；`make verify-release` 让 GAP/SKIP 失败；GAP 标签不再覆盖达标 | 代码 + 文档 |
 | A24 | 短术语必须精确匹配；一个输出词只能认领一次；混说达标要求两套语料都 ≥95% | `verify.py` 逻辑 |
 | A19 | 工作区路径 allowlist：`cfg.path_allowed()` 默认只放行代码目录/日志目录及其子目录，相对路径一律锚到代码目录；越界抛 `PermissionError`，不落快照、不执行 | `test_outside_workspace_path_is_refused` / `test_tool_exception_does_not_escape` |
-| A25 | 审计 `ok` 不再靠前缀猜；请求体 1MB 上限与 30s 连接超时；文件头逐行读、笔记搜索先限量 | 代码 + `test_tool_failure_is_not_recorded_as_success` |
+| A25 | 审计 `ok` 不再靠前缀猜；请求体 1MB 上限与 30s 连接超时；文件头逐行读、笔记搜索先限量；SSE 订阅上限 16，超限 503 | `test_tool_failure_is_not_recorded_as_success` / `test_stream_returns_503_when_subscribers_are_exhausted` |
 | A22 | 声明 `data-files`（config + web）、安装根回退；真实构建 wheel 并在空目录脱源安装冒烟 | 下方「wheel 脱源实测」 |
 | A26 | 补 `LICENSE`（Apache-2.0 全文）、`SECURITY.md`、CI 矩阵与 wheel 冒烟；模型下载写 `.part`、校验大小/非零/SHA256 后原子替换；四个模型已填实测 SHA256 | `fetch_models.verify` + CI |
 | A27 | 验收结论改为「18 通过 + 1 未达标」；删除不存在的 `--all`；收窄 README/REDLINES 的安全承诺；度量表同步 | `tests/test_docs.py` |
@@ -39,7 +39,10 @@
 
 - **A16**：线程解耦与断流重置已做；真实麦克风的溢出率、8 小时、热插拔/蓝牙/休眠仍未实测。
 - **A19**：路径边界已收紧到「默认工作区 allowlist」，`workspace.allow_outside_roots = true` 是显式的放弃边界开关。仍属**进程内**约束：外部 CLI（tmux 里跑的东西）的副作用不受本进程管控，也不试图沙箱化。
-- **A25**：结构化 `ToolResult` 未引入，仍以文本 + 审计布尔表达；线程/订阅全局配额未做。
+- **A25**：订阅配额已加（`StatusBus.MAX_SUBSCRIBERS = 16`，超限返回 503 而不是挤掉老连接）；
+  仍**未引入结构化 `ToolResult`**，结果仍以文本 + 审计布尔表达，调用方拿不到字段化的失败原因。
+  每个 HTTP 连接一个线程的模型也没换（`ThreadingHTTPServer`），订阅配额只是给 SSE 这条路设了闸，
+  不是通用的连接池。
 - **A26**：四个模型的 SHA256 已按实际下载文件填入；**第三方模型许可证与来源清单仍需人工核对**，这不是代码能替人做的判断。
 
 ## wheel 脱源实测（0.1.7）
@@ -62,7 +65,7 @@ cd /tmp && /tmp/voxos-smoke/venv/bin/voxos tools
 ## 验证
 
 ```bash
-make test            # 205 passed
+make test            # 207 passed
 make verify          # 回归模式：18 通过 + 1 未达标（混说术语召回，能力边界）
 make verify-release  # 发布门禁：退出码 1（GAP 也算不通过），这是**预期**结果
 ```

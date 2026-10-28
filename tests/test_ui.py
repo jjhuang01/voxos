@@ -204,6 +204,36 @@ def test_status_and_history_endpoints(server):
     assert json.loads(_get(instance, "/api/history")[1])[0]["text"] == "写日志"
 
 
+def test_subscriber_count_is_capped():
+    """每个 SSE 订阅占一个服务线程，没有上限就是一条本地 DoS 通道。
+
+    选择「拒绝」而不是「挤掉最老的」：挤掉谁都是静默失效（页面还连着、却再也收不到
+    状态），而拒绝至少让调用方看见 503。
+    """
+    bus = ui.StatusBus(None)
+    channels = [bus.subscribe() for _ in range(ui.StatusBus.MAX_SUBSCRIBERS)]
+    with pytest.raises(RuntimeError):
+        bus.subscribe()
+    bus.unsubscribe(channels[0])
+    bus.subscribe()          # 释放一个就能再要一个，上限不是一次性的
+    assert len(bus._subs) == ui.StatusBus.MAX_SUBSCRIBERS
+
+
+def test_stream_returns_503_when_subscribers_are_exhausted():
+    bus = ui.StatusBus(None)
+    for _ in range(ui.StatusBus.MAX_SUBSCRIBERS):
+        bus.subscribe()
+    ctx = ui.UiContext(bus=bus, token=TOKEN, pill_file=REPO / "web" / "pill.html")
+    instance = ui.serve(ctx, "127.0.0.1", 0, block=False)
+    try:
+        status, body = _get(instance, "/events")
+        assert status == 503, f"订阅满了还给了 {status}"
+        assert "上限" in json.loads(body)["error"]
+    finally:
+        instance.shutdown()
+        instance.server_close()
+
+
 def test_unknown_route_is_404(server):
     instance, _ = server
     assert _get(instance, "/nope")[0] == 404

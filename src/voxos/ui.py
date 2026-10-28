@@ -48,6 +48,11 @@ class Event:
 class StatusBus:
     """线程安全的事件总线：落 JSONL + 推送给所有订阅者（SSE/测试）。"""
 
+    MAX_SUBSCRIBERS = 16
+    """订阅上限。每个 SSE 订阅占一个服务线程，没有上限就是一条本地 DoS 通道：
+    页面开一百个 EventSource 就能把进程的线程数堆上去。超限**拒绝**而不是挤掉老的，
+    因为挤掉谁都是静默失效，而拒绝至少能让调用方看见 503。"""
+
     def __init__(self, path: Path | None = None, history: int = 50) -> None:
         self.path = path
         self._events: deque[Event] = deque(maxlen=history)
@@ -78,8 +83,11 @@ class StatusBus:
         return self.emit(state, label, detail)
 
     def subscribe(self) -> queue.Queue[Event]:
-        channel: queue.Queue[Event] = queue.Queue(maxsize=100)
+        """拿一个订阅通道。超过上限时抛 `RuntimeError`，由调用方转成 503。"""
         with self._lock:
+            if len(self._subs) >= self.MAX_SUBSCRIBERS:
+                raise RuntimeError(f"订阅数已达上限 {self.MAX_SUBSCRIBERS}")
+            channel: queue.Queue[Event] = queue.Queue(maxsize=100)
             self._subs.append(channel)
         return channel
 
@@ -402,12 +410,16 @@ class _PillHandler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------- SSE
     def _stream(self) -> None:
+        try:
+            channel = self.ctx.bus.subscribe()
+        except RuntimeError as exc:
+            self._json({"ok": False, "error": str(exc)}, 503)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
-        channel = self.ctx.bus.subscribe()
         try:
             self._frame(self.ctx.bus.snapshot())
             while True:
