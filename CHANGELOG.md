@@ -6,6 +6,36 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 
 格式约定：`## [x.y.z] - YYYY-MM-DD`，一个版本一段，从新到旧。
 
+## [0.1.34] - 2026-10-30
+
+### `doctor` 一直在报假的样本数
+
+0.1.31 起，`doctor` 的「声纹档案」这行会数 npz 里有几个数组，少于 2 个就报
+「只有 1 个样本 ← 阈值边缘」。问题是 **`SpeakerLock.enroll` 存的是均值向量**：
+录 1 句和录 5 段取均值，文件里都是 1 个 192 维数组。
+
+于是用户刚录完 5 段，`doctor` 还在劝他重录。这条提示从加进来那天起就没说对过。
+
+### 录入元数据单独存
+
+`~/.voxos/voiceprint_profiles.json`（和 npz 同目录）：
+
+```json
+{"segments": 5, "consistency": 0.755, "holdout": null,
+ "threshold": 0.75, "at": "2026-10-30T14:12:03"}
+```
+
+`doctor` 读它，报的是能判断「能不能用」的那句话：
+
+```
+已录入（5 段均值，一致性 0.755 / 阈值 0.75，← 会被自己拒，重录：voxos enroll）
+```
+
+早期档案没有这个文件，就老实说「质量未记录」——**宁可承认不知道，也不要
+编一个样本数出来**。
+
+测试 398 项（396 passed + 2 skipped）。
+
 ## [0.1.33] - 2026-10-30
 
 用户在 0.1.32 上跑 `voxos enroll`，得到：
@@ -48,7 +78,7 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 0.755 也照样弹「录入完成」。现在走同一套判断，并多返回 `holdout` 和
 `usable` 两个字段。
 
-测试 395 项（393 passed + 2 skipped），新增 `tests/test_enroll.py` 7 项。
+测试 398 项（396 passed + 2 skipped），新增 `tests/test_enroll.py` 10 项。
 
 ## [0.1.32] - 2026-10-30
 

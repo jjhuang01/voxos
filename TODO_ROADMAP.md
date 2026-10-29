@@ -148,7 +148,7 @@
 
 ### Task 1.8 工程化
 
-- [x] 395 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
+- [x] 398 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
       `scripts/audit_ui.py` 12 项界面回归（`make audit-ui`），`scripts/soak.py` 长稳（`make soak`）。
 - [x] 全模块单函数 ≤ 40 行（最长 40 行，`core.dispatch`）、核心五模块共 8 个类、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README。

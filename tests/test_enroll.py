@@ -111,3 +111,56 @@ def test_verdict_prefers_the_holdout_score_over_consistency(capsys):
     out = capsys.readouterr().out
     assert "不可用" in out
     assert "留出验证 0.740" in out
+
+
+def _enrolled_cfg(tmp_path, segments: int, consistency: float, holdout, threshold: float):
+    """造一个「已经录过音」的配置：npz 里放均值向量，旁边放录入元数据。"""
+    from voxos.config import Config
+    from voxos.main import _save_enroll_meta
+
+    npz = tmp_path / "vp.npz"
+    np.savez(npz, normal=np.ones(192, dtype=np.float32))
+    cfg = Config({"audio": {"voiceprint_profiles": str(npz)}}, data_root=tmp_path)
+    _save_enroll_meta(cfg, _segments(segments, 2.0), consistency, holdout, threshold)
+    return cfg
+
+
+def test_voiceprint_note_reports_quality_not_a_misleading_sample_count(tmp_path):
+    """npz 里永远是 1 个均值向量，所以「只有 1 个样本」这句话从来就不对。
+
+    录 1 句和录 5 段取均值，文件里长得一模一样（都是 1 个 192 维数组）。
+    只数 npz 的 shape，doctor 会把「5 段均值」也报成「只有 1 个样本」，
+    然后建议用户重录——而用户刚录完。必须读录入时记下的元数据。
+    """
+    from voxos.main import _voiceprint_note
+
+    cfg = _enrolled_cfg(tmp_path, segments=5, consistency=0.755, holdout=None, threshold=0.75)
+    note = _voiceprint_note(cfg)
+
+    assert "5 段" in note
+    assert "0.755" in note
+    assert "会被自己拒" in note
+    assert "只有 1 个样本" not in note
+
+
+def test_voiceprint_note_calls_a_good_profile_usable(tmp_path):
+    """留出 0.81 / 阈值 0.75 是标定过的可用组合，不该再劝人重录。"""
+    from voxos.main import _voiceprint_note
+
+    cfg = _enrolled_cfg(tmp_path, segments=3, consistency=0.84, holdout=0.81, threshold=0.75)
+    note = _voiceprint_note(cfg)
+
+    assert "可用" in note
+    assert "重录" not in note
+
+
+def test_voiceprint_note_admits_when_quality_was_never_recorded(tmp_path):
+    """早期档案没有元数据。宁可说「未记录」，也不要编一个样本数出来。"""
+    from voxos.config import Config
+    from voxos.main import _voiceprint_note
+
+    npz = tmp_path / "vp.npz"
+    np.savez(npz, normal=np.ones(192, dtype=np.float32))
+    cfg = Config({"audio": {"voiceprint_profiles": str(npz)}}, data_root=tmp_path)
+
+    assert "质量未记录" in _voiceprint_note(cfg)

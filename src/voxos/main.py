@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import json
 import math
 import os
 import queue
@@ -319,6 +320,7 @@ def _enroll_now(cfg: Config, lock: dsp.SpeakerLock, seconds: float,
         done.set()
     # 胶囊这边以前只看「段数 ≥ 2」就说成功：10 秒切 5 段、一致性 0.755、阈值
     # 0.75 也照样弹「录入完成」，用户以为好了，然后每句话都被自己拒之门外。
+    _save_enroll_meta(cfg, samples, float(consistency), holdout, lock.threshold)
     warning = _enroll_verdict(samples, float(consistency), lock.threshold, holdout)
     if not warning and len(samples) < 2:
         warning = "只切出 1 句：模板不稳，建议再说 2 句（句间停半秒），否则可能被自己拒之门外"
@@ -855,6 +857,7 @@ def cmd_enroll(args: argparse.Namespace, cfg: Config) -> int:
     lock.save(cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
     print(f"已录入 {len(samples)} 段（{args.mode}），一致性 {consistency:.3f} → "
           f"{cfg.path('audio.voiceprint_profiles')}")
+    _save_enroll_meta(cfg, samples, consistency, holdout, lock.threshold)
     _enroll_verdict(samples, consistency, lock.threshold, holdout)
     return 0
 
@@ -1242,27 +1245,58 @@ def _tts_note(cfg: Config) -> str:
     return f"{why}（上次失败：{last}）" if last else why
 
 
-def _voiceprint_note(cfg: Config) -> str:
-    """声纹档案里有几个样本。
+def _enroll_meta_path(cfg: Config) -> Path:
+    """录入元数据落在声纹档案旁边。
 
-    **只报「已录入」是不够的**：录 1 个样本和录 3 个样本取均值，是两种完全不同的
-    可靠性。配置注释里写着「只录 1 句时同人换句话只有 0.751」，而阈值默认 0.75——
-    差 0.001。于是现象是「有时能用有时不能用」，而用户看到的只有「已录入」。
+    npz 里存的是**均值向量**——录 1 句和录 5 段取均值，文件里都是 1 个 192 维
+    数组，从文件本身分不出来。而这两者的可靠性差很远。所以段数和留出分数必须
+    单独记，否则 doctor 只能一直报「只有 1 个样本」，那是假话。
     """
-    path = cfg.path("audio.voiceprint_profiles")
-    if not path.exists():
+    return cfg.path("audio.voiceprint_profiles").with_suffix(".json")
+
+
+def _save_enroll_meta(cfg: Config, samples: list[object], consistency: float,
+                      holdout: float | None, threshold: float) -> None:
+    try:
+        _enroll_meta_path(cfg).write_text(json.dumps({
+            "segments": len(samples),
+            "consistency": round(float(consistency), 4),
+            "holdout": None if holdout is None else round(float(holdout), 4),
+            "threshold": float(threshold),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:                        # 记不下来不该让录入失败
+        print(f"[voxos] 录入元数据写入失败（忽略）：{exc}")
+
+
+def _voiceprint_note(cfg: Config) -> str:
+    """声纹档案的真实质量。
+
+    **只报「已录入」是不够的**：录 1 个样本和录 5 段取均值，是两种完全不同的
+    可靠性。而 npz 里两者都只表现为 1 个均值向量，所以要读录入时记下的元数据。
+    """
+    if not cfg.path("audio.voiceprint_profiles").exists():
         return "未录入（voxos enroll，10 秒说 2~3 句）"
     try:
-        import numpy as np  # noqa: PLC0415
+        meta = json.loads(_enroll_meta_path(cfg).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "已录入（早期档案，质量未记录；voxos enroll 重录一次即可看到分数）"
+    return _meta_note(meta)
 
-        data = np.load(str(path), allow_pickle=True)
-        counts = [1 if len(data[key].shape) == 1 else data[key].shape[0] for key in data.keys()]
-    except Exception as exc:                      # 文件损坏也要能报，不能崩
-        return f"已录入（读不出来：{exc}）"
-    low = min(counts) if counts else 0
-    if low < 2:
-        return f"已录入，但只有 {low} 个样本 ← 阈值边缘，建议重录：voxos enroll（10 秒说 2~3 句）"
-    return f"已录入（{low} 个样本取均值）"
+
+def _meta_note(meta: dict[str, object]) -> str:
+    """把录入元数据翻成一句能判断「能不能用」的话。"""
+    segments = meta.get("segments") or 0
+    threshold = float(meta.get("threshold") or 0.75)
+    score, label = meta.get("holdout"), "留出验证"
+    if score is None:
+        score, label = meta.get("consistency"), "一致性"
+    if score is None:
+        return f"已录入（{segments} 段均值，质量未记录）"
+    margin = float(score) - threshold
+    verdict = "可用" if margin >= 0.04 else "← 会被自己拒，重录：voxos enroll"
+    return (f"已录入（{segments} 段均值，{label} {float(score):.3f} / "
+            f"阈值 {threshold:.2f}，{verdict}）")
 
 
 def _turn_note(cfg: Config) -> str:
