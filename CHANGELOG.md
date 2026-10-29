@@ -6,6 +6,25 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 
 格式约定：`## [x.y.z] - YYYY-MM-DD`，一个版本一段，从新到旧。
 
+## [0.1.32] - 2026-10-30
+
+0.1.31 发布后自查发现的一处显示缺陷，以及一处文档与实现不一致。
+
+### `voxos log` 的时间列对短时间戳会整列消失
+
+`Turn.line()` 用固定下标 `self.ts[11:19]` 取时分秒，隐含假设 `ts` 一定是
+`record()` 补出来的 ISO 全格式 `2026-10-30T13:46:55`。手工构造的 `Turn`
+（诊断脚本、测试、将来从别处反序列化的记录）如果只给 `13:46:55`，切片落到
+空字符串——**时间列整个空白，看起来像「时间没记上」**，而实际上记录是好的。
+
+改成按 `T` 切：`self.ts.rsplit("T", 1)[-1][:8]`。两种格式都对。
+`test_timeline_line_shows_the_clock_for_both_timestamp_shapes` 钉住。
+
+### 文档
+
+- 代码度量表 `timeline.py` 130 → 133，合计 7391 → 7394，测试 385 → 386 项。
+- CHANGELOG 0.1.31 段里写「四种结局」但表里是五行，改为「五种结局」。
+
 ## [0.1.31] - 2026-10-30
 
 用户原话：「我发了很多指令，但没用啊……历史聊天是否可以看呢，我说的话，和
@@ -32,7 +51,7 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 
 ### 会话时间线：一次回合一条记录
 
-`src/voxos/timeline.py` + `~/.voxos/timeline.jsonl`。四种结局，缺一种就有黑洞：
+`src/voxos/timeline.py` + `~/.voxos/timeline.jsonl`。五种结局，缺一种就有黑洞：
 
 | outcome | 含义 | 以前能查到吗 |
 | :--- | :--- | :--- |
@@ -97,7 +116,7 @@ voxos log --limit 100
   会把「随便聊两句」记成「执行了某个动作」。改成看 `tool` 空不空。
 - **`timeline.Turn.line()` 对打字入口显示「声纹0.00 / 0ms」**：让人以为声纹坏了。
 
-测试 385 项（383 passed + 2 skipped）。
+测试 386 项（384 passed + 2 skipped）。
 
 ## [0.1.30] - 2026-10-30
 

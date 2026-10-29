@@ -78,7 +78,10 @@ class Turn:
         detail = self.reason or self.reply or ""
         voice = f" 声纹{self.score:.2f}" if self.score > 0 else ""
         span = f"{self.audio_ms:>5.0f}ms" if self.audio_ms > 0 else "     -"
-        return f"{self.ts[11:19]} {head:<3} {span}{voice:<9} {what:<18} {detail[:58]}"
+        # 按 `T` 切而不是固定下标：`record()` 补的是 ISO 全格式，但手工构造
+        # 的 `Turn` 可能只给 `13:46:55`，硬切 `[11:19]` 会整列变空。
+        clock = self.ts.rsplit("T", 1)[-1][:8]
+        return f"{clock} {head:<3} {span}{voice:<9} {what:<18} {detail[:58]}"
 
 
 def path_of(cfg: Any) -> Path:

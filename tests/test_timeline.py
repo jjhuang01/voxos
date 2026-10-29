@@ -126,6 +126,19 @@ def test_timeline_line_hides_voiceprint_for_typed_input():
     assert "声纹0.74" in spoken.line()
 
 
+def test_timeline_line_shows_the_clock_for_both_timestamp_shapes():
+    """`record()` 补的是 ISO 全格式，手工构造的可能只给时分秒——两种都得显示。
+
+    以前按固定下标切 `[11:19]`，短格式会被切成空字符串，整列时间消失，
+    看着像「时间没记上」。
+    """
+    full = timeline.Turn(outcome="acted", tool="tell_time", ts="2026-01-01T13:46:55")
+    short = timeline.Turn(outcome="acted", tool="tell_time", ts="13:46:55")
+
+    assert full.line().startswith("13:46:55")
+    assert short.line().startswith("13:46:55")
+
+
 def _cfg():
     """最小配置：只要管道能构造起来，这一组不测配置解析。"""
     from voxos.config import Config
