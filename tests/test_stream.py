@@ -7,6 +7,7 @@ history 把「最近发生了什么」冲干净（用户打开面板看到自己
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -148,10 +149,23 @@ def test_partial_events_stay_out_of_history_and_disk(tmp_path: Path):
 
 def test_stream_model_dir_without_tokens_fails_loudly(tmp_path: Path):
     """模型目录选错时要说清缺什么，而不是给一台「听得见但不出字」的机器。"""
+    pytest.importorskip("sherpa_onnx", reason="最小依赖环境没有 sherpa-onnx")
     empty = tmp_path / "stream-model"
     empty.mkdir()
     with pytest.raises(FileNotFoundError, match="tokens.txt"):
         stream.SherpaStreamingStt(empty)
+
+
+def test_missing_sherpa_says_how_to_install(monkeypatch, tmp_path: Path):
+    """缺 sherpa-onnx 时不能只抛 `ModuleNotFoundError`。
+
+    CI 的「最小依赖」任务会真的跑在没有 sherpa-onnx 的环境里——这条不是假想。
+    抛 `ModuleNotFoundError: No module named 'sherpa_onnx'` 等于让用户自己去猜
+    装什么、怎么装；而 `pip install 'voxos[models]'` 是能直接粘进终端的。
+    """
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", None)     # 让 import 直接失败
+    with pytest.raises(RuntimeError, match="voxos\\[models\\]"):
+        stream.SherpaStreamingStt(tmp_path)
 
 
 def test_missing_stream_model_falls_back_to_windowed(cfg, capsys):

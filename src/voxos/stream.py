@@ -140,7 +140,12 @@ class SherpaStreamingStt:
 
     def __init__(self, model_dir: str | Path, num_threads: int = 2,
                  hotwords: list[str] | None = None) -> None:
-        import sherpa_onnx  # noqa: PLC0415
+        try:
+            import sherpa_onnx  # noqa: PLC0415
+        except ImportError as exc:
+            # 抛 ModuleNotFoundError 等于让用户自己去猜装什么。和 `SenseVoiceStt`
+            # 保持同一句话：缺依赖要说清怎么补。
+            raise RuntimeError("需要 sherpa-onnx：pip install 'voxos[models]'") from exc
 
         root = Path(str(model_dir)).expanduser()
         tokens = root / "tokens.txt"
