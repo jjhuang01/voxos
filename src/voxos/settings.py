@@ -81,6 +81,8 @@ SCHEMA: tuple[Field, ...] = (
 
     Field("llm.enabled", "启用大模型慢通道", "bool", "llm",
           "关闭时只走正则快通道 + 离线启发式，完全离线可用。"),
+    Field("llm.stream", "流式生成与播报", "bool", "llm",
+          "开启后按句流式播报（出厂默认开启），降低首句延迟；关闭走原非流式路径。"),
     Field("llm.base_url", "接口地址", "str", "llm", "任何 OpenAI 兼容端点，如 Ollama / vLLM。"),
     Field("llm.provider", "渠道", "enum", "llm",
           "cline 会自动带上渠道私有字段；openai / ollama 不加。",

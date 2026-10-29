@@ -164,7 +164,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 四个模型一次下齐（约 276MB）
 python scripts/fetch_models.py --no-asr      # 跳过 239MB 识别模型（37MB：声纹 + VAD + 判停）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 540 项测试（当前源码全量待验收，见 docs/ACCEPTANCE.md）
+make test                                    # 553 项测试（当前源码全量待验收，见 docs/ACCEPTANCE.md）
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
@@ -369,7 +369,7 @@ JSON Schema 由类型注解自省生成（`registry.py`），正则快通道由�
 
 | 陷阱 | 现象 | 落地 |
 | :--- | :--- | :--- |
-| **声学自激死循环** | Agent 听到自己的 TTS → 无限触发 | `dsp.EchoGate`：播报期 + 300ms 混响期丢弃音频，仅放行"停/算了"等打断词 |
+| **声学自激死循环** | Agent 听到自己的 TTS → 无限触发 | `dsp.EchoGate`：播报期仅放行本人持续插话（默认 250ms），打断不丢话且反馈音不停播，回声不进入识别 |
 | **蓝牙/面罩热插拔** | PortAudio `-9988` 直接崩进程 | `audio.SelfHealingSource`：`while True + backoff 2s`，设备重枚举后自动恢复 |
 | **半截话误触发** | "我要写代码…（想 1.2s）…加个校验" 只执行前半句 | `dsp.EndpointDetector`：以未完虚词结尾时静音窗 0.8s→2.5s |
 | **并发重入写坏文件** | 两句"改 auth.py"并发写同一文件 | `core.Executor` 单飞锁：修改类工具串行，绿色工具不受限 |

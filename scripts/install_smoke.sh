@@ -45,13 +45,13 @@ export HOME="$HOME_DIR"
 export VOXOS_HOME="$HOME_DIR"
 cd "$ELSEWHERE"          # 关键：不是仓库根，也不是安装目录
 
-step "1/6 --version"
+step "1/7 --version"
 WANT="voxos $(basename "$WHEEL" | sed -E 's/^voxos-([^-]+)-.*/\1/')"
 GOT="$("$VENV/bin/voxos" --version)"
 [ "$GOT" = "$WANT" ] || die "--version 期望「${WANT}」，实际「${GOT}」"
 printf '  %s\n' "$GOT"
 
-step "2/6 doctor 能跑，且说得清配置在哪"
+step "2/7 doctor 能跑，且说得清配置在哪"
 "$VENV/bin/voxos" doctor > "$WORK/doctor.txt" || {
     cat "$WORK/doctor.txt"; die "doctor 退出码非 0（装完第一件事就跑不起来）"
 }
@@ -59,7 +59,7 @@ grep -q "声纹模型" "$WORK/doctor.txt" || { cat "$WORK/doctor.txt"; die "doct
 grep -q "配置文件" "$WORK/doctor.txt" || { cat "$WORK/doctor.txt"; die "doctor 没报配置路径"; }
 grep -q "数据根" "$WORK/doctor.txt" || { cat "$WORK/doctor.txt"; die "doctor 没报数据根"; }
 
-step "3/6 首次启动 seed 出用户配置（0.1.12 的坑）"
+step "3/7 首次启动 seed 出用户配置（0.1.12 的坑）"
 SEEDED="$HOME_DIR/.voxos/settings.toml"
 # 变量后面紧跟全角字符时必须写 ${VAR}：某些 locale 下 bash 会把全角字节
 # 当成标识符的一部分，报一个「SEEDED<乱码>: unbound variable」——
@@ -68,7 +68,7 @@ SEEDED="$HOME_DIR/.voxos/settings.toml"
 grep -q "只归你" "$SEEDED" || die "seed 出来的配置没带说明注释"
 printf '  %s\n' "$SEEDED"
 
-step "4/6 资源根与数据根分家"
+step "4/7 资源根与数据根分家"
 "$VENV/bin/python" - "$VENV" "$HOME_DIR" <<'PY' || die "资源根/数据根不对"
 import sys
 from pathlib import Path
@@ -83,7 +83,7 @@ print(f"  资源根 {root}")
 print(f"  数据根 {data}")
 PY
 
-step "5/6 make_stt 的相对 model_dir 按数据根解析（0.1.11 的坑）"
+step "5/7 make_stt 的相对 model_dir 按数据根解析（0.1.11 的坑）"
 # 必须真的调 make_stt：0.1.11 的 bug 在 `make_stt` 里用 `cfg.get` 取了相对路径，
 # 相对的是**当前工作目录**。只验 `cfg.path()` 会绿——那是 config.py 的行为，
 # 而坏掉的是调用方。这里把 SenseVoice 后端换成一个只记参数的替身。
@@ -110,7 +110,7 @@ assert elsewhere not in resolved.parents, f"model_dir 被当前工作目录带�
 print(f"  {resolved}")
 PY
 
-step "6/6 改配置 → 重启还在，安装目录那份一个字节没动"
+step "6/7 改配置 → 重启还在，安装目录那份一个字节没动"
 BEFORE="$(shasum -a 256 "$VENV/share/voxos/config/settings.toml" | cut -d' ' -f1)"
 "$VENV/bin/python" - <<'PY' || die "配置写回失败"
 from voxos import settings
@@ -124,4 +124,56 @@ AFTER="$(shasum -a 256 "$VENV/share/voxos/config/settings.toml" | cut -d' ' -f1)
 [ "$BEFORE" = "$AFTER" ] || die "安装目录那份配置被改动了（升级会整份替换，等于白改）"
 grep -q 'backend = "sense_voice"' "$SEEDED" || die "改动没落到用户配置里"
 
-printf '\n✅ 安装冒烟 6/6 通过（%s）\n' "$(basename "$WHEEL")"
+step "7/7 启动 voxos run（独立临时端口/临时数据根），等端口监听后精确停掉"
+RUN_DIR="$WORK/run_test"
+mkdir -p "$RUN_DIR"
+FREE_PORT="$("$VENV/bin/python" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+[ -n "$FREE_PORT" ] || die "获取临时空闲端口失败"
+
+# 在临时配置下写入 ui.port 配置，避免撞 8765/8766
+"$VENV/bin/python" - "$FREE_PORT" <<'PY' || die "写入临时端口配置失败"
+import sys
+from voxos import settings
+from voxos.config import load
+
+settings.apply(load(), {"ui.port": int(sys.argv[1])})
+PY
+
+# 启动 voxos run
+"$VENV/bin/voxos" run > "$RUN_DIR/voxos.log" 2>&1 &
+RUN_PID=$!
+
+# 等待端口可连接（10 秒超时）
+"$VENV/bin/python" - "$FREE_PORT" "$RUN_PID" <<'PY' || {
+import socket, sys, time
+
+port = int(sys.argv[1])
+pid = int(sys.argv[2])
+deadline = time.time() + 10.0
+connected = False
+while time.time() < deadline:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            connected = True
+            break
+    except OSError:
+        time.sleep(0.1)
+
+if not connected:
+    sys.exit(1)
+PY
+    cat "$RUN_DIR/voxos.log"
+    kill -9 "$RUN_PID" 2>/dev/null || true
+    die "voxos run 在 10 秒内未监听端口 $FREE_PORT"
+}
+
+# 精确停掉启动的那个 pid
+kill -TERM "$RUN_PID" 2>/dev/null || true
+wait "$RUN_PID" 2>/dev/null || true
+if kill -0 "$RUN_PID" 2>/dev/null; then
+    kill -9 "$RUN_PID" 2>/dev/null || true
+    die "voxos run (pid $RUN_PID) 未能在收到 SIGTERM 后退出"
+fi
+printf '  成功启动并监听 127.0.0.1:%s，已精确终止 pid %s\n' "$FREE_PORT" "$RUN_PID"
+
+printf '\n✅ 安装冒烟 7/7 通过（%s）\n' "$(basename "$WHEEL")"

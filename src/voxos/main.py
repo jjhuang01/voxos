@@ -25,7 +25,7 @@ import webbrowser
 from collections import deque
 from pathlib import Path
 
-from . import (__version__, core, cue, cuebox, dialogue, lessons, prompts, sandbox,
+from . import (__version__, core, cue, cuebox, dialogue, enroll, lessons, prompts, sandbox,
                scheduler, settings, timeline, tools, ui)
 # audio / corpus / dsp 不在顶层导入：它们把 numpy（实测 58ms）一起拖进来，
 # 而 `voxos text`、`voxos schedule`、`--version` 一条都用不到。谁用谁在里面导。
@@ -121,7 +121,9 @@ class Runtime:
         return executor
 
     def dispatch(self, text: str, context: dict[str, object] | None = None,
-                 mode: str = "assistant") -> core.DispatchResult:
+                 mode: str = "assistant",
+                 on_sentence: Callable[[str], None] | None = None,
+                 should_stop: Callable[[], bool] | None = None) -> core.DispatchResult:
         """派发一句话。**带上上一句**——端点判定会在停顿处切句，切完第二句就孤立了。
 
         实测（端点消融）：停顿 600ms 且结尾不是未完词就会被切断，而人说话中途
@@ -135,7 +137,8 @@ class Runtime:
         ctx: dict[str, object] = dict(context) if context is not None else _context()
         if self._last_text:
             ctx["previous"] = self._last_text
-        return core.dispatch(text, executor=self.executor, cfg=self.cfg, context=ctx, mode=mode)
+        return core.dispatch(text, executor=self.executor, cfg=self.cfg, context=ctx, mode=mode,
+                             on_sentence=on_sentence, should_stop=should_stop)
 
     def _is_withdrawal(self, text: str) -> bool:
         """整句就是「算了 / 取消 / 不用了」，而且此刻没有播报可停。
@@ -352,6 +355,9 @@ def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]
         "version": __version__,
         "enrolled": bool(lock and lock.profiles),
         "threshold": getattr(lock, "threshold", None),
+        # 只报「已录入」等于替档案撒谎：录 1 句和录 3 句在界面上长得一模一样。
+        # 这里把段数、留出分数、录的时候用的设备一起发出去，界面才有话可说。
+        "voiceprint": _voiceprint_state(cfg, lock),
         "role": cfg.get("workspace.role"),
         "dry_run": cfg.flag("workspace.dry_run"),
         "listening": not _MUTED.is_set(),
@@ -396,10 +402,11 @@ def _enroll_now(cfg: Config, lock: dsp.SpeakerLock, seconds: float,
         done.set()
     # 胶囊这边以前只看「段数 ≥ 2」就说成功：10 秒切 5 段、一致性 0.755、阈值
     # 0.75 也照样弹「录入完成」，用户以为好了，然后每句话都被自己拒之门外。
-    _save_enroll_meta(cfg, samples, float(consistency), holdout, lock.threshold)
     warning = _enroll_verdict(samples, float(consistency), lock.threshold, holdout)
     if not warning and len(samples) < 2:
         warning = "只切出 1 句：模板不稳，建议再说 2 句（句间停半秒），否则可能被自己拒之门外"
+    _save_enroll_meta(cfg, samples, float(consistency), holdout, lock.threshold,
+                      device=str(cfg.get("audio.input_device", "")), usable=not warning)
     return {"ok": True, "consistency": round(float(consistency), 3),
             "holdout": None if holdout is None else round(holdout, 3),
             "usable": not warning, "samples": len(samples), "warning": warning}
@@ -766,7 +773,7 @@ def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[s
         # 「等一下，我说的是另一个」。对齐 LiveKit 的 min_interruption_duration。
         on_barge_in=stop_speaking,
         echo=dsp.EchoGate(decay_ms=float(cfg.get("audio.echo_decay_ms", 300)),
-                          interrupt_ms=float(cfg.get("audio.interrupt_ms", 500))))
+                          interrupt_ms=float(cfg.get("audio.interrupt_ms", 250))))
     chunk = int(cfg.get("audio.chunk_size", 512))
     device = cfg.get("audio.input_device", "")
     source = audio.SelfHealingSource(lambda: audio.MicSource(chunk, device=device),
@@ -861,68 +868,144 @@ def _dispatch_loop(runtime: Runtime, pipeline: audio.AudioPipeline,
         if isinstance(item, Exception):
             runtime.bus.emit("blocked", "音频处理异常", str(item))
             return 1
-        utterance = item
-        if not utterance.accepted:  # type: ignore[attr-defined]
-            # 丢弃也要留痕。以前这里是裸的 `continue`：用户说完一句话，
-            # 胶囊上字幕闪一下，然后什么都没有——最容易被误判成「软件坏了」。
-            runtime.note_dropped(utterance)
-            _hint_rejection(runtime, utterance)
-            continue
-        age = _stale_age(utterance)
-        if age > _STALE_S:
-            runtime.bus.emit("warn", "已跳过",
-                             f"{utterance.text}（{age:.0f} 秒前说的，不做了）")
-            runtime.note_dropped(_stale_note(utterance, age))
-            continue
-        if pipeline.echo.is_interrupt(utterance.text) and stop_speaking():
-            runtime.bus.emit("idle", "已停止", utterance.text)
-            continue
-        # 读 runtime.cfg 而不是启动时的快照：设置页改了开关，下一句就该生效。
-        if runtime.cfg.flag("ui.earcons", True):
-            ui.play(sounds["listen"])
-        runtime.bus.emit("executing", "处理中…", utterance.text)
-        result = _dispatch_with_ack(runtime, utterance.text, pipeline, runtime.cfg)
-        runtime.record(utterance.text, result, utterance)
-        state, word = _RESULT_WORD.get(result.route, ("done", "完成"))
-        runtime.bus.emit(state, word, result.reply)
-        # 听不懂的时候只显示、不朗读：常驻监听会把屋里所有闲聊都收进来，
-        # 每句都念一遍「还没学会这句」，很快就变成噪音了。
-        spoken = dialogue.shape(result.reply, runtime.cfg) if result.reply else ""
-        if spoken and result.route != "ignore" and runtime.cfg.flag("ui.speak", True):
-            _speak_async(spoken, pipeline, runtime.cfg)
+        _dispatch_one(runtime, pipeline, item, sounds)
+
+
+def _dispatch_one(runtime: Runtime, pipeline: audio.AudioPipeline,
+                  utterance: Any, sounds: dict[str, Path]) -> None:
+    if not utterance.accepted:
+        # 丢弃也要留痕。以前这里是裸的 `continue`：用户说完一句话，
+        # 胶囊上字幕闪一下，然后什么都没有——最容易被误判成「软件坏了」。
+        runtime.note_dropped(utterance)
+        _hint_rejection(runtime, utterance)
+        return
+    age = _stale_age(utterance)
+    if age > _STALE_S:
+        runtime.bus.emit("warn", "已跳过",
+                         f"{utterance.text}（{age:.0f} 秒前说的，不做了）")
+        runtime.note_dropped(_stale_note(utterance, age))
+        return
+    is_bc = getattr(pipeline.echo, "is_backchannel", None)
+    if is_bc is None:
+        from . import dsp
+        is_bc = dsp.is_backchannel
+    speaking = getattr(pipeline.echo, "speaking", False)
+    if is_bc(utterance.text) and (getattr(utterance, "during_tts", False) or speaking):
+        runtime.bus.emit("idle", "反馈音", utterance.text)
+        return
+    if pipeline.echo.is_interrupt(utterance.text):
+        stop_speaking()
+        runtime.bus.emit("idle", "已停止", utterance.text)
+        return
+    # 读 runtime.cfg 而不是启动时的快照：设置页改了开关，下一句就该生效。
+    if runtime.cfg.flag("ui.earcons", True):
+        ui.play(sounds["listen"])
+    runtime.bus.emit("executing", "处理中…", utterance.text)
+    result = _dispatch_with_ack(runtime, utterance.text, pipeline, runtime.cfg)
+    runtime.record(utterance.text, result, utterance)
+    state, word = _RESULT_WORD.get(result.route, ("done", "完成"))
+    runtime.bus.emit(state, word, result.reply)
+    # 听不懂的时候只显示、不朗读：常驻监听会把屋里所有闲聊都收进来，
+    # 每句都念一遍「还没学会这句」，很快就变成噪音了。
+    spoken = dialogue.shape(result.reply, runtime.cfg) if result.reply else ""
+    if spoken and result.route != "ignore" and runtime.cfg.flag("ui.speak", True) and not getattr(result, "streamed", False):
+        _speak_async(spoken, pipeline, runtime.cfg)
+
+
+class _StreamSpeaker:
+    """流式播报队列：第一句先播、后续句排队；支持中途打断。"""
+
+    def __init__(self, pipeline: audio.AudioPipeline, cfg: Config) -> None:
+        self.pipeline = pipeline
+        self.cfg = cfg
+        self.queue: queue.Queue[str | None] = queue.Queue()
+        self.owner = object()
+        self.heard: list[str] = []
+        self.started = False
+        self.thread: threading.Thread | None = None
+
+    def enqueue(self, sentence: str) -> None:
+        if _is_stale(self.owner):
+            return
+        if not self.started:
+            self.started = True
+            with _TTS_LOCK:
+                _signal_say(_TTS.get("proc"))
+                _TTS.update(owner=self.owner, stopped=False, proc=None)
+                self.pipeline.echo.tts_start()
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+        self.queue.put(sentence)
+
+    def finish(self, text: str = "") -> None:
+        if self.started:
+            self.full_text = text
+            self.queue.put(None)
+
+    def should_stop(self) -> bool:
+        return _is_stale(self.owner)
+
+    def _run(self) -> None:
+        try:
+            while not _is_stale(self.owner):
+                try:
+                    piece = self.queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if piece is None or _is_stale(self.owner):
+                    break
+                spoken = dialogue.shape(piece, self.cfg)
+                if spoken and not _is_stale(self.owner):
+                    if not _say_one(spoken, self.cfg, self.owner):
+                        break
+                    self.heard.append(spoken)
+        except Exception as exc:  # noqa: BLE001
+            core.note_tts_failure(str(exc))
+        finally:
+            with _TTS_LOCK:
+                if _TTS.get("owner") is self.owner:
+                    _TTS.update(proc=None, owner=None, stopped=False)
+                    self.pipeline.echo.tts_end()
+                    full = getattr(self, "full_text", "".join(self.heard))
+                    core.note_spoken(full, "".join(self.heard))
+
+
+def _run_dispatch_worker(
+    runtime: Runtime, text: str, cfg: Config, box: dict[str, object], done: threading.Event,
+    speaker: _StreamSpeaker | None,
+) -> None:
+    on_s = speaker.enqueue if speaker else None
+    stop_s = speaker.should_stop if speaker else None
+    try:
+        try:
+            box["result"] = runtime.dispatch(
+                text, mode=dialogue.mode(cfg), on_sentence=on_s, should_stop=stop_s)
+        except TypeError:
+            box["result"] = runtime.dispatch(text, mode=dialogue.mode(cfg))
+    except BaseException as exc:  # noqa: BLE001
+        box["error"] = exc
+    finally:
+        done.set()
 
 
 def _dispatch_with_ack(runtime: Runtime, text: str, pipeline: audio.AudioPipeline,
                        cfg: Config) -> core.DispatchResult:
-    """慢派发先应一声：等过 `ack_after_ms` 还没结果，就不让用户干等。
-
-    为什么用线程而不是「先回固定话再执行」：快通道（打开应用、问时间）本该
-    几十毫秒完成，给它也加一句「收到」只会让所有交互都变啰嗦。这里只在
-    **真的慢**的时候补一句，快路径一个字都不多说。
-
-    派发必须只发生一次——它带副作用。所以 worker 只有一个，主循环只等结果；
-    异常原样抛回主循环，行为与同步派发一致。
-    """
+    """慢派发先应一声：等过 `ack_after_ms` 还没结果，就不让用户干等。"""
     box: dict[str, object] = {}
     done = threading.Event()
-
-    def work() -> None:
-        try:
-            box["result"] = runtime.dispatch(text, mode=dialogue.mode(cfg))
-        except BaseException as exc:  # noqa: BLE001 - 原样带回主循环，不吞
-            box["error"] = exc
-        finally:
-            done.set()
-
-    threading.Thread(target=work, daemon=True).start()
+    can_speak = cfg.flag("ui.speak", True) and dialogue.mode(cfg) in ("chat", "assistant")
+    speaker = _StreamSpeaker(pipeline, cfg) if (can_speak and cfg.flag("llm.stream", True)) else None
+    threading.Thread(target=_run_dispatch_worker, args=(runtime, text, cfg, box, done, speaker), daemon=True).start()
     wait = dialogue.ack_after_s(cfg)
-    if wait > 0 and not done.wait(wait) and cfg.flag("ui.speak", True):
+    if wait > 0 and not done.wait(wait) and can_speak and (speaker is None or not speaker.started):
         _speak_async(dialogue.ack(text, cfg), pipeline, cfg)
     done.wait()
-    error = box.get("error")
-    if error is not None:
-        raise error  # type: ignore[misc]
-    return box["result"]  # type: ignore[return-value]
+    if box.get("error") is not None:
+        raise box["error"]  # type: ignore[misc]
+    res: core.DispatchResult = box["result"]  # type: ignore[assignment]
+    if speaker is not None:
+        speaker.finish(res.reply)
+    return res
 
 
 # 胶囊上那行字要说清「它到底做了什么」：一律写「完成」的话，
@@ -1087,36 +1170,158 @@ def _speak(text: str, pipeline: audio.AudioPipeline, cfg: Config) -> None:
 def cmd_enroll(args: argparse.Namespace, cfg: Config) -> int:
     from . import audio
 
+    if args.script:
+        print("按顺序读这三句，每句读完停半秒：")
+        for line in enroll.script_lines():
+            print(f"  {line}")
+        return 0
     lock = _lock(cfg)
     if args.wav:
-        samples: list[object] = [audio.wav_to_array(Path(item).expanduser()) for item in args.wav]
-    else:
+        samples = [audio.wav_to_array(Path(item).expanduser()) for item in args.wav]
+        return _commit_enroll(cfg, lock, samples, args.mode)
+    if args.check:
+        return _check_voice(cfg, lock)
+    if args.batch or not sys.stdin.isatty():
+        # 没有终端可交互（脚本 / CI / 从别的程序里调）：退回一次录满再按 VAD 切句，
+        # 行为与 0.1.38 一致。交互才是默认，因为「切出几段」全看运气。
         samples = _record_segments(cfg, args.record, cfg.get("audio.input_device", ""))
+        return _commit_enroll(cfg, lock, samples, args.mode)
+    samples, device = _guided_samples(cfg, lock)
     if not samples:
         print("没有可用音频，录入失败")
         return 2
-    # 先算留出分数再建模：它只用 samples 和 embedder，但语义上必须发生在
-    # 「这一段还没参与模板」的时候，否则就不是留出验证了。
-    holdout = _holdout_score(lock, samples)
-    consistency = lock.enroll(samples, args.mode)  # type: ignore[arg-type]
+    return _commit_enroll(cfg, lock, samples, args.mode, device=device)
+
+
+def _guided_samples(cfg: Config, lock: dsp.SpeakerLock) -> tuple[list[object], str]:
+    """逐句录、逐句判。这是「怎么录才对」的全部答案。
+
+    一次录 10 秒再让 VAD 去切，切出几段全看运气：三句连在一起只剩 1 段，
+    中间一声咳嗽又多一段噪声。改成一句一次，段数就是确定的，而且哪句不合格
+    当场重读，不会带着一段坏音频去建模板。
+    """
+    from . import audio
+
+    device = cfg.get("audio.input_device", "")
+    try:
+        name, peak = audio.probe_mic(0.4, device)
+    except Exception as exc:                       # 没麦克风 / 没权限
+        print(f"⚠️  打不开麦克风：{exc}")
+        return [], ""
+    print(f"麦克风：{name}（峰值 {peak:.3f}）")
+    if peak < enroll.MIN_PEAK:
+        print("⚠️  这个设备几乎收不到声音：先确认系统输入设备与音量，再重录。")
+    print(f"一共 {len(enroll.SCRIPT)} 句，每句读完停半秒，它会自己收尾。\n")
+    samples: list[object] = []
+    vectors: list[object] = []
+    for index, line in enumerate(enroll.SCRIPT, 1):
+        sample = _read_one(cfg, lock, device, index, line, vectors)
+        if sample is None:
+            print("录入中断：这句两次都没读好。整段重来：voxos enroll")
+            return [], name
+        samples.append(sample)
+        vectors.append(lock.embedder(dsp.as_float(sample)))
+    return samples, name
+
+
+def _read_one(cfg: Config, lock: dsp.SpeakerLock, device: object, index: int,
+              line: str, vectors: list[object]) -> object | None:
+    """读一句，最多两次。合格返回这一段波形，不合格返回 None。"""
+    from . import dsp
+
+    for attempt in (1, 2):
+        print(f"第 {index}/{len(enroll.SCRIPT)} 句（第 {attempt} 次）：{line}")
+        if sys.stdin.isatty():
+            input("  按回车开始…")
+        wave, speech_s = _capture_one(cfg, device)
+        why = enroll.check(wave, speech_s)
+        if not why:
+            why = enroll.outlier(lock.embedder(dsp.as_float(wave)), vectors)
+        if why:
+            print(f"  ✗ {why}\n")
+            continue
+        print(f"  ✓ {speech_s:.1f} 秒，峰值 {enroll.peak_of(wave):.3f}\n")
+        return wave
+    return None
+
+
+def _capture_one(cfg: Config, device: object, max_s: float = 6.0) -> tuple[object, float]:
+    """录一句：VAD 判到句尾就停，最多 `max_s` 秒。返回 (波形, 人声秒数)。"""
+    from . import audio, dsp
+
+    import numpy as np
+
+    vad = audio.make_vad(cfg)
+    detector = dsp.EndpointDetector(
+        silence_ms=float(cfg.get("audio.silence_duration_ms", 500)),
+        max_ms=max_s * 1000.0,
+        min_speech_ms=float(cfg.get("audio.min_speech_ms", 200)),
+    )
+    buffer: list[object] = []
+    with audio.MicSource(device=device) as source:
+        started = time.time()
+        for chunk in source:
+            state = detector.push(bool(vad.is_speech(chunk)), chunk.size)  # type: ignore[attr-defined]
+            if state != "idle":
+                buffer.append(chunk)
+            if state in ("candidate", "force_end") or time.time() - started > max_s + 1.0:
+                break
+    wave = np.concatenate(buffer) if buffer else np.zeros(0, dtype=np.float32)
+    return wave, detector.speech_ms / 1000.0
+
+
+def _commit_enroll(cfg: Config, lock: dsp.SpeakerLock, samples: list[object],
+                   mode: str = "normal", device: str = "") -> int:
+    """先算留出分数，再建模板、落盘、给结论。顺序不能反。"""
+    from . import dsp
+
+    if not samples:
+        print("没有可用音频，录入失败")
+        return 2
+    holdout = enroll.holdout([lock.embedder(dsp.as_float(item)) for item in samples])
+    consistency = lock.enroll(samples, mode)  # type: ignore[arg-type]
     lock.save(cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
-    print(f"已录入 {len(samples)} 段（{args.mode}），一致性 {consistency:.3f} → "
-          f"{cfg.path('audio.voiceprint_profiles')}")
-    _save_enroll_meta(cfg, samples, consistency, holdout, lock.threshold)
-    _enroll_verdict(samples, consistency, lock.threshold, holdout)
+    usable, line = enroll.verdict(holdout if holdout is not None else float(consistency),
+                                  lock.threshold, len(samples))
+    print(line)
+    print(f"已写入 {cfg.path('audio.voiceprint_profiles')}（{len(samples)} 段，{mode}）")
+    _save_enroll_meta(cfg, samples, float(consistency), holdout, lock.threshold,
+                      device=device, usable=usable)
     return 0
+
+
+def _check_voice(cfg: Config, lock: dsp.SpeakerLock) -> int:
+    """录一句，只报分数，不写档案——回答「现在这张嘴能不能过」。"""
+    if not lock.profiles:
+        print("还没有声纹档案：先跑 voxos enroll")
+        return 2
+    print(f"读一句就行（阈值 {lock.threshold:.2f}）：{enroll.SCRIPT[0]}")
+    if sys.stdin.isatty():
+        input("  按回车开始…")
+    wave, speech_s = _capture_one(cfg, cfg.get("audio.input_device", ""))
+    why = enroll.check(wave, speech_s)
+    if why:
+        print(f"✗ {why}")
+        return 2
+    ok, score = lock.verify(wave)
+    print(f"{'✓ 通过' if ok else '✗ 未通过'}：声纹 {score:.3f} / 阈值 {lock.threshold:.2f}")
+    if not ok:
+        gap = lock.threshold - score
+        print(f"  差 {gap:.3f}。" + ("差 0.1 以内多半是录音条件变了（离得远 / 小声），"
+                                    "凑近点再试一次；" if gap < 0.1 else "")
+              + "差得多就是档案本身不行：voxos enroll 重录。")
+    return 0 if ok else 1
 
 
 def _holdout_score(lock: object, samples: list[object]) -> float | None:
     """留一段做验证：本人换句话大概能拿多少分。
 
     用全部段建模板、再拿其中一段去验证，分数必然偏高——那一段参与了均值。
-    留出最后一段，得到才是新句子的真实分数，也是唯一能回答「这个档案到底
-    能不能用」的数字。段数少于 3 时留出来就没得建模了，返回 None。
+    留出最后一段，得到的才是新句子的真实分数。段数少于 3 时返回 None。
     """
     from . import dsp
 
-    if len(samples) < 3:
+    if not hasattr(lock, "embedder") or len(samples) < 3:
         return None
     vectors = [lock.embedder(dsp.as_float(s)) for s in samples]  # type: ignore[attr-defined]
     return dsp.cosine(vectors[-1], dsp.mean_vector(vectors[:-1]))
@@ -1512,13 +1717,22 @@ def _enroll_meta_path(cfg: Config) -> Path:
 
 
 def _save_enroll_meta(cfg: Config, samples: list[object], consistency: float,
-                      holdout: float | None, threshold: float) -> None:
+                      holdout: float | None, threshold: float,
+                      device: str = "", usable: bool = True) -> None:
+    """把「这份档案怎么来的」记在档案旁边。
+
+    `device` 是这一版新加的：换了麦克风之后同一个人会掉 0.2 分，而档案里
+    看不出来。记下设备名，doctor 才能说「这份档案是 MacBook 麦克风录的，
+    你现在用的是 AirPods」——否则只能看到「已录入」和一堆拒绝。
+    """
     try:
         _enroll_meta_path(cfg).write_text(json.dumps({
             "segments": len(samples),
             "consistency": round(float(consistency), 4),
             "holdout": None if holdout is None else round(float(holdout), 4),
             "threshold": float(threshold),
+            "device": device,
+            "usable": bool(usable),
             "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }, ensure_ascii=False), encoding="utf-8")
     except OSError as exc:                        # 记不下来不该让录入失败
@@ -1532,7 +1746,7 @@ def _voiceprint_note(cfg: Config) -> str:
     可靠性。而 npz 里两者都只表现为 1 个均值向量，所以要读录入时记下的元数据。
     """
     if not cfg.path("audio.voiceprint_profiles").exists():
-        return "未录入（voxos enroll，10 秒说 2~3 句）"
+        return "未录入（voxos enroll，跟着读 3 句）"
     try:
         meta = json.loads(_enroll_meta_path(cfg).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1547,12 +1761,34 @@ def _meta_note(meta: dict[str, object]) -> str:
     score, label = meta.get("holdout"), "留出验证"
     if score is None:
         score, label = meta.get("consistency"), "一致性"
+    where = f"，{meta.get('device')}" if meta.get("device") else ""
     if score is None:
-        return f"已录入（{segments} 段均值，质量未记录）"
+        return f"已录入（{segments} 段均值{where}，质量未记录）"
     margin = float(score) - threshold
     verdict = "可用" if margin >= 0.04 else "← 会被自己拒，重录：voxos enroll"
-    return (f"已录入（{segments} 段均值，{label} {float(score):.3f} / "
+    return (f"已录入（{segments} 段均值{where}，{label} {float(score):.3f} / "
             f"阈值 {threshold:.2f}，{verdict}）")
+
+
+def _voiceprint_state(cfg: Config, lock: dsp.SpeakerLock | None) -> dict[str, object]:
+    """给界面用的结构化档案状态。没有档案就返回空 dict。"""
+    if not (lock and lock.profiles):
+        return {}
+    state: dict[str, object] = {"threshold": getattr(lock, "threshold", None)}
+    try:
+        meta = json.loads(_enroll_meta_path(cfg).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state["known"] = False
+        return state
+    state.update({
+        "known": True,
+        "segments": meta.get("segments"),
+        "holdout": meta.get("holdout"),
+        "device": meta.get("device") or "",
+        "usable": bool(meta.get("usable", True)),
+        "at": meta.get("at"),
+    })
+    return state
 
 
 def _turn_note(cfg: Config) -> str:
@@ -1688,12 +1924,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="守护进程（麦克风 + 胶囊 + 设置面板）")
     run.set_defaults(func=cmd_run)
 
-    enroll = sub.add_parser("enroll", help="录入声纹")
-    enroll.add_argument("--wav", action="append", help="用现成 wav 录入（可多次）")
-    enroll.add_argument("--record", type=float, default=10.0,
-                        help="麦克风录制秒数（期间说 2~3 句，句间停半秒）")
-    enroll.add_argument("--mode", choices=["normal", "mask"], default="normal")
-    enroll.set_defaults(func=cmd_enroll)
+    _add_enroll(sub)
 
     serve = sub.add_parser("serve", help="只启动胶囊与设置面板")
     serve.add_argument("--no-open", action="store_true")
@@ -1703,6 +1934,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_extra(sub)               # models / llm / prompts / stop / port / tools / doctor
     return parser
+
+
+def _add_enroll(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("enroll", help="录入声纹（逐句读，逐句判）")
+    p.add_argument("--wav", action="append", help="用现成 wav 录入（可多次）")
+    p.add_argument("--record", type=float, default=10.0,
+                   help="非交互时一次录满的秒数（期间说 2~3 句，句间停半秒）")
+    p.add_argument("--mode", choices=["normal", "mask"], default="normal")
+    p.add_argument("--script", action="store_true", help="只打印要读的三句")
+    p.add_argument("--check", action="store_true", help="录一句试一下，只报分数，不写档案")
+    p.add_argument("--batch", action="store_true", help="不逐句交互，退回一次录满再切句（脚本用）")
+    p.set_defaults(func=cmd_enroll)
 
 
 def _add_extra(sub: argparse._SubParsersAction) -> None:

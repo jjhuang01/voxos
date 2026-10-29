@@ -99,23 +99,17 @@ fi
 #    「不是本次会话创建的」venv，于是升级在第二步就断了。实测可复现。
 #    先 uninstall 再 install 是等价的，而且对老版本 pipx 也成立。
 #    uninstall 只删 venv，~/.voxos 里的模型/声纹/日志/配置一个都不动。
-step "4/5 安装（先卸后装，绕开 pipx 的 force 重建 bug）"
-pipx uninstall voxos >/dev/null 2>&1 || true
-pipx install "$WHEEL" >/dev/null || die "pipx 安装失败，加 -v 看详情：pipx install -v $WHEEL"
-
+#    直接装 voxos[models] extra，避免 pipx inject 依赖在 force/重装时被清掉。
+TARGET="$WHEEL"
 if [ "$WITH_AUDIO" = 1 ]; then
-    step "5/5 音频依赖（sherpa-onnx + sounddevice + onnxruntime）"
-    # 装了就会在下次 `install --force` 时被清掉，所以每次安装都重放一遍；
-    # --force 让重复执行不报「已经装了」。
-    # onnxruntime 不是可选的：少了它 Silero VAD 加载失败，会静默降级成能量 VAD——
-    # 能跑，但「咳一声」也会被当成说话。这条只有装完才看得出来。
-    if ! pipx inject --force voxos sherpa-onnx sounddevice onnxruntime >/dev/null 2>&1; then
-        warn "音频依赖没装上（可能没网或源不通）。核心链路仍可用，语音会降级成脚本回放。"
-        warn "手动补：pipx inject voxos sherpa-onnx sounddevice onnxruntime"
-    fi
+    TARGET="${WHEEL}[models]"
+    step "4/5 安装（含 voxos[models] 音频依赖：sherpa-onnx + sounddevice + onnxruntime）"
 else
-    step "5/5 跳过音频依赖（--no-audio）"
+    step "4/5 安装（--no-audio，跳过音频依赖）"
 fi
+pipx uninstall voxos >/dev/null 2>&1 || true
+pipx install "$TARGET" >/dev/null || die "pipx 安装失败，加 -v 看详情：pipx install -v '$TARGET'"
+step "5/5 校验安装"
 
 # 刚装完时 ~/.local/bin 可能还不在当前 shell 的 PATH 里（第一次装 pipx 的常见情况），
 # 所以不去赌 `voxos` 能被找到，直接问 pipx 要 venv 路径。

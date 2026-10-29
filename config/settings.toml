@@ -48,10 +48,9 @@ voiceprint_profiles = ".voxos/voiceprint_profiles.npz"
 mask_mode = false             # 静音面罩/低语补偿
 agc_target_dbfs = -3.0
 echo_decay_ms = 300           # TTS 结束后的混响消退期
-interrupt_ms = 500            # 播报中「人声持续多久」才算打断（对齐 LiveKit 的
-                              # min_interruption_duration）。不要求用户喊特定词：
-                              # 「等一下，我说的是另一个」也算。判定还要过声纹——
-                              # 声纹不能分离混音；目前仅停播报，停顿后需完整重说。
+interrupt_ms = 250            # 播报中「人声持续多久」才算打断（默认 250ms，对齐豆包/ChatGPT
+                              # 交互体验）。不要求用户喊特定词，打断触发后已攒音频作为
+                              # 本句开头继续收音并送入识别，无需重说。
 restart_silence_dbfs = -42.0  # 打断后安静到此能量并保持 silence_duration_ms 才恢复接收
 hotwords_path = "config/hotwords.txt"
 hotwords_generated = "config/hotwords.txt.generated"
@@ -75,6 +74,7 @@ timeout_s = 30
 
 [llm]
 enabled = true                # 慢通道总开关。关掉 = 只走正则快通道 + 离线启发式，完全离线可用
+stream = true                 # 流式输出总开关。true = 边生成边按句播报（出厂默认）；false = 走原非流式路径
 provider = "cline"            # cline | openai | ollama。决定要不要注入渠道私有字段（见 core._llm_extra）
 base_url = "https://llm.mindax.cn/v1"
 api_key = ""                  # 留空则读 api_key_file（默认 .voxos/llm_key）；环境变量 VOXOS_LLM_API_KEY 最优先
@@ -97,7 +97,7 @@ api_key = ""                  # 新版控制台：填这一项就够
 app_id = ""                   # 旧版控制台：app_id + access_key 两个都要
 access_key = ""
 resource_id = "seed-tts-2.0"  # 决定模型版本与计费商品；声音复刻是 seed-icl-2.0
-speaker = "zh_female_shuangkuaisisi_moon_bigtts"
+speaker = "zh_female_vv_uranus_bigtts"  # 默认 2.0 音色；seed-tts-2.0 必须配 2.0 音色，配 1.0 音色会报 55000000 版本不匹配
 sample_rate = 24000           # 必须和播放端一致；改这里不用改代码
 timeout_s = 8                 # 云端连接/读超时；只有未开始播放时才能整句降级
 local_timeout_s = 15          # 本地 say 合成的超时；取消会回收自己的进程

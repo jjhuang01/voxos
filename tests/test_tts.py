@@ -128,6 +128,20 @@ def test_error_code_is_raised_not_swallowed(cloud):
         list(tts.synthesize("你好", cfg))
 
 
+def test_error_code_55000000_indicates_version_mismatch(cloud):
+    """seed-tts-2.0 配 1.0 音色返回 55000000 时，提示音色与 resource_id 版本不匹配。"""
+    cfg, server = cloud
+    server.payload = json.dumps({"code": 55000000, "message": "resource ID mismatched"})
+    with pytest.raises(RuntimeError, match="音色与 resource_id 版本不匹配"):
+        list(tts.synthesize("你好", cfg))
+
+
+def test_default_speaker_is_uranus_2_0(cfg):
+    """默认音色必须是 2.0 音色 zh_female_vv_uranus_bigtts。"""
+    request_body = tts.body("你好", cfg)
+    assert request_body["req_params"]["speaker"] == "zh_female_vv_uranus_bigtts"
+
+
 def test_stop_cuts_the_stream_without_waiting(cloud):
     """被打断时不该把剩下的合成完再停——那是几百毫秒的延迟和一份白花的钱。"""
     cfg, _ = cloud

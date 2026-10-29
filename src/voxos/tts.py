@@ -76,7 +76,7 @@ def body(text: str, cfg: Config) -> dict:
         "user": {"uid": str(cfg.get("tts.uid", "voxos"))},
         "req_params": {
             "text": text,
-            "speaker": str(cfg.get("tts.speaker", "zh_female_shuangkuaisisi_moon_bigtts")),
+            "speaker": str(cfg.get("tts.speaker", "zh_female_vv_uranus_bigtts")),
             "audio_params": {
                 "format": "pcm",
                 "sample_rate": int(cfg.get("tts.sample_rate", 24000)),
@@ -161,6 +161,9 @@ def _audio(obj: dict) -> Iterator[bytes]:
     if code == DONE_CODE:
         return
     if code != 0:
+        if code == 55000000:
+            msg = obj.get("message") or "未知"
+            raise RuntimeError(f"语音合成失败（{code}）：音色与 resource_id 版本不匹配（{msg}）")
         raise RuntimeError(f"语音合成失败（{code}）：{obj.get('message') or '未知'}")
     data = obj.get("data")
     if data:

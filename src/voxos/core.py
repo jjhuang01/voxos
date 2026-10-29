@@ -28,7 +28,8 @@ from .safety import (  # noqa: F401  # re-export 给旧调用方
 )
 
 __all__ = [
-    "DispatchResult", "dispatch", "chat", "heuristic_plan", "execute_safely", "SYSTEM_PROMPT",
+    "DispatchResult", "dispatch", "chat", "chat_stream", "stream_sentences",
+    "heuristic_plan", "execute_safely", "SYSTEM_PROMPT",
     "RiskLevel", "Tool", "Verdict", "REGISTRY", "FAST_ROUTES", "tool", "build_schema",
     "Guard", "Executor", "ensure_tools", "snapshot_file", "restore_latest", "human_name",
     "llm_ready", "llm_extra", "provider", "history", "reset_history",
@@ -52,6 +53,7 @@ class DispatchResult:
     reply: str = ""
     latency_ms: float = 0.0
     results: list[str] = field(default_factory=list)
+    streamed: bool = False
 
 
 # ---------------------------------------------------------------- 多轮上下文
@@ -132,14 +134,17 @@ def chat(
     temperature: float = 0.1,
     timeout: float = 20.0,
     extra: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    stream: bool = False,
+    should_stop: Callable[[], bool] | None = None,
+) -> Any:
     """OpenAI 兼容 /chat/completions（DeepSeek / Ollama / Cline 网关通用），零 SDK 依赖。"""
     payload: dict[str, Any] = {"model": model, "messages": messages, "temperature": temperature}
     if tools:
-        payload["tools"] = tools
-        payload["tool_choice"] = "auto"
+        payload["tools"], payload["tool_choice"] = tools, "auto"
     if extra:
         payload.update(extra)             # 渠道私有字段：thinking / reasoning_effort 等
+    if stream:
+        payload["stream"] = True
     request = urllib.request.Request(
         url=base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -147,13 +152,93 @@ def chat(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = json.loads(response.read().decode("utf-8"))
+        response = urllib.request.urlopen(request, timeout=timeout)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"LLM HTTP {exc.code}: {exc.read()[:200]!r}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise RuntimeError(f"LLM 不可达：{exc}") from exc
-    return _unwrap(body)["choices"][0]["message"]
+    if not stream:
+        with response:
+            return _unwrap(json.loads(response.read().decode("utf-8")))["choices"][0]["message"]
+    return _sse_stream(response, should_stop)
+
+
+class _ToolCallDetected(Exception):
+    """流式中检测到工具调用，触发切换到非流式逻辑。"""
+
+
+def _sse_stream(response: Any, should_stop: Callable[[], bool] | None = None) -> Iterator[str]:
+    """逐行解析 SSE data: 行，取 choices[0].delta.content，遇到 [DONE] 结束。"""
+    done = False
+    with response:
+        for raw_line in response:
+            if should_stop and should_stop():
+                return
+            line = raw_line.decode("utf-8") if isinstance(raw_line, (bytes, bytearray)) else str(raw_line)
+            line = line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                done = True
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"LLM SSE 格式错误：{data[:100]}") from exc
+            unwrapped = _unwrap(chunk)
+            choices = unwrapped.get("choices") or []
+            if choices:
+                delta = choices[0].get("delta") or {}
+                if delta.get("tool_calls"):
+                    raise _ToolCallDetected()
+                content = delta.get("content") or ""
+                if content:
+                    yield content
+    if not (should_stop and should_stop()) and not done:
+        raise RuntimeError("LLM 流式响应截断：未收到 [DONE]")
+
+
+def chat_stream(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, Any]],
+    temperature: float = 0.1,
+    timeout: float = 20.0,
+    extra: dict[str, Any] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> Iterator[str]:
+    """流式调用快捷入口，逐 chunk 产出文本。"""
+    return chat(
+        base_url=base_url, api_key=api_key, model=model, messages=messages,
+        temperature=temperature, timeout=timeout, extra=extra,
+        stream=True, should_stop=should_stop,
+    )
+
+
+_SENTENCE_RE = re.compile(r"^([^。！？!?；;\n]+[。！？!?；;\n]+)(.*)$", re.S)
+
+
+def stream_sentences(chunks: Iterator[str], should_stop: Callable[[], bool] | None = None) -> Iterator[str]:
+    """增量文本按句切（复用句末标点：。！？!?；换行），逐句产出。"""
+    buf = ""
+    for chunk in chunks:
+        if should_stop and should_stop():
+            return
+        buf += chunk
+        while True:
+            matched = _SENTENCE_RE.match(buf)
+            if not matched:
+                break
+            sentence, buf = matched.group(1).strip(), matched.group(2)
+            if sentence:
+                yield sentence
+    if not (should_stop and should_stop()):
+        tail = buf.strip()
+        if tail:
+            yield tail
 
 
 def _unwrap(body: dict[str, Any]) -> dict[str, Any]:
@@ -246,6 +331,8 @@ def dispatch(
     cfg: Config | None = None,
     context: dict[str, Any] | None = None,
     mode: str = "assistant",
+    on_sentence: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> DispatchResult:
     """一句话进，动作出。顺序：快通道 → LLM 慢通道 → 离线启发式。
 
@@ -267,10 +354,14 @@ def dispatch(
     if (chat := _small_talk(raw)):
         return _remember(DispatchResult("chat", raw, reply=chat, latency_ms=_ms(started)))
 
-    llm = _try_llm(raw, executor, cfg, dict(context or {}, mode=mode), started)
+    llm = _try_llm(raw, executor, cfg, dict(context or {}, mode=mode), started, on_sentence, should_stop)
     if llm is not None:
         return _remember(llm)
 
+    return _offline_route(raw, cfg, executor, started)
+
+
+def _offline_route(raw: str, cfg: Config, executor: Executor, started: float) -> DispatchResult:
     plan = heuristic_plan(raw, cfg)
     if not plan:
         return DispatchResult("ignore", raw, reply=_no_action_reply(cfg), latency_ms=_ms(started))
@@ -304,7 +395,9 @@ def _small_talk(text: str) -> str:
 
 
 def _try_llm(
-    text: str, executor: Executor, cfg: Config, context: dict[str, Any], started: float
+    text: str, executor: Executor, cfg: Config, context: dict[str, Any], started: float,
+    on_sentence: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> DispatchResult | None:
     """慢通道。不可用或失败时返回 None，交回给离线规划。
 
@@ -315,7 +408,7 @@ def _try_llm(
         return None            # 没开 / 没地址 / 没钥匙：一个请求都别发，直接走离线兜底
     state: dict[str, Any] = {"executed": False, "results": []}
     try:
-        return _llm_route(text, executor, cfg, context, started, state)
+        return _llm_route(text, executor, cfg, context, started, state, on_sentence, should_stop)
     except Exception as exc:
         executor.on_event("blocked", "模型不可用", str(exc))
         if not state["executed"]:
@@ -469,29 +562,84 @@ def _seed_messages(cfg: Config, context: dict[str, Any], text: str) -> list[dict
     return messages
 
 
-def _llm_route(
-    text: str,
-    executor: Executor,
-    cfg: Config,
-    context: dict[str, Any],
-    started: float,
+def _fetch_stream_chunks(
+    messages: list[dict[str, Any]], schemas: list[dict[str, Any]], cfg: Config,
+    should_stop: Callable[[], bool] | None,
+) -> Any:
+    try:
+        return chat(
+            base_url=str(cfg.get("llm.base_url")), api_key=str(cfg.get("llm.api_key", "")),
+            model=str(cfg.get("llm.model")), messages=messages, tools=schemas,
+            temperature=float(cfg.get("llm.temperature", 0.1)),
+            timeout=float(cfg.get("llm.timeout_s", 20)), extra=llm_extra(cfg),
+            stream=True, should_stop=should_stop,
+        )
+    except Exception:
+        return None
+
+
+def _consume_stream(
+    chunks: Any, on_sentence: Callable[[str], None] | None,
+    should_stop: Callable[[], bool] | None,
+) -> tuple[str, bool] | None:
+    if isinstance(chunks, dict):
+        if chunks.get("tool_calls"):
+            return None
+        text = (chunks.get("content") or "").strip()
+        if on_sentence and text:
+            for s in stream_sentences([text], should_stop):
+                on_sentence(s)
+        return text, bool(on_sentence and text)
+    all_deltas: list[str] = []
+    spoken_any = False
+    try:
+        for sentence in stream_sentences((all_deltas.append(d) or d for d in chunks), should_stop):
+            if on_sentence:
+                on_sentence(sentence)
+                spoken_any = True
+    except (_ToolCallDetected, Exception):
+        return None
+    return "".join(all_deltas).strip(), spoken_any
+
+
+def _try_stream_route(
+    messages: list[dict[str, Any]], schemas: list[dict[str, Any]], cfg: Config,
+    started: float, text: str, on_sentence: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> DispatchResult | dict[str, Any] | None:
+    """尝试流式纯文本生成；若模型意图为工具调用，返回 None 交回给非流式。"""
+    chunks = _fetch_stream_chunks(messages, schemas, cfg, should_stop)
+    if chunks is None:
+        return None
+    if isinstance(chunks, dict) and chunks.get("tool_calls"):
+        return chunks
+    res = _consume_stream(chunks, on_sentence, should_stop)
+    if res is None:
+        return None
+    content, spoken = res
+    route = "ignore" if "IGNORE" in content else "llm"
+    return DispatchResult(route, text, reply=content, latency_ms=_ms(started), streamed=spoken)
+
+
+def _agent_rounds(
+    messages: list[dict[str, Any]], schemas: list[dict[str, Any]],
+    executor: Executor, cfg: Config, text: str, started: float,
     state: dict[str, Any] | None = None,
+    initial: dict[str, Any] | None = None,
 ) -> DispatchResult:
-    messages: list[dict[str, Any]] = _seed_messages(cfg, context, text)
-    schemas = [meta.schema for meta in REGISTRY.values()]
     results: list[str] = []
     first_tool, first_args = "", {}
+    pending = initial
     for _ in range(int(cfg.get("llm.max_tool_rounds", 3))):
-        message = chat(
-            base_url=str(cfg.get("llm.base_url")),
-            api_key=str(cfg.get("llm.api_key", "")),
-            model=str(cfg.get("llm.model")),
-            messages=messages,
-            tools=schemas,
-            temperature=float(cfg.get("llm.temperature", 0.1)),
-            timeout=float(cfg.get("llm.timeout_s", 20)),
-            extra=llm_extra(cfg),
-        )
+        if pending is not None:
+            message, pending = pending, None
+        else:
+            message = chat(
+                base_url=str(cfg.get("llm.base_url")), api_key=str(cfg.get("llm.api_key", "")),
+                model=str(cfg.get("llm.model")), messages=messages, tools=schemas,
+                temperature=float(cfg.get("llm.temperature", 0.1)),
+                timeout=float(cfg.get("llm.timeout_s", 20)), extra=llm_extra(cfg),
+            )
         calls = message.get("tool_calls") or []
         if not calls:
             content = (message.get("content") or "").strip()
@@ -508,6 +656,29 @@ def _llm_route(
         if state is not None:
             state["results"] = list(results)
     return DispatchResult("llm", text, first_tool, first_args, "；".join(results), _ms(started), results)
+
+
+def _llm_route(
+    text: str,
+    executor: Executor,
+    cfg: Config,
+    context: dict[str, Any],
+    started: float,
+    state: dict[str, Any] | None = None,
+    on_sentence: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> DispatchResult:
+    messages: list[dict[str, Any]] = _seed_messages(cfg, context, text)
+    schemas = [meta.schema for meta in REGISTRY.values()]
+    initial: dict[str, Any] | None = None
+    if cfg.flag("llm.stream", True):
+        stream_res = _try_stream_route(
+            messages, schemas, cfg, started, text, on_sentence, should_stop)
+        if isinstance(stream_res, DispatchResult):
+            return stream_res
+        if isinstance(stream_res, dict):
+            initial = stream_res
+    return _agent_rounds(messages, schemas, executor, cfg, text, started, state, initial)
 
 
 _SPLIT = re.compile(

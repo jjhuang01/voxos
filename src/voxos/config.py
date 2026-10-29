@@ -50,6 +50,7 @@ DATA = _default_data_root()
 # 环境变量 -> 配置点（演示与 CI 用，避免改文件）
 ENV_MAP = {
     "VOXOS_LLM_ENABLED": ("llm", "enabled"),
+    "VOXOS_LLM_STREAM": ("llm", "stream"),
     "VOXOS_LLM_BASE_URL": ("llm", "base_url"),
     "VOXOS_LLM_MODEL": ("llm", "model"),
     "VOXOS_LLM_API_KEY": ("llm", "api_key"),
@@ -64,7 +65,7 @@ ENV_MAP = {
 _TRUE = {"1", "true", "yes", "on"}
 # 这些键即使配置文件里没有，也必须按布尔解析环境变量：
 # 否则 `VOXOS_DRY_RUN=false` 会变成非空字符串，flag() 反而返回 True。
-_BOOL_KEYS = {("llm", "enabled"), ("workspace", "dry_run")}
+_BOOL_KEYS = {("llm", "enabled"), ("llm", "stream"), ("workspace", "dry_run")}
 
 
 class Config:

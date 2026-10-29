@@ -126,62 +126,76 @@ def test_barge_in_waits_for_interrupt_ms_not_a_magic_number(cfg):
     卡死在 500 而不是随便一个数，是因为它和 LiveKit 的
     `min_interruption_duration` 默认值一致——短于此的多半是回声尖峰或关门声。
     """
-    for ms in (100, 300, 400):
+    for ms in (100, 200):
         assert _fires(cfg, ms) is False, f"{ms}ms 不该打断"
 
-    for ms in (512, 700, 900):
+    for ms in (256, 300, 500, 700):
         assert _fires(cfg, ms) is True, f"{ms}ms 应当打断"
 
 
 def test_the_threshold_really_comes_from_the_config(cfg):
     """把 `interrupt_ms` 调到 1200，900ms 就不该再打断——证明它不是在读魔法数。
 
-    没有这条，谁把配置里的 500 改成 100 也不会有测试失败；而 100ms 会把
+    没有这条，谁把配置里的 250 改成 100 也不会有测试失败；而 100ms 会把
     「嗯」「啊」这种口头语全判成插话，播报被打断得七零八落。
     """
-    assert _fires(cfg, 900) is True
-    assert _fires(cfg, 900, interrupt_ms=1200.0) is False
+    assert _fires(cfg, 300) is True
+    assert _fires(cfg, 300, interrupt_ms=600.0) is False
 
 
 def test_separate_bursts_are_not_accumulated_into_one_interruption(cfg):
-    """两段 256ms 中间隔 3 秒，不等于连续说了 512ms。"""
+    """两段短脉冲中间隔 3 秒，不等于连续说够了时长。"""
     fired = []
     pipeline = _pipeline(cfg, on_barge_in=lambda: fired.append(True))
     pipeline.echo.tts_start()
-    samples = np.concatenate([_loud(256), np.zeros(SR * 3), _loud(256)])
+    samples = np.concatenate([_loud(100), np.zeros(SR * 3), _loud(100)])
     list(pipeline.run(audio.ArraySource(samples)))
     assert not fired
 
 
-def test_overlap_and_its_continuation_never_reach_stt(cfg):
-    """没有 AEC 时宁可要求重说，也不把混音或缺开头的后半句当成指令。"""
+def test_barge_in_preserves_audio_and_feeds_stt(cfg):
+    """打断不丢话：打断触发后把已攒的插话音频作为开头继续收音，整句送 ASR。"""
+    from unittest.mock import Mock
+
     events = []
     pipeline = _pipeline(cfg)
     pipeline.on_event = lambda *args: events.append(args)
+    pipeline.stt = Mock()
+    pipeline.stt.transcribe.return_value = "打开微信"
+    pipeline.streamer = None
     pipeline.echo.tts_start()
-    samples = np.concatenate([_loud(1800), np.zeros(SR)])
-    assert list(pipeline.run(audio.ArraySource(samples))) == []
-    assert any("完整重说" in item[2] for item in events)
+
+    barge_head = _loud(ms=300, amplitude=0.8)
+    continuation = _loud(ms=500, amplitude=0.5)
+    silence = np.zeros(int(SR * 0.8), dtype=np.float32)
+    samples = np.concatenate([barge_head, continuation, silence])
+
+    out = list(pipeline.run(audio.ArraySource(samples)))
+    assert len(out) == 1 and out[0].accepted
+    assert out[0].during_tts is True
+    assert not any("重说" in item[2] for item in events), "应当删除请重说提示"
+
+    final_calls = [c.args[0] for c in pipeline.stt.transcribe.call_args_list if c.kwargs.get("final")]
+    assert final_calls, "必须向 STT 发起 final 转写"
+    received_audio = final_calls[0]
+    head_len = len(barge_head)
+    assert np.array_equal(received_audio[:head_len], barge_head), "最终送入识别的音频必须包含插话开头"
 
 
 def test_full_restatement_after_silence_is_accepted_without_mixed_prefix(cfg):
-    """打断后的安静间隔过去后，可接受新完整指令，旧混音不进入识别。"""
+    """打断后安静间隔过去后，前句与后句均能正常识别。"""
     from unittest.mock import Mock
 
     pipeline = _pipeline(cfg)
     pipeline.stt = Mock()
     pipeline.stt.transcribe.return_value = "现在几点了"
-    # 终稿走 streamer.finish 时，换掉 stt 并不会换掉 streamer 里那份旧桩；
-    # 这里直接把 streamer 摘掉，才能真正看到「送进识别的最终音频」。
     pipeline.streamer = None
     pipeline.echo.tts_start()
     overlap = np.full(16000, 0.6, dtype=np.float32)
     fresh = _loud(900, amplitude=0.1)
     samples = np.concatenate([overlap, np.zeros(SR * 2), fresh, np.zeros(SR)])
     out = list(pipeline.run(audio.ArraySource(samples)))
-    assert len(out) == 1 and out[0].accepted
-    final = [c.args[0] for c in pipeline.stt.transcribe.call_args_list if c.kwargs.get("final")]
-    assert final and all(np.max(np.abs(x)) < 0.2 for x in final)
+    assert len(out) == 2 and all(item.accepted for item in out)
 
 
 def test_restart_silence_uses_pre_agc_level_in_mask_mode(cfg):
@@ -240,3 +254,47 @@ def test_stop_speaking_works_between_sentences():
         assert main._TTS["stopped"] is True
     finally:
         main._TTS.update(proc=None, owner=None, stopped=False)
+
+
+def test_is_backchannel_matches_feedback_words():
+    """反馈音整句匹配：标点空格去掉后再比，整句附和词不打断播报。"""
+    for word in ("嗯", "对", "好", "是", "哦", "嗯嗯", "对对"):
+        assert dsp.is_backchannel(word), f"{word} 应当匹配附和词"
+        assert dsp.is_backchannel(f"{word}！"), f"{word} 带标点也应当匹配"
+        assert dsp.is_backchannel(f"  {word}  "), f"{word} 带空格也应当匹配"
+
+    assert not dsp.is_backchannel("好，打开微信")
+    assert not dsp.is_backchannel("对对对写日志")
+    assert not dsp.is_backchannel("嗯今天天气不错")
+
+
+def test_backchannel_during_tts_does_not_interrupt_or_call_llm(monkeypatch, cfg):
+    """播报期间用户发出反馈音（如「嗯」「对对」）：不停播，不进 LLM。"""
+    dispatched = []
+    stopped = []
+    events = []
+
+    monkeypatch.setattr(main, "_dispatch_with_ack", lambda *args, **kwargs: dispatched.append(args))
+    monkeypatch.setattr(main, "stop_speaking", lambda: stopped.append(True) or False)
+
+    class _FakeBus:
+        def emit(self, *args):
+            events.append(args)
+
+    class _FakeRuntime:
+        def __init__(self):
+            self.cfg = cfg
+            self.bus = _FakeBus()
+
+        def note_dropped(self, *args):
+            pass
+
+    pipeline = _pipeline(cfg)
+    pipeline.echo.tts_start()
+
+    utt = audio.Utterance(text="嗯嗯", score=0.95, audio_ms=300.0, accepted=True, during_tts=True)
+    main._dispatch_one(_FakeRuntime(), pipeline, utt, {})
+
+    assert not dispatched, "反馈音不应当进入 LLM 派发"
+    assert not stopped, "反馈音不应当主动请求停止播报"
+    assert any(item[0] == "idle" and item[1] == "反馈音" for item in events)

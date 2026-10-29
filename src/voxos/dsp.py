@@ -20,6 +20,9 @@ _EPS = 1e-10
 # 「句子里含这几个字」——「我要把服务器停下来」里也有「停」，那是一条指令。
 INTERRUPT_WORDS = ("停", "停一下", "算了", "取消", "别说了", "不用了")
 
+# 播报期间的反馈音/附和词。整句匹配，不打断播报，不进 LLM。
+BACKCHANNEL_WORDS = ("嗯", "对", "好", "是", "哦", "嗯嗯", "对对")
+
 
 def bare_interrupt(text: str, words: tuple[str, ...] = INTERRUPT_WORDS) -> bool:
     """整句就是一句撤回话，而不是「这句话里出现了『停』」。
@@ -27,6 +30,11 @@ def bare_interrupt(text: str, words: tuple[str, ...] = INTERRUPT_WORDS) -> bool:
     标点、空格先去掉再比：「算了。」「停一下！」都算。反过来，
     「我要把服务器停下来」不算——它不是要你闭嘴，是要你干活。
     """
+    return re.sub(r"[\s，。！？、,.!?~～]", "", text or "") in words
+
+
+def is_backchannel(text: str, words: tuple[str, ...] = BACKCHANNEL_WORDS) -> bool:
+    """整句就是附和词（如「嗯」「对」「好」），标点空格去掉后再比。"""
     return re.sub(r"[\s，。！？、,.!?~～]", "", text or "") in words
 
 
@@ -202,7 +210,7 @@ class EchoGate:
 
     decay_ms: float = 300.0
     gate_dbfs: float = -25.0
-    interrupt_ms: float = 500.0
+    interrupt_ms: float = 250.0
     interrupt_words: tuple[str, ...] = INTERRUPT_WORDS
     speaking: bool = False
     _decay_left: float = 0.0
@@ -212,6 +220,10 @@ class EchoGate:
 
     def tts_end(self) -> None:
         self.speaking, self._decay_left = False, self.decay_ms
+
+    def interrupt(self) -> None:
+        """打断发生：立即停播并消除混响消退期，避免打断音频被误过滤。"""
+        self.speaking, self._decay_left = False, 0.0
 
     def tick(self, ms: float) -> None:
         if not self.speaking:
@@ -230,6 +242,9 @@ class EchoGate:
 
     def is_interrupt(self, text: str) -> bool:
         return bare_interrupt(text, self.interrupt_words)
+
+    def is_backchannel(self, text: str) -> bool:
+        return is_backchannel(text)
 
     def loud_enough(self, level_dbfs: float) -> bool:
         """静音期间这块音频是否值得攒起来做插话判断（能量门）。"""

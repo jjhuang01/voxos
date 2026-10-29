@@ -357,3 +357,211 @@ def test_note_spoken_cannot_clobber_a_later_turn(cfg, executor, monkeypatch):
     core.note_spoken("第1段", "第")          # 迟到的回调
     assert core.history()[-1]["content"] == "第2段"
 
+
+def test_next_llm_turn_includes_truncated_assistant_and_new_user_message(cfg, executor, monkeypatch):
+    """打断后续接：下一轮 LLM 请求 messages 必须带上 assistant 已念部分 + 新 user 句。"""
+    captured_messages: list[list[dict[str, Any]]] = []
+
+    def fake_chat(**kwargs):
+        captured_messages.append(list(kwargs.get("messages", [])))
+        return {"role": "assistant", "content": "这是后续回答。"}
+
+    monkeypatch.setattr(core, "chat", fake_chat)
+    armed = _armed(cfg)
+
+    # 第 1 轮
+    full_reply = "很久很久以前，森林里住着一只小狐狸。小狐狸天天在树林里采蘑菇。"
+    core.reset_history()
+    core._remember(core.DispatchResult("llm", "给我讲个故事", reply=full_reply))
+
+    # 模拟 TTS 打断：只念了前半句
+    spoken_reply = "很久很久以前，森林里住着一只小狐狸。"
+    core.note_spoken(full_reply, spoken_reply)
+
+    # 第 2 轮续接输入
+    new_user_query = "换一个关于宇宙的故事"
+    core.dispatch(new_user_query, cfg=armed, executor=executor)
+
+    assert len(captured_messages) == 1, "下一轮应当发起一次 LLM 请求"
+    req_messages = captured_messages[0]
+
+    assistant_msgs = [m for m in req_messages if m.get("role") == "assistant"]
+    assert assistant_msgs, "请求 messages 中必须包含 assistant 消息"
+    assert assistant_msgs[-1]["content"] == spoken_reply + "……（被打断，后面没念）"
+
+    assert req_messages[-1]["role"] == "user"
+    assert req_messages[-1]["content"] == new_user_query
+
+
+# ------------------------------------------------------------------ 流式与按句切分
+
+class _FakeSSEResponse:
+    def __init__(self, lines: list[str]) -> None:
+        self.lines = [line.encode("utf-8") if isinstance(line, str) else line for line in lines]
+
+    def __iter__(self):
+        return iter(self.lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+
+def _sse_chunk(content: str) -> str:
+    return f"data: {json.dumps({'choices': [{'delta': {'content': content}}]})}\n\n"
+
+
+def test_stream_incremental_stitching(monkeypatch):
+    """假 SSE 响应覆盖：增量文本 chunk 被正确解析与拼接。"""
+    import urllib.request
+    raw_lines = [
+        _sse_chunk("你好，"),
+        _sse_chunk("我是"),
+        _sse_chunk(" VoxOS。"),
+        "data: [DONE]\n\n",
+    ]
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeSSEResponse(raw_lines))
+    chunks = list(core.chat_stream(
+        base_url="https://fake.llm/v1", api_key="sk-test", model="test-model",
+        messages=[{"role": "user", "content": "hello"}]))
+    assert chunks == ["你好，", "我是", " VoxOS。"]
+    assert "".join(chunks) == "你好，我是 VoxOS。"
+
+
+def test_stream_sentences_order():
+    """测试按句切分：句末标点（。！？!?；换行）按顺序切出，多标点贪婪，末尾补齐。"""
+    chunks = [
+        "第一句来了！",
+        "第二句开始",
+        "，有逗号不切；",
+        "第三句换行\n",
+        "第四句问号？？？",
+        "最后一句无标点",
+    ]
+    sentences = list(core.stream_sentences(iter(chunks)))
+    assert sentences == [
+        "第一句来了！",
+        "第二句开始，有逗号不切；",
+        "第三句换行",
+        "第四句问号？？？",
+        "最后一句无标点",
+    ]
+
+
+def test_stream_done_completes_cleanly(monkeypatch):
+    """遇到 [DONE] 正常退出循环，不抛截断异常。"""
+    import urllib.request
+    raw_lines = [
+        _sse_chunk("测试语句。"),
+        "data: [DONE]\n\n",
+    ]
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeSSEResponse(raw_lines))
+    res = list(core.chat_stream(
+        base_url="https://fake.llm/v1", api_key="sk-test", model="test-model",
+        messages=[{"role": "user", "content": "hi"}]))
+    assert res == ["测试语句。"]
+
+
+def test_stream_interruption_stops_immediately(monkeypatch):
+    """中途打断（should_stop=True）立刻停止产出，不继续读流，不抛异常。"""
+    import urllib.request
+    stopped = False
+
+    def should_stop():
+        return stopped
+
+    raw_lines = [
+        _sse_chunk("第一句。"),
+        _sse_chunk("第二句。"),
+        "data: [DONE]\n\n",
+    ]
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeSSEResponse(raw_lines))
+    output = []
+    for chunk in core.chat_stream(
+        base_url="https://fake.llm/v1", api_key="sk-test", model="test-model",
+        messages=[{"role": "user", "content": "hi"}],
+        should_stop=should_stop,
+    ):
+        output.append(chunk)
+        stopped = True
+
+    assert output == ["第一句。"]
+
+
+def test_stream_truncation_raises_runtime_error(monkeypatch):
+    """假响应在未收到 [DONE] 时发生截断 EOF，必须抛出 RuntimeError。"""
+    import urllib.request
+    raw_lines = [
+        _sse_chunk("半截话未完"),
+    ]
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeSSEResponse(raw_lines))
+    with pytest.raises(RuntimeError, match="未收到 \\[DONE\\]"):
+        list(core.chat_stream(
+            base_url="https://fake.llm/v1", api_key="sk-test", model="test-model",
+            messages=[{"role": "user", "content": "hi"}]))
+
+
+def test_stream_tool_calls_preserves_non_streaming_logic(cfg, executor, monkeypatch):
+    """首个 chunk 带有 tool_calls 时，自动退回并保持非流式调用逻辑。"""
+    armed = _armed(cfg)
+    calls = []
+
+    def fake_chat(*args, **kwargs):
+        if kwargs.get("stream"):
+            tool_data = {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{"id": "call_1", "function": {"name": "tell_time", "arguments": "{}"}}]
+                    }
+                }]
+            }
+            return _FakeSSEResponse([f"data: {json.dumps(tool_data)}\n\n", "data: [DONE]\n\n"])
+        calls.append("non_stream")
+        return {"role": "assistant", "content": None,
+                "tool_calls": [{"id": "call_1", "type": "function",
+                                "function": {"name": "tell_time", "arguments": "{}"}}]}
+
+    monkeypatch.setattr(core, "chat", fake_chat)
+    monkeypatch.setattr(core, "_fast_route", lambda *_: None)
+    result = core.dispatch("请问现在几点钟", cfg=armed, executor=executor)
+    assert "non_stream" in calls
+
+
+def test_stream_disabled_bypasses_streaming(cfg, executor, monkeypatch):
+    """llm.stream = false 时完全走原有非流式路径。"""
+    off = _armed(cfg).with_overrides(**{"llm.stream": False})
+    called_stream = []
+
+    def fake_chat(*args, **kwargs):
+        if kwargs.get("stream"):
+            called_stream.append(True)
+        return {"role": "assistant", "content": "正常回复"}
+
+    monkeypatch.setattr(core, "chat", fake_chat)
+    monkeypatch.setattr(core, "_fast_route", lambda *_: None)
+    res = core.dispatch("测试不流式", cfg=off, executor=executor)
+    assert called_stream == []
+    assert res.reply == "正常回复"
+
+
+def test_dispatch_streams_sentences_to_callback(cfg, executor, monkeypatch):
+    """纯文本回复时，增量文本按句切并实时调用 on_sentence 回调。"""
+    import urllib.request
+    armed = _armed(cfg).with_overrides(**{"llm.stream": True})
+    raw_lines = [
+        _sse_chunk("第一句。"),
+        _sse_chunk("第二句！"),
+        "data: [DONE]\n\n",
+    ]
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeSSEResponse(raw_lines))
+    monkeypatch.setattr(core, "_fast_route", lambda *_: None)
+
+    spoken_sentences = []
+    res = core.dispatch("讲个两句话的回答", cfg=armed, executor=executor,
+                        on_sentence=spoken_sentences.append)
+    assert res.reply == "第一句。第二句！"
+    assert spoken_sentences == ["第一句。", "第二句！"]
+    assert res.streamed is True
+

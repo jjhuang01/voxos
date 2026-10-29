@@ -470,7 +470,7 @@ POST https://openspeech.bytedance.com/api/v3/tts/unidirectional
 Header  X-Api-Key（新版控制台）  或  X-Api-App-Id + X-Api-Access-Key（旧版）
         X-Api-Resource-Id: seed-tts-2.0
 Body    {"user": {"uid": "voxos"},
-         "req_params": {"text": "...", "speaker": "zh_female_shuangkuaisisi_moon_bigtts",
+         "req_params": {"text": "...", "speaker": "zh_female_vv_uranus_bigtts",
                         "audio_params": {"format": "pcm", "sample_rate": 24000}}}
 响应    一串首尾相接的 JSON：音频块 {"code":0,"data":"<base64>"}，
         结束 {"code":20000000,"message":"ok"}，出错是别的 code
@@ -492,7 +492,7 @@ Body    {"user": {"uid": "voxos"},
 [tts]
 provider = "doubao"
 api_key = "你的 Key"
-speaker = "zh_female_shuangkuaisisi_moon_bigtts"   # 换成你买的音色 ID
+speaker = "zh_female_vv_uranus_bigtts"   # 默认 2.0 音色；seed-tts-2.0 必须配 2.0 音色（配 1.0 音色会报 55000000 版本不匹配）
 ```
 
 然后 `voxos doctor`，「语音合成」那一行会从

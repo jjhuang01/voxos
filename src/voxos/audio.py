@@ -560,6 +560,7 @@ class Utterance:
     accepted: bool
     reason: str = ""
     at: float = 0.0        # 这句话收尾的时刻（monotonic）。0 表示不知道，不参与过期判断
+    during_tts: bool = False
 
 
 @dataclass
@@ -611,6 +612,7 @@ class AudioPipeline:
         self._shown = ""           # 上次推给界面的字幕，重复的不推
         self._barge: list[np.ndarray] = []   # TTS 期间攒下的「可能是插话」的音频
         self._barge_ms = 0.0
+        self._during_tts = False
         # 声纹不是分离器：重叠音频仍含回声，不能作为可执行指令回灌。
         self._await_restart = False
         self._restart_silence_ms = 0.0
@@ -622,6 +624,7 @@ class AudioPipeline:
         self._ep.reset()
         self._prefix, self._prefix_ms = [], 0.0
         self._barge, self._barge_ms = [], 0.0
+        self._during_tts = False
         self._await_restart, self._restart_silence_ms = False, 0.0
         self._restart_wait_ms = 0.0
         self._clear_sentence()
@@ -661,28 +664,28 @@ class AudioPipeline:
         self._clear_sentence()
         for raw in source:
             chunk = self._preprocess(raw)
-            chunk = self._gate_playback(chunk)
-            state = self._ep.push(bool(self.vad.is_speech(chunk)), chunk.size)  # type: ignore[attr-defined]
-            if state == "idle":
-                self._keep_prefix(chunk)
-                continue
-            if not started:
-                self._start_sentence(buffer)
-                started = True
-            buffer.append(chunk)
-            self._absorb(chunk)
-            if state not in ("candidate", "force_end"):
-                continue
-            result = self._maybe_finalize(buffer, state, last_partial_ms)
-            if result is None:                      # 半截话：继续收音，不清缓冲
-                last_partial_ms = sum(item.size for item in buffer) / dsp.SR * 1000.0
-                continue
-            # 先清缓冲再 yield：消费者暂停期间不该继续持有整段 PCM。
-            buffer.clear()
-            self._ep.reset()
-            last_partial_ms = 0.0
-            started = False
-            yield result
+            for c in self._gate_playback(chunk):
+                state = self._ep.push(bool(self.vad.is_speech(c)), c.size)  # type: ignore[attr-defined]
+                if state == "idle":
+                    self._keep_prefix(c)
+                    continue
+                if not started:
+                    self._start_sentence(buffer)
+                    started = True
+                buffer.append(c)
+                self._absorb(c)
+                if state not in ("candidate", "force_end"):
+                    continue
+                result = self._maybe_finalize(buffer, state, last_partial_ms)
+                if result is None:                      # 半截话：继续收音，不清缓冲
+                    last_partial_ms = sum(item.size for item in buffer) / dsp.SR * 1000.0
+                    continue
+                # 先清缓冲再 yield：消费者暂停期间不该继续持有整段 PCM。
+                buffer.clear()
+                self._ep.reset()
+                last_partial_ms = 0.0
+                started = False
+                yield result
         if buffer:
             yield self._finalize(buffer)             # 收尾必产一段，缓冲随之清空
             self._clear_sentence()
@@ -785,13 +788,16 @@ class AudioPipeline:
         self.stats["chunks"] += 1
         return audio
 
-    def _gate_playback(self, chunk: np.ndarray) -> np.ndarray:
-        """播放重叠段仅用于打断；打断后等一次静音，再接受完整重说。"""
+    def _gate_playback(self, chunk: np.ndarray) -> list[np.ndarray]:
+        """播放重叠段用于打断；打断后直接把已攒音频作为开头继续收音。"""
         if self.echo.muted:
             return self._during_playback(chunk)
         self._barge, self._barge_ms = [], 0.0
         if not self._await_restart:
-            return chunk
+            return [chunk]
+        return self._handle_restart(chunk)
+
+    def _handle_restart(self, chunk: np.ndarray) -> list[np.ndarray]:
         self._restart_wait_ms += chunk.size / dsp.SR * 1000.0
         # 使用增益补偿前的能量；否则面罩 AGC 抬高底噪会让重说等待永不结束。
         if self._raw_level_dbfs > float(self.cfg.get("audio.restart_silence_dbfs", -42.0)):
@@ -799,12 +805,12 @@ class AudioPipeline:
         else:
             self._restart_silence_ms += chunk.size / dsp.SR * 1000.0
         if self._restart_silence_ms >= self._ep.silence_ms:
-            self._resume_restart("请重说", "播报已停，请完整重说指令")
+            self._resume_restart("恢复收音", "静音间隔已到，恢复收音")
         elif self._restart_wait_ms >= self._restart_max_ms():
             # 屋里底噪本来就高于门限时，「等一段安静」永远等不到；无限等待
             # 会让麦克风从此只听不说，比多一段残留回声糟得多。
             self._resume_restart("恢复收音", "未等到安静间隔，已恢复收音；开头可能含残留回声")
-        return np.zeros_like(chunk)
+        return [np.zeros_like(chunk)]
 
     def _restart_max_ms(self) -> float:
         """重说等待的上限：至少两秒，正常情况是静音门槛的四倍。"""
@@ -814,33 +820,36 @@ class AudioPipeline:
         self._await_restart, self._restart_wait_ms = False, 0.0
         self.on_event("idle", title, detail)
 
-    def _during_playback(self, chunk: np.ndarray) -> np.ndarray:
-        """连续越过能量门才做声纹验证；静音断开候选，混响不进入识别。"""
+    def _during_playback(self, chunk: np.ndarray) -> list[np.ndarray]:
+        """连续越过能量门才做声纹验证；打断确认后释放已攒音频继续收音。"""
         if not self.echo.speaking or dsp.dbfs(chunk) <= self.echo.gate_dbfs:
             self._barge, self._barge_ms = [], 0.0
-            return np.zeros_like(chunk)
+            return [np.zeros_like(chunk)]
         self._barge.append(chunk)
         self._barge_ms += chunk.size / dsp.SR * 1000.0
         if self._barge_ms >= self.echo.interrupt_ms:
-            self._fire_barge_in()
-        return np.zeros_like(chunk)
+            if self._fire_barge_in():
+                released = list(self._barge)
+                self._barge, self._barge_ms = [], 0.0
+                return released
+        return [np.zeros_like(chunk)]
 
-    def _fire_barge_in(self) -> None:
-        """声纹分数只触发停播报，不证明混音中所有字都出自本人。"""
+    def _fire_barge_in(self) -> bool:
+        """声纹确认是本人打断：停播报并标记状态，保留已攒音频送入本句开头。"""
         if not self.echo.speaking:
-            return                              # 已经打断过了，别重复触发
+            return False
         audio = np.concatenate(self._barge) if self._barge else np.zeros(0, dtype=np.float32)
-        self._barge, self._barge_ms = [], 0.0
         ok, score = self.lock.verify(audio)
         if not ok:
-            return                              # 自己的回声：继续播报
-        self.echo.tts_end()
-        self._await_restart, self._restart_silence_ms = True, 0.0
-        self._restart_wait_ms = 0.0
+            self._barge, self._barge_ms = [], 0.0
+            return False
+        self.echo.interrupt()
+        self._during_tts = True
         self._prefix, self._prefix_ms = [], 0.0
-        self.on_event("warn", "打断", f"已请求停止播报（声纹 {score:.2f}）；请停顿后完整重说，重叠音频未执行")
+        self.on_event("warn", "打断", f"已请求停止播报（声纹 {score:.2f}）")
         if self.on_barge_in is not None:
             self.on_barge_in()
+        return True
 
     def _maybe_finalize(self, buffer: list[np.ndarray], state: str,
                         last_partial_ms: float) -> Utterance | None:
@@ -957,7 +966,9 @@ class AudioPipeline:
         # detail 放最终文本而不是「1800ms 声纹 0.82」：胶囊会把这一行显示出来，
         # 用户最想看的是「它到底听到的是哪句话」——那是唯一能纠正误识别的反馈。
         self.on_event("listening", "聆听中", text)
-        return Utterance(text, score, audio_ms, True, at=time.monotonic())
+        during_tts = self._during_tts
+        self._during_tts = False
+        return Utterance(text, score, audio_ms, True, at=time.monotonic(), during_tts=during_tts)
 
     def _drop(self, audio_ms: float, score: float, reason: str) -> Utterance:
         """丢弃一段话。**把已经识别出来的半句带上**。
@@ -967,6 +978,8 @@ class AudioPipeline:
         是胶囊上那句字幕闪一下、然后什么都没有。那是整个系统里最容易让人
         以为「软件坏了」的空白。
         """
+        during_tts = self._during_tts
+        self._during_tts = False
         self.stats["rejected"] += 1
         return Utterance(self._text, score, audio_ms, False, reason=reason,
-                         at=time.monotonic())
+                         at=time.monotonic(), during_tts=during_tts)
