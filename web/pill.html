@@ -282,6 +282,10 @@
   .onboard p{margin:0 0 10px;font-size:12px;color:var(--muted);line-height:1.6}
   /* 卡片里的按钮不参与 flex 均分，得自己撑出左右内边距，否则字贴着边被裁 */
   .onboard .btn{flex:0 0 auto;padding:9px 20px;width:auto}
+  .onboard .script{margin:0 0 10px;padding-left:18px;font-size:13px;line-height:1.7}
+  .link{display:block;margin:8px 0 0 auto;background:none;border:0;color:var(--muted);
+    font-size:11px;cursor:pointer;text-decoration:underline}
+  .link[hidden]{display:none}
 
   .toast{position:fixed;left:50%;bottom:18px;transform:translate(-50%,8px);opacity:0;
     background:rgba(40,41,45,.96);border:1px solid var(--line);color:var(--ink);
@@ -362,9 +366,11 @@
           </div>
         </div>
         <div class="grid" id="cells"></div>        <div class="onboard" id="onboard" hidden>
-          <p>还没有声纹档案。说 2~3 句话（句间停半秒），之后只有你的声音能驱动它。</p>
+          <p id="enroll-tip">还没有声纹档案。照下面念 3 句（句间停半秒），之后只有你的声音能驱动它。</p>
+          <ol class="script" id="enroll-script"></ol>
           <button class="btn primary" id="enroll">录入声纹</button>
         </div>
+        <button class="link" id="reenroll">重新录入声纹</button>
         <div class="ask" id="ask-row">
           <input id="ask" placeholder="打字也行（备用）…" autocomplete="off" />
           <button id="send">发送</button>
@@ -649,13 +655,21 @@ async function loadStatus() {
     if (status.confirm_timeout_s) confirmTimeout = status.confirm_timeout_s;
     applyListening(status.listening !== false);   // 老版本没有这个字段，当它是开着的
     applyDialogue(status.dialogue || 'assistant');
-    setOnboard(!status.enrolled);
+    enrolled = !!status.enrolled;
+    if (status.enroll_script) $('enroll-script').innerHTML =
+      status.enroll_script.map(line => `<li>${escapeHtml(line)}</li>`).join('');
+    if (!reenrolling) setOnboard(!enrolled);
   } catch (_) { /* 守护进程没起来时静默 */ }
 }
 
 /* 待录入时输入框是死的：藏起来，把「说几句话」顶到第一眼能看到的位置 */
+let enrolled = false, reenrolling = false;
 function setOnboard(on) {
   $('onboard').hidden = !on;
+  $('reenroll').hidden = on || !enrolled;
+  $('enroll-tip').textContent = enrolled
+    ? '重新录入：照下面念 3 句（句间停半秒）。读得不好会保留原声纹。'
+    : '还没有声纹档案。照下面念 3 句（句间停半秒），之后只有你的声音能驱动它。';
   $('ask-row').hidden = on;
   $('hint').textContent = on
     ? '录完声纹，胶囊就会开始听你说话。'
@@ -856,16 +870,19 @@ $('ask').addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 $('enroll').addEventListener('click', async () => {
   const button = $('enroll');
   button.disabled = true;
-  button.textContent = '请说 3 句话（句间停半秒）';
+  button.textContent = '正在录：照念上面 3 句…';
   try {
     const result = await api('/api/enroll', {method:'POST', body: JSON.stringify({seconds: 10})});
     toast(result.warning || `录入完成：${result.samples} 句，一致性 ${result.consistency}`);
+    reenrolling = false;
     setOnboard(false);
     await loadStatus();
   } catch (error) {
     toast(error.message, true);
   } finally { button.disabled = false; button.textContent = '录入声纹'; }
 });
+
+$('reenroll').addEventListener('click', () => { reenrolling = true; setOnboard(true); });
 
 /* ---------------- 启动 ---------------- */
 const PARAMS = new URLSearchParams(location.search);

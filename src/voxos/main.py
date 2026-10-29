@@ -358,6 +358,7 @@ def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]
         # 只报「已录入」等于替档案撒谎：录 1 句和录 3 句在界面上长得一模一样。
         # 这里把段数、留出分数、录的时候用的设备一起发出去，界面才有话可说。
         "voiceprint": _voiceprint_state(cfg, lock),
+        "enroll_script": list(enroll.SCRIPT),     # 界面上照着念的句子，与终端同一份
         "role": cfg.get("workspace.role"),
         "dry_run": cfg.flag("workspace.dry_run"),
         "listening": not _MUTED.is_set(),
@@ -394,22 +395,39 @@ def _enroll_now(cfg: Config, lock: dsp.SpeakerLock, seconds: float,
     holdout = _holdout_score(lock, samples)
     try:
         consistency = lock.enroll(samples)         # type: ignore[arg-type]
-        lock.save(cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
     except Exception as exc:
         lock.profiles = previous
-        return {"ok": False, "error": f"声纹保存失败：{exc}"}
-    if done is not None:
-        done.set()
+        return {"ok": False, "error": f"声纹录入失败：{exc}"}
     # 胶囊这边以前只看「段数 ≥ 2」就说成功：10 秒切 5 段、一致性 0.755、阈值
     # 0.75 也照样弹「录入完成」，用户以为好了，然后每句话都被自己拒之门外。
     warning = _enroll_verdict(samples, float(consistency), lock.threshold, holdout)
     if not warning and len(samples) < 2:
         warning = "只切出 1 句：模板不稳，建议再说 2 句（句间停半秒），否则可能被自己拒之门外"
+    failed = _commit_voiceprint(cfg, lock, previous, warning)
+    if failed:
+        return failed
+    if done is not None:
+        done.set()
     _save_enroll_meta(cfg, samples, float(consistency), holdout, lock.threshold,
                       device=str(cfg.get("audio.input_device", "")), usable=not warning)
     return {"ok": True, "consistency": round(float(consistency), 3),
             "holdout": None if holdout is None else round(holdout, 3),
             "usable": not warning, "samples": len(samples), "warning": warning}
+
+
+def _commit_voiceprint(cfg: Config, lock: dsp.SpeakerLock, previous: dict[str, object],
+                       warning: str) -> dict[str, object] | None:
+    """写盘新声纹；失败或读坏时回滚到旧档案，返回错误结果，成功返回 None。"""
+    if warning and previous:
+        # 重录读坏了不能把能用的旧声纹冲掉：界面上随时能点「重录」，误触一次不该锁死自己
+        lock.profiles = previous            # type: ignore[assignment]
+        return {"ok": False, "error": f"{warning}（已保留原声纹）"}
+    try:
+        lock.save(cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
+    except Exception as exc:
+        lock.profiles = previous            # type: ignore[assignment]
+        return {"ok": False, "error": f"声纹保存失败：{exc}"}
+    return None
 
 
 def _ui_context(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
@@ -1200,7 +1218,7 @@ def _guided_samples(cfg: Config, lock: dsp.SpeakerLock) -> tuple[list[object], s
     中间一声咳嗽又多一段噪声。改成一句一次，段数就是确定的，而且哪句不合格
     当场重读，不会带着一段坏音频去建模板。
     """
-    from . import audio
+    from . import audio, dsp
 
     device = cfg.get("audio.input_device", "")
     try:
@@ -1210,7 +1228,8 @@ def _guided_samples(cfg: Config, lock: dsp.SpeakerLock) -> tuple[list[object], s
         return [], ""
     print(f"麦克风：{name}（峰值 {peak:.3f}）")
     if peak < enroll.MIN_PEAK:
-        print("⚠️  这个设备几乎收不到声音：先确认系统输入设备与音量，再重录。")
+        # 这时还没开口，峰值低多半只是屋里安静；真没声音会在每句读完时当场拦下
+        print("（现在很安静。读完每句会报峰值，若一直很低再检查系统输入设备）")
     print(f"一共 {len(enroll.SCRIPT)} 句，每句读完停半秒，它会自己收尾。\n")
     samples: list[object] = []
     vectors: list[object] = []

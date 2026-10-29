@@ -164,3 +164,16 @@ def test_voiceprint_note_admits_when_quality_was_never_recorded(tmp_path):
     cfg = Config({"audio": {"voiceprint_profiles": str(npz)}}, data_root=tmp_path)
 
     assert "质量未记录" in _voiceprint_note(cfg)
+
+
+def test_guided_samples_runs_end_to_end(monkeypatch):
+    """逐句录入整条跑一遍：0.1.39 曾因函数内漏导 dsp，读完第 1 句就 NameError。"""
+    from voxos import audio, main
+    from voxos.config import Config
+
+    wave = np.zeros(dsp.SR, dtype=np.float32)
+    monkeypatch.setattr(audio, "probe_mic", lambda *a, **k: ("测试麦", 0.5))
+    monkeypatch.setattr(main, "_read_one", lambda *a, **k: wave)
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=lambda x: np.ones(4, dtype=np.float32))
+    samples, name = main._guided_samples(Config({}), lock)
+    assert name == "测试麦" and len(samples) == len(main.enroll.SCRIPT)

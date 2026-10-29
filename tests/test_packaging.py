@@ -614,6 +614,33 @@ def test_enroll_warns_when_only_one_sentence_was_captured(monkeypatch):
     assert "再说 2 句" in str(result["warning"]), result
 
 
+def test_bad_reenroll_keeps_the_old_voiceprint(monkeypatch):
+    """界面上随时能点「重录」：读坏的一次不能冲掉能用的旧声纹，也不能写盘。"""
+    import numpy as np
+
+    monkeypatch.setattr(main, "_record_segments", lambda *a, **k: [np.zeros(3200, dtype="float32")])
+    old = np.full(192, 0.5, dtype="float32")
+    saved: list[object] = []
+
+    class FakeLock:
+        threshold = 0.75
+
+        def __init__(self):
+            self.profiles = {"normal": old}
+
+        def enroll(self, samples):
+            self.profiles["normal"] = np.ones(192, dtype="float32")
+            return 1.0
+
+        def save(self, path):
+            saved.append(path)
+
+    lock = FakeLock()
+    result = main._enroll_now(config.Config({"audio": {}}), lock, 10.0)  # type: ignore[arg-type]
+    assert result["ok"] is False and "保留原声纹" in str(result["error"]), result
+    assert lock.profiles["normal"] is old and saved == []
+
+
 def test_stale_singleton_lock_is_cleared_only_when_nobody_is_using_it(tmp_path, monkeypatch):
     """强杀胶囊窗口会留下指向死 pid 的 `SingletonLock`，Chrome 之后就不再弹窗——
     `open -na` 还返回 0，于是「点了图标什么都没发生」。
