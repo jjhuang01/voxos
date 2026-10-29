@@ -162,3 +162,31 @@ def test_timeline_json_round_trips(tmp_path: Path):
     assert row["args"] == {"command": "rm -rf ~/Library/Caches/x"}
     assert row["ms"] == 12.5
     assert json.loads(json.dumps(row, ensure_ascii=False))["tool"] == "run_command"
+
+
+def test_note_dropped_keeps_the_sentence_and_the_reason(tmp_path: Path):
+    """被丢弃的句子必须同时留下「说了什么」和「为什么丢」。
+
+    这是本轮修复的核心：`_consume` 里原来是一句裸的 `if not
+    utterance.accepted: continue`，`reason` 被扔掉，音频层还把文本换成了
+    空字符串。于是用户说十句一句没执行，两份日志加起来仍然是空白——
+    只能猜「是不是软件坏了」。
+    """
+    from types import SimpleNamespace
+
+    from voxos.main import Runtime
+    from voxos.ui import StatusBus
+
+    cfg = _cfg()
+    cfg.data["audit"] = {"timeline_path": str(tmp_path / "t.jsonl")}
+    runtime = Runtime(cfg, StatusBus())
+
+    runtime.note_dropped(SimpleNamespace(
+        text="请打开微信", score=0.74, audio_ms=1400, reason="声纹不匹配，已丢弃"))
+
+    row = timeline.recent(cfg=cfg)[0]
+    assert row["outcome"] == "dropped"
+    assert row["text"] == "请打开微信"       # 以前这里是空字符串
+    assert row["score"] == 0.74
+    assert row["audio_ms"] == 1400
+    assert row["reason"] == "声纹不匹配，已丢弃"

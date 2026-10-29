@@ -25,6 +25,15 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 - 代码度量表 `timeline.py` 130 → 133，合计 7391 → 7394，测试 385 → 386 项。
 - CHANGELOG 0.1.31 段里写「四种结局」但表里是五行，改为「五种结局」。
 
+### 补上核心路径的回归测试
+
+`note_dropped()` 是这一版修复的核心（丢弃的句子要留下「说了什么 + 为什么丢」），
+但之前只有 `_turn_of` 有测试，接线本身没有。`test_note_dropped_keeps_the_sentence_and_the_reason`
+直接构造一个被拒的 utterance 走 `Runtime.note_dropped`，断言落盘的 `text` 是
+「请打开微信」而不是空字符串——**这正是修复前会丢掉的那个字段**。
+
+测试总数 387 项（385 passed + 2 skipped）。
+
 ## [0.1.31] - 2026-10-30
 
 用户原话：「我发了很多指令，但没用啊……历史聊天是否可以看呢，我说的话，和
@@ -116,7 +125,7 @@ voxos log --limit 100
   会把「随便聊两句」记成「执行了某个动作」。改成看 `tool` 空不空。
 - **`timeline.Turn.line()` 对打字入口显示「声纹0.00 / 0ms」**：让人以为声纹坏了。
 
-测试 386 项（384 passed + 2 skipped）。
+测试 387 项（385 passed + 2 skipped）。
 
 ## [0.1.30] - 2026-10-30
 
