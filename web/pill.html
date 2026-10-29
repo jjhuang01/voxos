@@ -474,6 +474,9 @@ function render(event) {
   pill.dataset.state = state;
   label.textContent = event.label || STATE_TEXT[state] || state;
   if (state === 'executing') { setSaid(event.detail); setReplied(''); }
+  /* 聆听中把已经识别出来的半句显示出来：这是「它到底听见没有」的唯一反馈。
+     没有这一行，用户说完之前是完全静默的——豆包和 ChatGPT 都不是这样。 */
+  else if (state === 'listening') { if (event.detail) setSaid(event.detail); }
   else if (state === 'done' || state === 'blocked' || state === 'miss') {
     setReplied(event.detail);
     settleLater();

@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterable, Iterator, Protocol
 
 import numpy as np
 
-from . import dsp, turn
+from . import dsp, stream, turn
 from .config import Config
 
 __all__ = [
@@ -569,6 +569,7 @@ class AudioPipeline:
     lock: dsp.SpeakerLock
     vad: object = field(default_factory=dsp.EnergyVad)
     on_event: Callable[[str, str, str], None] = lambda state, label, detail: None
+    on_partial: Callable[[str], None] | None = None
     echo: dsp.EchoGate = field(default_factory=dsp.EchoGate)
     partial_interval_ms: float = 400.0
     turn_detector: Any = None        # 显式注入（测试用）；None 时按配置造
@@ -594,14 +595,31 @@ class AudioPipeline:
         self.window_ms = float(self.cfg.get("audio.partial_window_ms", 3000))
         self._prefix: list[np.ndarray] = []
         self._prefix_ms = 0.0
+        # 实时字幕：`stream.make_streamer` 自己决定要不要（远端引擎一律不给，
+        # 因为字幕必须在声纹校验之前出字，等于把没验身份的音频提前传上云）。
+        self.streamer = stream.make_streamer(self.cfg, self.stt)
+        self.subtitle_interval_ms = float(self.cfg.get("audio.subtitle_interval_ms", 400))
+        self.first_partial_ms = float(self.cfg.get("audio.first_partial_ms", 250))
+        self._text = ""            # 本句当前 partial（字幕 + 文本判停共用这一次解码）
+        self._text_ms = 0.0        # 上次解码时的句内时长
+        self._buf_ms = 0.0         # 本句已攒多长
+        self._shown = ""           # 上次推给界面的字幕，重复的不推
 
     def reset(self) -> None:
         """设备断流后清掉句级状态：旧缓冲、端点状态和 VAD 上下文都不能跨断流。"""
         self._ep.reset()
         self._prefix, self._prefix_ms = [], 0.0
+        self._clear_sentence()
         reset = getattr(self.vad, "reset", None)
         if callable(reset):
             reset()
+
+    def _clear_sentence(self) -> None:
+        """一句话结束时把句级状态全部归零。少清一个，下一句就会带着上一句的尾巴。"""
+        self._buf_ms = 0.0
+        self._text, self._text_ms, self._shown = "", 0.0, ""
+        if self.streamer is not None:
+            self.streamer.reset()
 
     def _keep_prefix(self, chunk: np.ndarray) -> None:
         """攒「说话之前」那一小段音频，最多 `prefix_padding_ms`。
@@ -625,6 +643,7 @@ class AudioPipeline:
         last_partial_ms = 0.0
         started = False
         self._prefix, self._prefix_ms = [], 0.0
+        self._clear_sentence()
         for raw in source:
             chunk = self._preprocess(raw)
             if not self.echo.allow_chunk(dsp.dbfs(chunk)):
@@ -637,9 +656,11 @@ class AudioPipeline:
                 continue
             if not started:
                 buffer.extend(self._prefix)     # 起手那 300ms 补回去
+                self._begin_sentence()
                 self._prefix, self._prefix_ms = [], 0.0
                 started = True
             buffer.append(chunk)
+            self._absorb(chunk)
             if state not in ("candidate", "force_end"):
                 continue
             result = self._maybe_finalize(buffer, state, last_partial_ms)
@@ -654,8 +675,64 @@ class AudioPipeline:
             yield result
         if buffer:
             yield self._finalize(buffer)             # 收尾必产一段，缓冲随之清空
+            self._clear_sentence()
 
     # -- 内部 -------------------------------------------------------------
+    def _absorb(self, chunk: np.ndarray) -> None:
+        """收一块音频：累计句内时长、喂给流式识别器、到点出字幕。
+
+        **每块都要喂**。真流式识别器漏一块是「丢音频」，不是「少一个字」——
+        它的内部状态是靠逐块推进的，跳过一块等于把那 32ms 从句子里剪掉。
+        """
+        self._buf_ms += chunk.size / dsp.SR * 1000.0
+        if self.streamer is not None:
+            self.streamer.push(chunk)
+            self._maybe_subtitle()
+
+    def _begin_sentence(self) -> None:
+        """一句话开始：清句级状态，并把补回来的起手 300ms 也喂给流式识别器。
+
+        漏了最后这一步，字幕的开头会永远少一个字——用户说「帮我把」，字幕显示
+        「我把」。原因和 `prefix_padding_ms` 那个 bug 一模一样：VAD 判出人声时，
+        第一个音素已经在上一块里了。
+        """
+        self._clear_sentence()
+        if self.streamer is not None:
+            for item in self._prefix:
+                self.streamer.push(item)
+                self._buf_ms += item.size / dsp.SR * 1000.0
+
+    def _ensure_text(self) -> str:
+        """保证本句 partial 是最新的。**字幕和文本判停共用这一次解码**。
+
+        同一个句内时长只解一次：`_text_ms` 记着上次解码时攒了多长，没新音频就
+        直接返回缓存。否则字幕一次、判停一次，一句话解两遍，白烧一倍 CPU。
+        """
+        if self.streamer is None:
+            return ""
+        if self._text and self._text_ms >= self._buf_ms:
+            return self._text
+        self._text = self.streamer.text()
+        self._text_ms = self._buf_ms
+        return self._text
+
+    def _maybe_subtitle(self) -> None:
+        """到点就把当前 partial 推给界面。首字比后续更快——见 `first_partial_ms`。
+
+        首字单独一个阈值（默认 250ms）是因为「开口之后多久看见字」和「后面的字
+        滚得多快」是两件事：前者决定用户觉不觉得它听见了，后者只是可读性。
+        都用 400ms 的话，最坏情况要 470ms 才出第一个字。
+        """
+        if self.streamer is None or self.on_partial is None:
+            return
+        gap = self.subtitle_interval_ms if self._shown else self.first_partial_ms
+        if self._buf_ms - self._text_ms < gap:
+            return
+        text = self._ensure_text()
+        if text and text != self._shown:
+            self._shown = text
+            self.on_partial(text)
+
     def _preprocess(self, chunk: np.ndarray) -> np.ndarray:
         audio = dsp.as_float(chunk)
         self.echo.tick(audio.size / dsp.SR * 1000.0)
@@ -679,7 +756,6 @@ class AudioPipeline:
                 return verdict
             # 走到这里说明模型坏了：`_judge_by_audio` 已经把它摘掉，交给文本那条
         return self._judge_by_text(buffer, audio, audio_ms)
-
     def _judge_by_audio(self, buffer: list[np.ndarray],
                         audio: np.ndarray) -> tuple[bool, Utterance | None]:
         """音频判停。返回（是否给出了结论，结论）。模型出错时第一项为 False。
@@ -704,25 +780,32 @@ class AudioPipeline:
 
     def _judge_by_text(self, buffer: list[np.ndarray], audio: np.ndarray,
                        audio_ms: float) -> Utterance | None:
-        """文本判停：解最后 `partial_window_ms`，看结尾是不是半截话。
+        """文本判停：看结尾是不是半截话。
 
-        只解结尾是故意的：判「说完没」只看末尾有没有「把」「然后」这类词，整段
-        重解是白花。本机实测 SenseVoice 解码耗时随音频线性涨（0.5s→22ms，
-        12s→283ms），而这一步只关心最后 3 秒。
+        只解最后 `partial_window_ms` 是故意的：判「说完没」只看末尾有没有「把」
+        「然后」这类词，整段重解是白花。本机实测 SenseVoice 解码耗时随音频线性涨
+        （0.5s→22ms，12s→283ms），而这一步只关心最后 3 秒。
+
+        有流式识别器时直接用它的 partial——那份结果已经在出字幕时算过了，
+        这里再解一次等于同一段音频解两遍。
         """
-        tail = audio[-int(dsp.SR * self.window_ms / 1000):] if self.window_ms > 0 else audio
         if getattr(self.stt, "remote", False):
             # 远端识别会把音频上传。身份没确认之前，一个字节都不该离开本机。
             ok, score = self.lock.verify(audio)
             if not ok:
                 return self._drop(audio_ms, score, "声纹不匹配，已丢弃")
-        text = self.stt.transcribe(tail, final=False)
+        if self.streamer is not None:
+            text = self._ensure_text()
+        else:
+            tail = audio[-int(dsp.SR * self.window_ms / 1000):] if self.window_ms > 0 else audio
+            text = self.stt.transcribe(tail, final=False)
         if not self._ep.should_end(text):
             return None                            # 半截话，继续等（语义尾词等待）
-        # 只解了结尾时，这份文本不完整，不能当终稿；解了全段才能省掉下面那次重解。
-        return self._finalize(buffer, text if tail.size == audio.size else "")
+        # 不把 partial 当终稿传下去：窗口解出来的文本不完整（可能缺开头），
+        # 终稿由 `_finalize` 自己拿（流式的 `finish` 或整段重解）。
+        return self._finalize(buffer)
 
-    def _finalize(self, buffer: list[np.ndarray], text: str = "") -> Utterance:
+    def _finalize(self, buffer: list[np.ndarray]) -> Utterance:
         """收尾一段话，**永远返回一个 Utterance**——哪怕是空转写。
 
         返回 `None` 会被 `run()` 理解成「还没说完，继续攒」，而那只在候选态成立。
@@ -730,8 +813,9 @@ class AudioPipeline:
         整段重新拼一遍再解码一次，句子越长越慢，最后把管道拖死。
         真机上的触发条件很普通——一声咳嗽、一次 VAD 假阳性，转写出来是空的。
 
-        `text` 非空表示调用方已经解过全段（离线引擎 partial == final），
-        直接用它，省掉一次 100–300ms 的重解。
+        终稿一律走识别器自己的 `finish`：只有它知道「partial 能不能当 final 用」。
+        以前这个判断散在管道里（`partial_equals_final`），现在收敛到识别器内部，
+        因为流式识别器的 partial **永远**不能当终稿——它会改字。
         """
         audio = np.concatenate(buffer) if buffer else np.zeros(0, dtype=np.float32)
         audio_ms = audio.size / dsp.SR * 1000.0
@@ -742,20 +826,21 @@ class AudioPipeline:
         ok, score = self.lock.verify(audio)
         if not ok:
             return self._drop(audio_ms, score, "声纹不匹配，已丢弃")
-        if not text or not getattr(self.stt, "partial_equals_final", False):
-            # 只有引擎自己声明「partial 就是 final」才能省这次解码。别的引擎
-            # （远端 Whisper、脚本回放）的 final 走的是另一条路——脚本回放的
-            # final 才推进队列，复用它会让同一句话被反复派发。
-            try:
+        try:
+            if self.streamer is not None:
+                text = self.streamer.finish(audio)
+            else:
                 text = self.stt.transcribe(audio, final=True)
-            except Exception as exc:               # 单句识别失败不能杀死整条监听
-                return self._drop(audio_ms, score, f"识别失败：{exc}")
+        except Exception as exc:                   # 单句识别失败不能杀死整条监听
+            return self._drop(audio_ms, score, f"识别失败：{exc}")
         if not text.strip():
             return self._drop(audio_ms, score, "空转写，已丢弃")
         if not self.echo.allow_text(text):
             return self._drop(audio_ms, score, "回声门丢弃")
         self.stats["utterances"] += 1
-        self.on_event("listening", "聆听中", f"{audio_ms:.0f}ms 声纹 {score:.2f}")
+        # detail 放最终文本而不是「1800ms 声纹 0.82」：胶囊会把这一行显示出来，
+        # 用户最想看的是「它到底听到的是哪句话」——那是唯一能纠正误识别的反馈。
+        self.on_event("listening", "聆听中", text)
         return Utterance(text, score, audio_ms, True)
 
     def _drop(self, audio_ms: float, score: float, reason: str) -> Utterance:

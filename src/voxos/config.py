@@ -208,13 +208,54 @@ def _read_api_key(data: dict[str, Any]) -> None:
         pass                      # 没这个文件不是错误：走「缺 Key」那条提示
 
 
+def _factory_defaults() -> dict[str, Any]:
+    """出厂默认配置。用户在 `~/.voxos/settings.toml` 里没有的键，一律用它。"""
+    path = ROOT / "config" / "settings.toml"
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+
+
+def _merge_defaults(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
+    """深合并：`over` 里有的用 `over`，没有的用 `base`。
+
+    为什么必须在内存里合并，而不是等用户手动补：**用户配置文件是「升级时不会
+    被替换」的那一份**（`_SEED_NOTE` 写得很清楚：`pipx upgrade` 不覆盖它）。
+    所以每一次新增配置项，老用户都拿不到新默认值——而且不报错、不提示，
+    只是新功能静默不生效。
+
+    真实例子：0.1.25 把静音阈值从 800ms 降到 500ms，又加了 prefix padding 和
+    判停模型。老配置里没有这几个键，于是他那台机器**一直**在跑 0.1.24 的行为，
+    而 `doctor` 显示的版本号是 0.1.29。用户以为自己升级了。
+
+    合并只发生在内存里：用户文件一个字节都不动。设置页改什么就写什么。
+    """
+    out = {key: (dict(value) if isinstance(value, dict) else value) for key, value in base.items()}
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _merge_defaults(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
 def load(path: str | Path | None = None) -> Config:
-    """加载配置；文件缺失时用内置最小默认值（保证任何机器上都能起来）。"""
+    """加载配置：**出厂默认打底，用户文件覆盖**。
+
+    文件缺失时用出厂默认（保证任何机器上都能起来）。用户文件里缺的键不会
+    悄悄退回代码里的 `get(..., default)`——那些 default 是「写这行代码时的值」，
+    不是「今天的最新默认值」，两者会越差越远。
+    """
     target = Path(path) if path else _settings_path()
     data: dict[str, Any] = {}
     if target.exists():
         with open(target, "rb") as handle:
             data = tomllib.load(handle)
+    data = _merge_defaults(_factory_defaults(), data)
     _apply_env(data)
     _read_api_key(data)
     return Config(data, source=target, data_root=DATA)

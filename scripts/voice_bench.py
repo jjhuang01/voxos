@@ -110,13 +110,110 @@ def cmd_endpoint(args: argparse.Namespace) -> int:
     return 0
 
 
+def _say_voice(text: str, voice: str = "Tingting") -> np.ndarray:
+    """用 macOS 自带的中文语音生成一段**真的在说话**的音频。
+
+    为什么不用合成谐波：谐波在 32ms 时模型就能解出「字」来，于是首字延迟量出来
+    是 52ms——数字好看，但它是假的。真实人声要等韵母出来才有字。合成谐波测
+    分段逻辑可以，测识别质量不行，会让人误以为达标了。
+    """
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        aiff, wav = Path(tmp) / "a.aiff", Path(tmp) / "a.wav"
+        subprocess.run(["say", "-v", voice, "-o", str(aiff), text], check=True,
+                       capture_output=True)
+        subprocess.run(["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
+                        str(aiff), str(wav)], check=True, capture_output=True)
+        return audio.wav_to_array(wav)
+
+
+# 三条不同长度的话：短指令是常态，长句才是判停和字幕的真正压力。
+CASES: tuple[tuple[str, str], ...] = (
+    ("短指令", "打开文件"),
+    ("中句", "帮我把磁盘清一下"),
+    ("长句", "帮我看一下昨天写的开发日志，然后总结成三条要点发给我"),
+)
+
+
+def _measure_one(cfg, stt, voice: np.ndarray) -> tuple[float, int, float, str]:
+    """跑一句话，返回（首字延迟 ms，字幕条数，单次解码 p50 ms，终稿）。
+
+    首字延迟看的是**出第一个字时 VAD 已经确认了多少人声**，不是墙钟：墙钟会把
+    机器快慢混进来，而「人声开始 → 出现字」是算法决定的，换台机器应该一样。
+    """
+    holder: list[audio.AudioPipeline] = []
+    marks: list[float] = []
+    costs: list[float] = []
+
+    def on_partial(_text: str) -> None:
+        marks.append(holder[0]._ep.speech_ms)     # noqa: SLF001 - 基准脚本就该看内部
+
+    pipeline = audio.AudioPipeline(cfg=cfg, stt=stt, lock=_Pass(),
+                                   on_event=lambda *a: None, on_partial=on_partial)
+    holder.append(pipeline)
+    original = pipeline.streamer.text
+
+    def timed_text() -> str:
+        started = time.perf_counter()
+        try:
+            return original()
+        finally:
+            costs.append((time.perf_counter() - started) * 1000.0)
+
+    pipeline.streamer.text = timed_text           # type: ignore[union-attr]
+
+    stream = np.concatenate([_silence(400), voice, _silence(2000)])
+    final = ""
+    for utterance in pipeline.run(_source(stream)):
+        if utterance.accepted:
+            final = utterance.text
+        break
+    return (marks[0] if marks else float("nan"), len(marks),
+            statistics.median(costs) if costs else 0.0, final)
+
+
+def cmd_subtitle(args: argparse.Namespace) -> int:
+    """实时字幕：**首字延迟**多少、每句解几次、终稿认不认得对。
+
+    解码次数一起报，因为字幕的全部代价就在这里：每 400ms 一次，每次都要真解。
+    终稿文本也打出来，因为「有字幕」和「字幕是对的」是两件事。
+    """
+    cfg = load()
+    stt = _make_stt(args.real, cfg)
+    rows = []
+    for name, text in CASES:
+        voice = _say_voice(text) if args.say else _voice(1.5)
+        first, count, cost, final = _measure_one(cfg, stt, voice)
+        rows.append((name, text, voice.size / SR * 1000.0, first, count, cost, final))
+
+    print(f"{'场景':<6} {'人声':>6} {'首字':>6} {'条数':>4} {'单次解码':>8}  原文 / 终稿")
+    for name, text, voice_ms, first, count, cost, final in rows:
+        flag = "" if (not final or text in final or final in text) else "  ← 不一致"
+        print(f"{name:<6} {voice_ms:>5.0f}ms {first:>5.0f}ms {count:>4d} {cost:>7.0f}ms  "
+              f"{text}\n{'':<26}{final}{flag}")
+    firsts = [row[3] for row in rows if row[3] == row[3]]
+    if firsts:
+        print(f"\n首字延迟：p50 {statistics.median(firsts):.0f}ms  max {max(firsts):.0f}ms"
+              f"（门槛 300ms）")
+    print(f"（配置：首字 {cfg.get('audio.first_partial_ms')}ms 起，"
+          f"之后每 {cfg.get('audio.subtitle_interval_ms')}ms 一次，"
+          f"窗口 {cfg.get('audio.subtitle_window_ms')}ms，"
+          f"前缀 {cfg.get('audio.prefix_padding_ms')}ms）")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="语音链路测量")
     sub = parser.add_subparsers(dest="cmd", required=True)
     one = sub.add_parser("endpoint", help="端点延迟（最后一个语音块 → 交出整句）")
     one.add_argument("--real", action="store_true", help="用真 SenseVoice（含解码耗时）")
+    two = sub.add_parser("subtitle", help="实时字幕（人声开始 → 第一个字）")
+    two.add_argument("--real", action="store_true", help="用真 SenseVoice（含解码耗时）")
+    two.add_argument("--say", action="store_true", help="用 macOS 中文语音当语料（推荐）")
     args = parser.parse_args()
-    return {"endpoint": cmd_endpoint}[args.cmd](args)
+    return {"endpoint": cmd_endpoint, "subtitle": cmd_subtitle}[args.cmd](args)
 
 
 if __name__ == "__main__":

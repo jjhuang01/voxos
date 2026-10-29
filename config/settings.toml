@@ -21,6 +21,14 @@ prefix_padding_ms = 300       # 判出人声时，往前补这么多音频。VAD
                               # 往往落在上一块里——不补就把「嗯」「把」这类轻声起头削掉。
 partial_window_ms = 3000      # 判「说完没」只解最后这么久。离线解码耗时随长度线性涨
                               # （实测 2s→68ms，12s→283ms），而判断只看结尾。
+subtitles = true              # 边说边出字：胶囊第二行实时显示「已经听到的半句」。
+                              # 远端识别后端一律不给（字幕必须在声纹校验之前出字，
+                              # 等于把没验过身份的音频提前传上云）。
+subtitle_interval_ms = 400    # 出过一次字之后，每这么久刷新一次
+subtitle_window_ms = 2500     # 窗口字幕只解最后这么久：成本是常数，长句不退化
+                              # （实测 2.5s 音频 ≈ 67ms，每 400ms 一次）
+first_partial_ms = 250        # 首字阈值，比后续刷新更快。两者是两件事：前者决定
+                              # 「觉不觉得它听见了」，后者只是可读性。
 max_utterance_ms = 12000      # 单句硬上限，防止一直说不停
 min_speech_ms = 200           # 真实人声短于此视为噪音（按人声时长算，不含 prefix padding）
 turn_backend = "auto"         # auto | smart | text。auto：有模型用 smart-turn，否则文本判停
@@ -45,6 +53,11 @@ wake_words = ["siri", "jarvis", "小助手", "嘿 siri"]
 [stt]
 backend = "scripted"          # scripted | sense_voice | local_whisper | openai
 model_dir = ".voxos/models/sense-voice"   # sense_voice 用：model.int8.onnx + tokens.txt
+stream_model_dir = ""         # 流式识别模型目录（sherpa-onnx zipformer / paraformer）。
+                              # 留空 = 用「窗口字幕」：拿上面那个离线引擎反复解最后 2.5s。
+                              # 不需要任何新模型，本机现在就能跑；代价是长句开头会滚掉。
+                              # 填了目录就换真流式：前缀不丢、长句不退化、支持热词。
+                              # 模型：sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20
 num_threads = 2               # sense_voice 推理线程数；2 核够跑实时，再多收益递减
 language = "zh"
 model = "small"

@@ -233,3 +233,49 @@ def test_env_map_covers_schema():
     for env_key, target in settings.ENV_MAP.items():
         assert len(target) == 2
         assert os.environ.get(env_key) is None or isinstance(os.environ.get(env_key), str)
+
+
+# --------------------------------------
+# 出厂默认合并：老用户配置不能把新默认值挡在门外
+# --------------------------------------
+
+def test_user_config_inherits_new_factory_defaults(tmp_path: Path):
+    """老用户的配置文件缺的键，必须拿到**出厂默认**，不是代码里的旧值。
+
+    真实事故：0.1.25 把静音阈值从 800ms 降到 500ms，又加了 prefix padding 和
+    音频判停。这些键在老用户的 `~/.voxos/settings.toml` 里根本不存在，而那份
+    文件升级时不会被替换——于是他那台机器一直在跑 0.1.24 的行为，`doctor`
+    却显示 0.1.29。用户以为自己升级了。
+    """
+    user = tmp_path / "settings.toml"
+    user.write_text("[audio]\nsilence_duration_ms = 1234\n", encoding="utf-8")
+
+    cfg = load(user)
+
+    assert cfg.get("audio.silence_duration_ms") == 1234, "用户显式写的值不能被覆盖"
+    assert cfg.get("audio.prefix_padding_ms") == 300, "新增键没拿到出厂默认"
+    assert cfg.flag("audio.subtitles") is True
+    assert cfg.get("stt.stream_model_dir") == ""
+
+
+def test_merge_is_deep_and_keeps_user_values(tmp_path: Path):
+    """合并必须逐层进行：用户只改了一个子键，同段其他键仍要拿出厂默认。"""
+    user = tmp_path / "settings.toml"
+    user.write_text('[stt]\nbackend = "sense_voice"\n', encoding="utf-8")
+
+    cfg = load(user)
+
+    assert cfg.get("stt.backend") == "sense_voice"
+    assert cfg.get("stt.num_threads") == 2          # 同段、用户没写
+    assert cfg.get("audio.silence_duration_ms") == 500   # 另一段、用户没写
+
+
+def test_merging_does_not_touch_the_user_file(tmp_path: Path):
+    """合并只在内存里发生。用户文件一个字节都不该变——它归用户所有。"""
+    user = tmp_path / "settings.toml"
+    original = "[audio]\nsilence_duration_ms = 900\n"
+    user.write_text(original, encoding="utf-8")
+
+    load(user)
+
+    assert user.read_text(encoding="utf-8") == original

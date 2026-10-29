@@ -82,6 +82,20 @@ class StatusBus:
         """让总线可以直接当 `on_event` 回调传进内核。"""
         return self.emit(state, label, detail)
 
+    def emit_partial(self, text: str) -> None:
+        """边说边出字。**不入 history、不落盘、不推给审计**。
+
+        字幕是过程量：一句话能出十条，而且每条都会被下一条改掉。写进 history
+        会把「最近发生了什么」冲干净——用户打开面板想看的是刚才执行了什么，
+        不是自己说到一半的草稿。所以只推给此刻在线的订阅者，错过就错过。
+        """
+        with self._lock:
+            event = Event("listening", "聆听中", text, datetime.now().isoformat(timespec="milliseconds"),
+                          self._seq)
+            subscribers = list(self._subs)
+        for subscriber in subscribers:
+            _offer(subscriber, event)
+
     def subscribe(self) -> queue.Queue[Event]:
         """拿一个订阅通道。超过上限时抛 `RuntimeError`，由调用方转成 503。"""
         with self._lock:

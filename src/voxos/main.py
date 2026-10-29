@@ -539,6 +539,7 @@ def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[s
     pipeline = audio.AudioPipeline(
         cfg=cfg, stt=audio.make_stt(cfg, hotwords), lock=lock,
         vad=audio.make_vad(cfg), on_event=runtime.bus,
+        on_partial=runtime.bus.emit_partial,
         echo=dsp.EchoGate(decay_ms=float(cfg.get("audio.echo_decay_ms", 300))))
     chunk = int(cfg.get("audio.chunk_size", 512))
     device = cfg.get("audio.input_device", "")
@@ -967,6 +968,7 @@ def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
         ("LLM", _llm_note(cfg)),
         ("语音合成", _tts_note(cfg)),
         ("识别后端", _hotword_note(cfg, [])),
+        ("实时字幕", _subtitle_note(cfg)),
         ("判停", _turn_note(cfg)),
         ("输入设备", _mic_note(cfg)),
         ("VAD 后端", _vad_note(cfg)),
@@ -1090,6 +1092,28 @@ def _turn_note(cfg: Config) -> str:
     if turn.make(cfg) is None:
         return "文本判停（模型加载失败，删掉重下：voxos models --force）"
     return f"smart-turn v3.2（音频判停，阈值 {turn.threshold(cfg):g}）"
+
+
+def _subtitle_note(cfg: Config) -> str:
+    """实时字幕走哪条路，以及为什么可能没开。
+
+    三种状态必须分得清：真流式（有模型）、窗口字幕（拿离线引擎反复解）、关闭。
+    最糟的是「用户以为开着」——远端识别后端会被**代码**关掉字幕（字幕必须在
+    声纹校验之前出字，等于把没验过身份的音频提前传上云），这件事如果不在
+    doctor 里说，用户只会觉得「字幕坏了」。
+    """
+    if not cfg.flag("audio.subtitles", True):
+        return "关闭（audio.subtitles = false）"
+    if str(cfg.get("stt.backend", "scripted")) == "openai":
+        return "关闭（远端识别：字幕会在声纹校验之前出字）"
+    raw = str(cfg.get("stt.stream_model_dir", "") or "").strip()
+    if raw:
+        root = cfg.path("stt.stream_model_dir", "")
+        if (root / "tokens.txt").exists():
+            return f"流式识别（{root.name}）"
+        return f"窗口字幕（{raw} 缺 tokens.txt）"
+    return (f"窗口字幕（解最后 {cfg.get('audio.subtitle_window_ms')}ms，"
+            f"首字 {cfg.get('audio.first_partial_ms')}ms 起）")
 
 
 def _hotword_note(cfg: Config, words: list[str]) -> str:

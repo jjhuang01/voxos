@@ -55,10 +55,47 @@ MODELS: dict[str, dict[str, object]] = {
         # 下面这个字段——`test_model_manifest_entries_are_complete` 会盯着。
         "no_sha256_reason": "清单作者所在环境无法访问 HuggingFace，没算过摘要",
     },
+    # 真流式识别（zipformer 中英双语，transducer）。四个文件是一组，缺一个就
+    # 加载不了——但缺了不影响使用：`stream.make_streamer` 会自动退回窗口字幕。
+    # 下完不用改配置：目录名固定，管道会自己发现它。
+    "stream-zipformer/encoder-epoch-99-avg-1.int8.onnx": {
+        "url": "https://huggingface.co/csukuangfj/"
+               "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/main/"
+               "encoder-epoch-99-avg-1.int8.onnx",
+        "min_bytes": 50_000_000,
+        "desc": "流式识别编码器（int8，中英双语，实时率约 0.3）",
+        "no_sha256_reason": "同上：环境无法访问 HuggingFace",
+    },
+    "stream-zipformer/decoder-epoch-99-avg-1.onnx": {
+        "url": "https://huggingface.co/csukuangfj/"
+               "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/main/"
+               "decoder-epoch-99-avg-1.onnx",
+        "min_bytes": 800_000,
+        "desc": "流式识别解码器（只有 1MB 量级，fp32 就够快）",
+        "no_sha256_reason": "同上：环境无法访问 HuggingFace",
+    },
+    "stream-zipformer/joiner-epoch-99-avg-1.int8.onnx": {
+        "url": "https://huggingface.co/csukuangfj/"
+               "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/main/"
+               "joiner-epoch-99-avg-1.int8.onnx",
+        "min_bytes": 1_000_000,
+        "desc": "流式识别联合网络（int8）",
+        "no_sha256_reason": "同上：环境无法访问 HuggingFace",
+    },
+    "stream-zipformer/tokens.txt": {
+        "url": "https://huggingface.co/csukuangfj/"
+               "sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/main/"
+               "tokens.txt",
+        "min_bytes": 100_000,
+        "desc": "流式识别词表（含中文单字与英文子词）",
+        "no_sha256_reason": "同上：环境无法访问 HuggingFace",
+    },
 }
 
 # 装不上也不影响核心功能，只是识别会退回脚本回放 / 判停会退回文本尾词。
-ASR = {"sense-voice/model.int8.onnx", "sense-voice/tokens.txt"}
+ASR = {"sense-voice/model.int8.onnx", "sense-voice/tokens.txt"} | {
+    name for name in MODELS if name.startswith("stream-zipformer/")
+}
 OPTIONAL = ASR | {"smart-turn-v3.2-cpu.onnx"}
 
 

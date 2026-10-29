@@ -1,14 +1,14 @@
 {
   "report": {
     "fast_path": {
-      "p50": 0.0007,
-      "p95": 0.0008,
-      "p99": 0.0008,
+      "p50": 0.0008,
+      "p95": 0.001,
+      "p99": 0.0016,
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 0.261,
-      "p95": 0.434,
+      "p50": 0.175,
+      "p95": 0.762,
       "context_p95": 0.004,
       "rounds": 30
     },
@@ -92,10 +92,10 @@
       "threshold": 0.75,
       "dispatch_ms": [
         0.48,
-        128.59
+        216.14
       ],
-      "wall_ms": 338.2,
-      "realtime_factor": 0.019
+      "wall_ms": 438.3,
+      "realtime_factor": 0.024
     },
     "redlines": {
       "forbidden_cases": 8,
@@ -108,8 +108,8 @@
       "seconds": 30,
       "segments": 0,
       "vad": "SileroVad",
-      "cpu_percent": 0.34,
-      "realtime_factor": 0.003
+      "cpu_percent": 0.42,
+      "realtime_factor": 0.004
     },
     "security": {
       "codes": {
@@ -150,8 +150,8 @@
         "en": 3.1
       },
       "chars": 818,
-      "rtf": 0.027,
-      "wall_s": 2.1,
+      "rtf": 0.032,
+      "wall_s": 2.6,
       "samples": [
         {
           "want": "把刚才登录模块的报错原因记到今天的开发日志里",
@@ -251,24 +251,29 @@
           "code_lines": 714
         },
         {
+          "file": "scripts/voice_bench.py",
+          "lines": 220,
+          "code_lines": 168
+        },
+        {
           "file": "src/voxos/__init__.py",
           "lines": 7,
           "code_lines": 5
         },
         {
           "file": "src/voxos/audio.py",
-          "lines": 667,
-          "code_lines": 531
+          "lines": 848,
+          "code_lines": 676
         },
         {
           "file": "src/voxos/config.py",
-          "lines": 229,
-          "code_lines": 184
+          "lines": 270,
+          "code_lines": 217
         },
         {
           "file": "src/voxos/core.py",
-          "lines": 502,
-          "code_lines": 403
+          "lines": 580,
+          "code_lines": 450
         },
         {
           "file": "src/voxos/corpus.py",
@@ -277,13 +282,18 @@
         },
         {
           "file": "src/voxos/dsp.py",
-          "lines": 281,
-          "code_lines": 226
+          "lines": 337,
+          "code_lines": 264
         },
         {
           "file": "src/voxos/main.py",
-          "lines": 1162,
-          "code_lines": 941
+          "lines": 1263,
+          "code_lines": 1022
+        },
+        {
+          "file": "src/voxos/mel.py",
+          "lines": 129,
+          "code_lines": 103
         },
         {
           "file": "src/voxos/messaging.py",
@@ -292,8 +302,8 @@
         },
         {
           "file": "src/voxos/models.py",
-          "lines": 158,
-          "code_lines": 137
+          "lines": 209,
+          "code_lines": 179
         },
         {
           "file": "src/voxos/prompts.py",
@@ -326,32 +336,47 @@
           "code_lines": 303
         },
         {
+          "file": "src/voxos/stream.py",
+          "lines": 261,
+          "code_lines": 203
+        },
+        {
           "file": "src/voxos/tools.py",
           "lines": 581,
           "code_lines": 464
         },
         {
+          "file": "src/voxos/tts.py",
+          "lines": 178,
+          "code_lines": 145
+        },
+        {
+          "file": "src/voxos/turn.py",
+          "lines": 122,
+          "code_lines": 93
+        },
+        {
           "file": "src/voxos/ui.py",
-          "lines": 474,
-          "code_lines": 398
+          "lines": 488,
+          "code_lines": 410
         }
       ],
-      "total_lines": 7988,
+      "total_lines": 9420,
       "max_function": {
         "name": "src/voxos/core.py:dispatch",
         "lines": 40
       },
-      "classes": 35,
+      "classes": 40,
       "tools": 18,
       "fast_routes": 10,
-      "test_files": 17
+      "test_files": 20
     },
     "tests": {
       "returncode": 0,
-      "summary": "311 passed, 1 skipped, 2 warnings in 24.03s",
-      "seconds": 24.6
+      "summary": "372 passed, 2 skipped, 2 warnings in 27.81s",
+      "seconds": 28.3
     },
-    "generated_at": "2026-10-29T02:41:51",
+    "generated_at": "2026-10-29T12:50:15",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -362,17 +387,17 @@
   "verdicts": [
     {
       "item": "快通道决策延迟 p95 < 5ms",
-      "measured": "0.0008ms",
+      "measured": "0.001ms",
       "pass": true
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "0.434ms",
+      "measured": "0.762ms",
       "pass": true
     },
     {
       "item": "静音待机 CPU < 1.5%",
-      "measured": "0.34%/秒音频",
+      "measured": "0.42%/秒音频",
       "pass": true
     },
     {
@@ -428,7 +453,7 @@
     },
     {
       "item": "测试全绿",
-      "measured": "311 passed, 1 skipped, 2 warnings in 24.03s",
+      "measured": "372 passed, 2 skipped, 2 warnings in 27.81s",
       "pass": true
     },
     {
