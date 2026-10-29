@@ -160,6 +160,44 @@ def test_broken_model_returns_minus_one_instead_of_raising():
     assert detector.errors == 1
 
 
+def test_unfinished_other_speaker_cannot_hold_the_owners_next_turn(cfg):
+    """音频模型说没完时先拒绝非本人，不让别人占住 2.5 秒宽限。"""
+    from unittest.mock import Mock
+
+    lock = Mock(spec=["verify"])
+    lock.verify.return_value = (False, 0.1)
+    detector = _FixedTurn(0.01)
+    pipe = audio.AudioPipeline(cfg=cfg, stt=_CountingStt(), lock=lock,
+                               vad=dsp.EnergyVad(), turn_detector=detector)
+    pipe._ep.speech_ms = 900
+    pipe._ep.silence_ms_now = 800
+    clip = np.ones(16000, dtype=np.float32) * 0.1
+    rejected = pipe._maybe_finalize([clip], "candidate", 0)
+    assert rejected is not None and not rejected.accepted
+    assert "声纹不匹配" in rejected.reason
+    assert not pipe._ep.extended
+    lock.verify.return_value = (True, 0.99)
+    assert pipe._maybe_finalize([clip], "candidate", 0) is None
+    assert pipe._ep.extended
+
+
+def test_nonfinite_or_multichannel_input_is_rejected():
+    """错误形状不能偷偷展平，NaN/Inf 不能进入模型。"""
+    for samples in (np.array([np.nan]), np.array([np.inf]), np.zeros((4, 2))):
+        detector, session = _detector()
+        assert detector.complete(samples) == -1.0
+        assert detector.errors == 1
+        assert session.feeds == []
+
+
+def test_nonfinite_or_out_of_range_probability_is_rejected():
+    """无效模型输出应降级，不能让 Inf 直接触发收尾。"""
+    for prob in (float("nan"), float("inf"), -0.1, 1.1):
+        detector, _ = _detector(prob)
+        assert detector.complete(np.zeros(dsp.SR, dtype=np.float32)) == -1.0
+        assert detector.errors == 1
+
+
 # ------------------------------------------------------------------ 工厂与降级
 
 def test_make_returns_none_when_the_model_is_missing(cfg):

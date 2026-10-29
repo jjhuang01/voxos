@@ -166,6 +166,19 @@
   .listen .h{color:var(--dim);font-size:11.5px;margin-top:2px;line-height:1.5}
   .listen.off{border-color:rgba(255,159,10,.35);background:rgba(255,159,10,.08)}
   .listen.off .h{color:var(--warn)}
+  /* 对话三档：放在状态页，因为它是「它会怎么回我」的总开关，
+     藏在设置里等于没有。三档而不是一个开关：静音/回执/聊天是三种真实需求。 */
+  .modes{display:flex;align-items:center;gap:10px;margin-bottom:8px;
+    background:rgba(255,255,255,.045);border:1px solid var(--line-soft);
+    border-radius:12px;padding:8px 10px 8px 12px}
+  .modes .n{font-size:12.5px;flex:1;min-width:0}
+  .modes .n small{display:block;color:var(--dim);font-size:11px;margin-top:1px}
+  .seg{display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;flex:0 0 auto}
+  .seg button{font:inherit;font-size:11.5px;line-height:1;padding:6px 9px;background:transparent;
+    color:var(--muted);border:0;cursor:pointer;transition:background .15s,color .15s}
+  .seg button + button{border-left:1px solid var(--line)}
+  .seg button[aria-checked="true"]{background:var(--accent);color:#fff}
+  .seg button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
   .ask{display:flex;gap:8px;margin-top:12px}
   .ask input{flex:1;background:rgba(255,255,255,.06);border:1px solid var(--line);
     border-radius:10px;padding:9px 12px;color:var(--ink);font:inherit;font-size:12.5px;outline:none}
@@ -340,8 +353,15 @@
             <span class="track"><span class="knob"></span></span>
           </label>
         </div>
-        <div class="grid" id="cells"></div>
-        <div class="onboard" id="onboard" hidden>
+        <div class="modes" id="mode-row">
+          <div class="n">对话<small id="mode-hint">回执：做完说一句；聊天：可以追问</small></div>
+          <div class="seg" id="modes" role="radiogroup" aria-label="对话模式">
+            <button role="radio" data-mode="off" aria-checked="false">静音</button>
+            <button role="radio" data-mode="assistant" aria-checked="true">回执</button>
+            <button role="radio" data-mode="chat" aria-checked="false">聊天</button>
+          </div>
+        </div>
+        <div class="grid" id="cells"></div>        <div class="onboard" id="onboard" hidden>
           <p>还没有声纹档案。说 2~3 句话（句间停半秒），之后只有你的声音能驱动它。</p>
           <button class="btn primary" id="enroll">录入声纹</button>
         </div>
@@ -568,6 +588,41 @@ $('mic').addEventListener('click', e => {
 });
 $('listen').addEventListener('change', () => setListening($('listen').checked));
 
+/* ---------------- 对话模式 ---------------- */
+/* 三档只改「说不说、说多长」，不改工具权限——所以这里可以随手切，
+   不像持续监听那样会真的关掉耳朵。配置写错时后端回退到 assistant。 */
+const MODE_TEXT = {
+  off: '静音：照常执行，只是不出声',
+  assistant: '回执：做完说一句；聊天：可以追问',
+  chat: '聊天：能追问、答得更长；命令照常执行',
+};
+
+function applyDialogue(mode) {
+  const live = MODE_TEXT[mode] ? mode : 'assistant';
+  document.querySelectorAll('#modes button').forEach(button =>
+    button.setAttribute('aria-checked', String(button.dataset.mode === live)));
+  $('mode-hint').textContent = MODE_TEXT[live];
+}
+
+async function setDialogue(mode) {
+  applyDialogue(mode);                          // 先动界面：按一下就要有反应
+  try {
+    const result = await api('/api/settings', {
+      method:'POST', body: JSON.stringify({values: {'dialogue.mode': mode}})});
+    if (result.ok === false) throw new Error((result.errors || ['保存失败']).join('；'));
+    settingsCache = result.groups || null;
+    toast(MODE_TEXT[mode].split('：')[0]);
+  } catch (error) {
+    loadStatus();                               // 没保存成功就按服务端的事实回滚
+    toast(error.message, true);
+  }
+}
+
+$('modes').addEventListener('click', event => {
+  const button = event.target.closest('button[data-mode]');
+  if (button) setDialogue(button.dataset.mode);
+});
+
 /* ---------------- 状态卡 ---------------- */
 /* 模型全名有 32 个字符（cline-pass/deepseek-v4.1-flash-1017），
    格子放不下就只留最后一段；拿不到名字时退回说原因，别写一个「—」了事 */
@@ -593,6 +648,7 @@ async function loadStatus() {
     $('uptime').textContent = `v${status.version} · ${Math.floor((status.uptime_s || 0) / 60)} 分钟`;
     if (status.confirm_timeout_s) confirmTimeout = status.confirm_timeout_s;
     applyListening(status.listening !== false);   // 老版本没有这个字段，当它是开着的
+    applyDialogue(status.dialogue || 'assistant');
     setOnboard(!status.enrolled);
   } catch (_) { /* 守护进程没起来时静默 */ }
 }

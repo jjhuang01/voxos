@@ -37,6 +37,13 @@ DEFAULT_DISPATCH = """你是 VoxOS 的意图调度内核。运行角色：{role}
 6. 工具返回「需要确认」或「已拦截」时，把这句话原样告诉用户，不要自己重试。
 7. 不解释过程、不输出 Markdown；最终回复 ≤ 25 字，会被 TTS 念出来。"""
 
+DEFAULT_CHAT = """【对话模式】（与上文长度约束冲突时，以本段为准）
+- 用户此刻是在聊天或请教，不一定是在派活：先回答，再考虑要不要用工具；
+  不要为了「显得能干」而硬调工具。
+- 回答可以长一点，但仍然说给人听：口语、短句，不要 Markdown、不要代码块。
+- 需要展示代码或多行内容时，说一句「我放在胶囊上了」，正文留给屏幕。
+- 不知道就说不知道；需要实时信息又没有合适的工具时，直说需要联网查，不要编。"""
+
 DEFAULT_ROLES: dict[str, str] = {
     "developer": """【DEVELOPER 纪律】
 - 改代码前先读文件；没读到内容就不要假装改过。
@@ -52,7 +59,7 @@ DEFAULT_ROLES: dict[str, str] = {
 - 病历与处方类工具永远只读，不代填、不代签。""",
 }
 
-NAMES = ("dispatch", "developer", "ops", "doctor")
+NAMES = ("dispatch", "chat", "developer", "ops", "doctor")
 
 # 只替换**认识的**占位符：用户手写提示词时很可能带 `{"a": 1}` 这种花括号，
 # 用 str.format_map 会当场 KeyError，把一句闲聊变成一次异常。
@@ -104,8 +111,10 @@ def role_prompt(cfg: Config, **values: Any) -> str:
 
 
 def active(cfg: Config, **values: Any) -> str:
-    """真正发给模型的那段 system：dispatch + 角色纪律。"""
+    """真正发给模型的那段 system：dispatch（+ 对话模式）+ 角色纪律。"""
     base = render("dispatch", cfg, **values) or DEFAULT_DISPATCH
+    if str(values.get("mode", "assistant")).strip().lower() == "chat":
+        base = f"{base}\n\n{render('chat', cfg, **values) or DEFAULT_CHAT}"
     role = role_prompt(cfg, **values) or DEFAULT_ROLES.get(
         str(cfg.get("workspace.role", "")).strip().lower(), "")
     return f"{base}\n\n{role}" if role else base

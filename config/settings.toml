@@ -33,13 +33,10 @@ max_utterance_ms = 12000      # 单句硬上限，防止一直说不停
 min_speech_ms = 200           # 真实人声短于此视为噪音（按人声时长算，不含 prefix padding）
 turn_backend = "auto"         # auto | smart | text。auto：有模型用 smart-turn，否则文本判停
 turn_model = ".voxos/models/smart-turn-v3.2-cpu.onnx"   # 8.7MB int8，`voxos models` 下载
-turn_threshold = 0.5          # 上游的「说完了」门槛。我们**没有**拿它当主判据，见下一行
-turn_veto = 0.2               # 只否决、不拍板：概率低于它才推迟收尾，其余交给文本判据。
-                              # 为什么不用 0.5 当主判据：6 句完整的中文指令里有 4 句低于
-                              # 0.5（「今天下午三点提醒我开会」0.27、「把刚才那段话翻译成
-                              # 英文」0.42），照抄会让三分之一的正常指令多等 2.5 秒。
-                              # 那批音频是系统 TTS 合成的，不代表真人语调——所以既不下结论
-                              # 说模型不行，也不拿它去赌。真人录音量出 TPR/TNR 之后再动。
+turn_threshold = 0.5          # >= 此值直接收尾，不依赖文本判停
+turn_veto = 0.2               # < 此值延长等待；[0.2, 0.5) 交给文本判据
+                              # 三态是项目策略，不是上游默认；尚无真人语料标定。
+                              # 之前 6 句合成指令有 2 句低于 0.5，不能据此推断真人错误率。
 turn_threads = 1              # 模型推理线程数；10–65ms 的任务，1 个线程够，多了抢 VAD 的核
 voiceprint_threshold = 0.75   # 实测标定：录 3 句取均值后，真麦克风同人最低 0.786 / 异人最高 0.715
                               # 旧值 0.82 的问题：只录 1 句时同人换句话只有 0.751，等于录完就被自己拒
@@ -54,7 +51,8 @@ echo_decay_ms = 300           # TTS 结束后的混响消退期
 interrupt_ms = 500            # 播报中「人声持续多久」才算打断（对齐 LiveKit 的
                               # min_interruption_duration）。不要求用户喊特定词：
                               # 「等一下，我说的是另一个」也算。判定还要过声纹——
-                              # 自己的 TTS 回声能量够但音色不像本人，会被挡住。
+                              # 声纹不能分离混音；目前仅停播报，停顿后需完整重说。
+restart_silence_dbfs = -42.0  # 打断后安静到此能量并保持 silence_duration_ms 才恢复接收
 hotwords_path = "config/hotwords.txt"
 hotwords_generated = "config/hotwords.txt.generated"
 hotwords_max = 2000
@@ -101,7 +99,8 @@ access_key = ""
 resource_id = "seed-tts-2.0"  # 决定模型版本与计费商品；声音复刻是 seed-icl-2.0
 speaker = "zh_female_shuangkuaisisi_moon_bigtts"
 sample_rate = 24000           # 必须和播放端一致；改这里不用改代码
-timeout_s = 8                 # 同时管连接与读：首字节迟迟不来会抛超时 → 退回系统 say
+timeout_s = 8                 # 云端连接/读超时；只有未开始播放时才能整句降级
+local_timeout_s = 15          # 本地 say 合成的超时；取消会回收自己的进程
 uid = "voxos"                 # 请求体里的 user.uid，服务端用来算用量归属
 
 [workspace]
@@ -124,6 +123,27 @@ network = false               # 沙箱里的命令能否联网（默认不能：
 write_roots = []
 command_timeout_s = 60        # 单条命令的超时上限
 schedule_file = ".voxos/schedules.json"  # 定时任务表，删掉就等于清空
+
+[dialogue]
+mode = "assistant"            # off | assistant | chat
+                              # off       只执行、不出声（胶囊照常显示）
+                              # assistant 短回执（默认）：回复念出来，慢动作先应一声
+                              # chat      可以聊天：回答更长、支持追问，命令照常执行
+ack_after_ms = 600            # 派发超过这么久还没结果，就先说一句确认；0 = 关闭
+                              # 写代码/跑命令往往要几秒，没有这句话用户会以为没听见
+ack_text = ""                 # 固定确认语；留空按意图自动选（写代码/巡检/发送…）
+speech_chars = 60             # assistant 模式一次最多念多少字，其余留在胶囊上
+chat_speech_chars = 240       # chat 模式的上限：可以长一些，但不念整篇文章
+
+[cue]
+# 主动提示（cue）的降噪策略。cue 只提醒、不执行动作，所以不需要二次确认，
+# 需要的是「别烦人」：静音时段、频率上限、同一条不重复。
+quiet_hours = "23:00-07:00"   # 支持跨午夜；留空 = 全天可说
+min_interval_s = 90           # 两条提示之间的最小间隔（high 优先级不受限）
+max_per_hour = 6              # 每小时上限（high 也受限：防死循环刷屏）
+dedupe_s = 21600              # 同一个 key 在 6 小时内只提一次
+spool_stale_s = 300           # 文件投递箱里的提示最多等多久；更旧的直接丢弃
+                              # （脚本可 `voxos cue "喝水"`，run 进程几秒内会说）
 
 [ui]
 host = "127.0.0.1"

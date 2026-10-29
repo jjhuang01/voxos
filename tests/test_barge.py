@@ -75,8 +75,7 @@ def test_pipeline_fires_barge_in_when_the_owner_speaks_over_tts(cfg):
 def test_pipeline_ignores_its_own_echo(cfg):
     """能量够但声纹不像本人 → 那是我们自己的回声，继续播报。
 
-    能量分不开两者（实测 TTS 回声 p95 约 -25.8 dBFS，和正常说话只差几 dB），
-    所以最终判定必须落在音色上：TTS 是合成音，和本人模板差得远。
+    这里使用「总是拒绝」的声纹替身，只验证拒绝路径，不测真实回声误触发率。
     """
     fired: list[bool] = []
     pipeline = _pipeline(cfg, lock=_NeverMe(), on_barge_in=lambda: fired.append(True))
@@ -144,53 +143,76 @@ def test_the_threshold_really_comes_from_the_config(cfg):
     assert _fires(cfg, 900, interrupt_ms=1200.0) is False
 
 
-def _barge_then_continue() -> np.ndarray:
-    """先说 700ms（打断），停 300ms（混响期），再说 600ms（接着往下说）。"""
-    gap = np.zeros(int(SR * 0.3), dtype=np.float32)
-    return np.concatenate([_loud(ms=700), gap, _loud(ms=600)])
-
-
-def _utterance_after_barge(cfg, carry_ttl_ms: float = 2000.0) -> float:
-    """跑一遍「打断 → 接着说」，返回最后那句的时长（毫秒）。"""
-    pipeline = audio.AudioPipeline(
-        cfg=cfg, stt=_StopStt(), lock=_AlwaysOn(), vad=dsp.EnergyVad(),
-        echo=dsp.EchoGate(), carry_ttl_ms=carry_ttl_ms)
+def test_separate_bursts_are_not_accumulated_into_one_interruption(cfg):
+    """两段 256ms 中间隔 3 秒，不等于连续说了 512ms。"""
+    fired = []
+    pipeline = _pipeline(cfg, on_barge_in=lambda: fired.append(True))
     pipeline.echo.tts_start()
-    spoken = list(pipeline.run(audio.ArraySource(_barge_then_continue())))
-    assert spoken, "打断之后接着说，应该产出一句话"
-    return spoken[-1].audio_ms
+    samples = np.concatenate([_loud(256), np.zeros(SR * 3), _loud(256)])
+    list(pipeline.run(audio.ArraySource(samples)))
+    assert not fired
 
 
-def test_the_interrupt_audio_becomes_the_start_of_the_next_sentence(cfg):
-    """判定为插话的那 500ms 不能丢——它就是用户这句话的前半句。
-
-    丢了的话转写出来是「…说的是另一个」，开头没了，用户得整句重说一遍；
-    而他刚才明明已经说过了。所以攒下的音频要接回下一句的开头。
-
-    同一段音频，只改 `carry_ttl_ms` 就是一次消融：留着比丢掉多出的那截，
-    正是被打断的那段音频（实测 704ms = 判定的 512ms + 混响期继续攒的 192ms）。
-    """
-    kept = _utterance_after_barge(cfg)
-    dropped = _utterance_after_barge(cfg, carry_ttl_ms=0.0)
-
-    extra = kept - dropped
-    assert extra >= 400, f"插话那截没接回去（只多出 {extra:.0f}ms）"
-    assert 650 <= extra <= 780, f"接回去的量不对：{extra:.0f}ms，应当≈700ms"
-
-
-def test_carry_expires_so_an_old_phrase_does_not_glue_onto_a_new_one(cfg):
-    """只说了半句「等一下」就走开，那半句不该在十秒后粘到另一句话前面。
-
-    没有这个期限，攒下的音频会一直等着——用户过一会儿随口说一句「打开微信」，
-    转写出来就是「等一下打开微信」，两个不相干的意图粘在一起。
-    """
+def test_overlap_and_its_continuation_never_reach_stt(cfg):
+    """没有 AEC 时宁可要求重说，也不把混音或缺开头的后半句当成指令。"""
+    events = []
     pipeline = _pipeline(cfg)
-    pipeline._keep_carry(np.ones(512, dtype=np.float32))
-    assert pipeline._take_carry(), "刚攒下的时候应该取得到"
+    pipeline.on_event = lambda *args: events.append(args)
+    pipeline.echo.tts_start()
+    samples = np.concatenate([_loud(1800), np.zeros(SR)])
+    assert list(pipeline.run(audio.ArraySource(samples))) == []
+    assert any("完整重说" in item[2] for item in events)
 
-    pipeline._keep_carry(np.ones(512, dtype=np.float32))
-    pipeline._carry_at -= 3.0                      # 假装过了 3 秒（TTL 是 2 秒）
-    assert pipeline._take_carry() == [], "过期的音频要丢掉，不能粘到新句子上"
+
+def test_full_restatement_after_silence_is_accepted_without_mixed_prefix(cfg):
+    """打断后的安静间隔过去后，可接受新完整指令，旧混音不进入识别。"""
+    from unittest.mock import Mock
+
+    pipeline = _pipeline(cfg)
+    pipeline.stt = Mock()
+    pipeline.stt.transcribe.return_value = "现在几点了"
+    # 终稿走 streamer.finish 时，换掉 stt 并不会换掉 streamer 里那份旧桩；
+    # 这里直接把 streamer 摘掉，才能真正看到「送进识别的最终音频」。
+    pipeline.streamer = None
+    pipeline.echo.tts_start()
+    overlap = np.full(16000, 0.6, dtype=np.float32)
+    fresh = _loud(900, amplitude=0.1)
+    samples = np.concatenate([overlap, np.zeros(SR * 2), fresh, np.zeros(SR)])
+    out = list(pipeline.run(audio.ArraySource(samples)))
+    assert len(out) == 1 and out[0].accepted
+    final = [c.args[0] for c in pipeline.stt.transcribe.call_args_list if c.kwargs.get("final")]
+    assert final and all(np.max(np.abs(x)) < 0.2 for x in final)
+
+
+def test_restart_silence_uses_pre_agc_level_in_mask_mode(cfg):
+    """面罩增益会抬高底噪，恢复收音必须看补偿前电平。"""
+    pipeline = _pipeline(cfg.with_overrides(**{"audio.mask_mode": True}))
+    pipeline._await_restart = True
+    noise = np.ones(SR, dtype=np.float32) * 0.003
+    list(pipeline.run(audio.ArraySource(noise)))
+    assert not pipeline._await_restart
+
+
+def test_restart_wait_gives_up_when_the_room_stays_loud(cfg):
+    """底噪高于门限时安静间隔永远等不到；不能因此让麦克风永久失聪。"""
+    events = []
+    pipeline = _pipeline(cfg)
+    pipeline.on_event = lambda *args: events.append(args)
+    pipeline._await_restart = True
+    loud_floor = np.full(SR * 4, 0.05, dtype=np.float32)     # 约 -26 dBFS，持续高于 -42
+    list(pipeline.run(audio.ArraySource(loud_floor)))
+    assert not pipeline._await_restart and pipeline._restart_wait_ms == 0
+    assert any("恢复收音" in item[1] for item in events)
+
+
+def test_reset_discards_interruption_candidates_and_restart_state(cfg):
+    """设备重连不能继承前一段插话候选或重说等待。"""
+    pipeline = _pipeline(cfg)
+    pipeline._barge, pipeline._barge_ms = [_loud(256)], 256.0
+    pipeline._await_restart, pipeline._restart_silence_ms = True, 200.0
+    pipeline.reset()
+    assert pipeline._barge == [] and pipeline._barge_ms == 0
+    assert not pipeline._await_restart and pipeline._restart_silence_ms == 0
 
 
 def test_is_interrupt_matches_common_phrasings():

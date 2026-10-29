@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -24,7 +25,8 @@ import webbrowser
 from collections import deque
 from pathlib import Path
 
-from . import __version__, core, lessons, prompts, sandbox, scheduler, settings, timeline, tools, ui
+from . import (__version__, core, cue, cuebox, dialogue, lessons, prompts, sandbox,
+               scheduler, settings, timeline, tools, ui)
 # audio / corpus / dsp 不在顶层导入：它们把 numpy（实测 58ms）一起拖进来，
 # 而 `voxos text`、`voxos schedule`、`--version` 一条都用不到。谁用谁在里面导。
 from .config import Config, load
@@ -104,6 +106,9 @@ class Runtime:
         self.cfg = cfg
         self.gate = ConfirmGate(bus, float(cfg.get("workspace.confirm_timeout_s", 8)))
         self.executor = self._build()
+        # 提示的去重与限流状态跟着 Runtime 走，不跟着配置走：
+        # 存成模块级全局的话，一次「保存设置」就会把它换掉，等于给刷屏开了个后门。
+        self.cues = cue.CueGuard(cfg)
         self.recent: deque[dict[str, object]] = deque(maxlen=8)
         self.started = time.time()
         self._last_text = ""           # 上一句说的是什么（给「接续句」当上下文）
@@ -115,7 +120,8 @@ class Runtime:
             executor._lock = lock
         return executor
 
-    def dispatch(self, text: str, context: dict[str, object] | None = None) -> core.DispatchResult:
+    def dispatch(self, text: str, context: dict[str, object] | None = None,
+                 mode: str = "assistant") -> core.DispatchResult:
         """派发一句话。**带上上一句**——端点判定会在停顿处切句，切完第二句就孤立了。
 
         实测（端点消融）：停顿 600ms 且结尾不是未完词就会被切断，而人说话中途
@@ -129,7 +135,7 @@ class Runtime:
         ctx: dict[str, object] = dict(context) if context is not None else _context()
         if self._last_text:
             ctx["previous"] = self._last_text
-        return core.dispatch(text, executor=self.executor, cfg=self.cfg, context=ctx)
+        return core.dispatch(text, executor=self.executor, cfg=self.cfg, context=ctx, mode=mode)
 
     def _is_withdrawal(self, text: str) -> bool:
         """整句就是「算了 / 取消 / 不用了」，而且此刻没有播报可停。
@@ -195,6 +201,7 @@ class Runtime:
         tools.configure(new_cfg)
         self.gate.timeout = float(new_cfg.get("workspace.confirm_timeout_s", 8))
         self.executor = self._build(lock=lock)
+        self.cues.cfg = new_cfg          # 只换门限，已发的记录留着（见 __init__ 说明）
 
 
 _FAIL_WORDS = ("失败", "没能", "出错", "拒绝", "不允许", "不在允许")
@@ -348,6 +355,9 @@ def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]
         "role": cfg.get("workspace.role"),
         "dry_run": cfg.flag("workspace.dry_run"),
         "listening": not _MUTED.is_set(),
+        # 对话模式跟着状态一起发：胶囊不用为一个开关单开一次请求，
+        # 在设置页改了也会在下一次轮询时自动同步回来。
+        "dialogue": dialogue.mode(cfg),
         "llm": cfg.flag("llm.enabled"),
         # 只报「开没开」是不够的：开了但缺 Key 和真能回话，界面上长得一模一样。
         "llm_model": cfg.get("llm.model") if ready else "",
@@ -429,11 +439,12 @@ def _ui_context(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
         # 内存那份早就没了。而且时间线里有被丢弃的回合——那才是「没反应」的答案。
         history=lambda: timeline.recent(cfg=runtime.cfg, limit=60),
         on_listen=lambda on: _set_listening(runtime, on),
+        on_cue=lambda body: _deliver_cue(runtime, body),
     )
 
 
 def _run_text(runtime: Runtime, text: str) -> str:
-    result = runtime.dispatch(text)
+    result = runtime.dispatch(text, mode=dialogue.mode(runtime.cfg))
     runtime.record(text, result)
     return result.reply or NO_ACTION
 
@@ -551,6 +562,7 @@ def _run_forever(cfg: Config) -> int:
         enrolled.set()
     url = _serve(runtime, lock, enrolled)
     _start_scheduler(runtime)
+    _start_cuebox(runtime)
     # 先报「已经能用了」和沙箱结论：这两件事**不依赖模型**。
     # 以前整条横幅押在模型加载之后，而模型加载 + 麦克风授权可能阻塞几十秒
     # （第一次还会弹系统授权框等人点）。日志看起来就是「服务在跑，但什么都没说」，
@@ -582,11 +594,68 @@ def _start_scheduler(runtime: Runtime) -> None:
         text = str(item.get("text", ""))
         executor = core.Executor(cfg=runtime.cfg, on_event=runtime.bus,
                                  confirm=lambda *_: bool(item.get("approved")))
-        result = core.dispatch(text, executor=executor, cfg=runtime.cfg)
+        result = core.dispatch(text, executor=executor, cfg=runtime.cfg,
+                               mode=dialogue.mode(runtime.cfg))
         runtime.record(text, result)
+        _speak_scheduled(runtime, result.reply)
         return result.reply or NO_ACTION
 
     scheduler.start(runtime.cfg, run=run, on_event=runtime.bus.emit)
+
+
+def _speak_scheduled(runtime: Runtime, reply: str) -> None:
+    """到点的那句话要念出来：只上屏的提醒，人不在屏幕前就等于没提醒。
+
+    对话关掉（`dialogue.mode=off`）、`ui.speak=false`、或还没进监听（没有
+    pipeline）时都不念——宁可安静，也不假装说过。
+    """
+    if not reply or dialogue.mode(runtime.cfg) == "off":
+        return
+    if not runtime.cfg.flag("ui.speak", True):
+        return
+    speak, piece = _SPEAK_HOOK.get("speak"), dialogue.shape(reply, runtime.cfg)
+    if callable(speak) and piece:
+        speak(piece)
+
+
+def _deliver_cue(runtime: Runtime, body: dict[str, object]) -> dict[str, object]:
+    """投递一条主动提示：过降噪策略，然后说一句、上屏一行。**不执行动作。**
+
+    与 `/command` 分开是刻意的：命令会派发、可能改文件；cue 只说话。
+    脚本、日历、CI 都该走这条，否则一句「提醒我…」被误触发就变成一次执行。
+    """
+    item = cue.Cue(text=str(body.get("text") or ""),
+                   priority=str(body.get("priority") or "normal"),
+                   key=str(body.get("key") or ""),
+                   source=str(body.get("source") or "api"))
+    guard = runtime.cues
+    ok, why = guard.allow(item)
+    if not ok:
+        return {"ok": False, "skipped": why}
+    runtime.bus.emit("cue", "提示", item.text.strip())
+    piece, speak = dialogue.shape(item.text, runtime.cfg), _SPEAK_HOOK.get("speak")
+    if not piece or not callable(speak) or dialogue.mode(runtime.cfg) == "off" \
+            or not runtime.cfg.flag("ui.speak", True):
+        return {"ok": True, "spoken": False}
+    speak(piece)
+    return {"ok": True, "spoken": True}
+
+
+def _start_cuebox(runtime: Runtime, every: float = 2.0) -> None:
+    """把文件投递箱里的提示搬进同一条投递路径。
+
+    与 `/api/cue` 共用 `_deliver_cue`：降噪、静音时段、播报整形只有一份实现。
+    轮询线程不能因为一条坏提示就死掉——上报后继续下一轮。
+    """
+    def loop() -> None:
+        while True:
+            time.sleep(every)
+            try:
+                for entry in cuebox.take(runtime.cfg):
+                    _deliver_cue(runtime, entry)
+            except Exception as exc:               # 线程里必须自己兜住
+                runtime.bus.emit("error", "提示投递失败", str(exc))
+    threading.Thread(target=loop, name="cuebox", daemon=True).start()
 
 
 def _pid_file(cfg: Config) -> Path:
@@ -659,6 +728,9 @@ def cmd_port(_: argparse.Namespace, cfg: Config) -> int:
 # 停止读会让 CoreAudio 的缓冲堆起来，恢复时一次性吐出几十秒旧音频。
 _MUTED = threading.Event()
 _RESET_HOOK: dict[str, object] = {"reset": None}
+# 定时任务比监听线程先起来（要能报「首次录入」），但那会儿还没有 pipeline。
+# 所以出声走一个后填的钩子：拿不到就只上屏，不假装念过。
+_SPEAK_HOOK: dict[str, object] = {"speak": None}
 
 
 def _set_listening(runtime: Runtime, on: bool) -> dict[str, object]:
@@ -701,6 +773,7 @@ def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[s
                                      on_event=runtime.bus, on_reset=pipeline.reset)
     _context()                             # 预热：把首次线程启动的开销挪到进循环之前
     _RESET_HOOK["reset"] = pipeline.reset
+    _SPEAK_HOOK["speak"] = lambda piece: _speak_async(piece, pipeline, cfg)
     runtime.bus.emit("idle", "待机", "")
     chunks: queue.Queue[object] = queue.Queue(maxsize=64)
     utterances: queue.Queue[object] = queue.Queue(maxsize=4)
@@ -808,14 +881,48 @@ def _dispatch_loop(runtime: Runtime, pipeline: audio.AudioPipeline,
         if runtime.cfg.flag("ui.earcons", True):
             ui.play(sounds["listen"])
         runtime.bus.emit("executing", "处理中…", utterance.text)
-        result = runtime.dispatch(utterance.text)
+        result = _dispatch_with_ack(runtime, utterance.text, pipeline, runtime.cfg)
         runtime.record(utterance.text, result, utterance)
         state, word = _RESULT_WORD.get(result.route, ("done", "完成"))
         runtime.bus.emit(state, word, result.reply)
         # 听不懂的时候只显示、不朗读：常驻监听会把屋里所有闲聊都收进来，
         # 每句都念一遍「还没学会这句」，很快就变成噪音了。
-        if result.reply and result.route != "ignore" and runtime.cfg.flag("ui.speak", True):
-            _speak_async(result.reply, pipeline, runtime.cfg)
+        spoken = dialogue.shape(result.reply, runtime.cfg) if result.reply else ""
+        if spoken and result.route != "ignore" and runtime.cfg.flag("ui.speak", True):
+            _speak_async(spoken, pipeline, runtime.cfg)
+
+
+def _dispatch_with_ack(runtime: Runtime, text: str, pipeline: audio.AudioPipeline,
+                       cfg: Config) -> core.DispatchResult:
+    """慢派发先应一声：等过 `ack_after_ms` 还没结果，就不让用户干等。
+
+    为什么用线程而不是「先回固定话再执行」：快通道（打开应用、问时间）本该
+    几十毫秒完成，给它也加一句「收到」只会让所有交互都变啰嗦。这里只在
+    **真的慢**的时候补一句，快路径一个字都不多说。
+
+    派发必须只发生一次——它带副作用。所以 worker 只有一个，主循环只等结果；
+    异常原样抛回主循环，行为与同步派发一致。
+    """
+    box: dict[str, object] = {}
+    done = threading.Event()
+
+    def work() -> None:
+        try:
+            box["result"] = runtime.dispatch(text, mode=dialogue.mode(cfg))
+        except BaseException as exc:  # noqa: BLE001 - 原样带回主循环，不吞
+            box["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=work, daemon=True).start()
+    wait = dialogue.ack_after_s(cfg)
+    if wait > 0 and not done.wait(wait) and cfg.flag("ui.speak", True):
+        _speak_async(dialogue.ack(text, cfg), pipeline, cfg)
+    done.wait()
+    error = box.get("error")
+    if error is not None:
+        raise error  # type: ignore[misc]
+    return box["result"]  # type: ignore[return-value]
 
 
 # 胶囊上那行字要说清「它到底做了什么」：一律写「完成」的话，
@@ -835,85 +942,146 @@ def _speak_async(text: str, pipeline: audio.AudioPipeline, cfg: Config) -> None:
 
 
 _TTS: dict[str, object] = {"proc": None, "owner": None}
+_TTS_LOCK = threading.RLock()
+
+
+def _signal_say(proc: subprocess.Popen | None) -> None:
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return  # poll 与 kill 之间已退出，由持有者 wait 回收。
 
 
 def stop_speaking() -> bool:
-    """打断：让正在念的那一串句子停下来。没在念就返回 False。
+    """打断当前会话；句间没有 say 进程时也能取消。"""
+    with _TTS_LOCK:
+        if _TTS.get("owner") is None:
+            return False
+        _TTS["stopped"] = True
+        _signal_say(_TTS.get("proc"))
+        return True
 
-    不能只看 `proc`：句与句之间有几十毫秒的空档，那一刻上一条 `say` 已经退出，
-    但用户说的「停」仍然是在打断我们——返回 False 会让这句「停」被当成普通指令
-    派发出去，结果是一句「还没学会这句」。所以判的是「有没有人在念」（`owner`）。
-    """
-    if _TTS.get("owner") is None:
+
+def _wait_say(proc: subprocess.Popen, piece: str, owner: object, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    text: bytes | None = piece.encode("utf-8")
+    while not _is_stale(owner):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        try:
+            proc.communicate(input=text, timeout=min(0.05, remaining))
+            return proc.returncode == 0 and not _is_stale(owner)
+        except subprocess.TimeoutExpired:
+            text = None  # communicate 会继续发送上次未写完的 stdin。
+    return False
+
+
+def _run_say(piece: str, cfg: Config, owner: object, path: Path | None = None) -> bool:
+    """文本只经 stdin；进程创建与归属绑定原子化，回收只使用本地句柄。"""
+    args = ["say", "-r", "220"]
+    if path is not None:
+        rate = int(cfg.get("tts.sample_rate", 24000))
+        args += ["--file-format=WAVE", f"--data-format=LEI16@{rate}",
+                 "--channels=1", "-o", str(path)]
+    proc = None
+    try:
+        with _TTS_LOCK:
+            if _is_stale(owner):
+                return False
+            proc = subprocess.Popen(args, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _TTS["proc"] = proc
+        return _wait_say(proc, piece, owner, float(cfg.get("tts.local_timeout_s", 15)))
+    finally:
+        if proc is not None:
+            try:
+                _signal_say(proc)
+                proc.wait(timeout=1)
+            finally:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+                with _TTS_LOCK:
+                    if _TTS.get("owner") is owner and _TTS.get("proc") is proc:
+                        _TTS["proc"] = None
+
+
+def _say_locally(piece: str, cfg: Config, owner: object) -> bool:
+    """say 先合成临时 WAV，再走公共 PCM 播放；缺设备依赖才直播。"""
+    from . import tts
+    if _is_stale(owner):
         return False
-    _TTS["stopped"] = True
-    proc = _TTS.get("proc")
-    if isinstance(proc, subprocess.Popen) and proc.poll() is None:
-        proc.terminate()
-    return True
-
-
-def _say_locally(piece: str) -> bool:
-    """系统 `say` 念一句。返回是否念完。"""
-    proc = subprocess.Popen(["say", "-r", "220", piece])
-    _TTS["proc"] = proc
-    return proc.wait(timeout=15) == 0
+    completed: bool | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="voxos-tts-") as directory:
+            path = Path(directory) / "speech.wav"
+            if not _run_say(piece, cfg, owner, path) or _is_stale(owner):
+                return False
+            completed = tts.play_wav(path, cfg, lambda: _is_stale(owner))
+        return completed
+    except OSError:
+        if completed is None:
+            raise
+        core.note_tts_failure("本地语音临时文件清理失败；保留已完成的播放结果")
+        return completed
+    except ImportError:
+        if _is_stale(owner):
+            return False
+        core.note_tts_failure("sounddevice 不可用，退回 say 直播：无 PCM 参考信号，不具备 AEC")
+        return _run_say(piece, cfg, owner)
 
 
 def _say_one(piece: str, cfg: Config, owner: object) -> bool:
-    """念一句：云端优先，云端不行就退回系统 `say`。
-
-    **降级必须是自动的**：TTS 服务挂了、Key 过期、断网，用户听到的应该是
-    「机器腔的一句话」，而不是「一片安静」——安静会让人以为整台机器死了。
-    """
-    from . import tts                     # 只有真要出声时才导入
+    """云端优先；仅未开始播放且仍属当前会话时允许整句降级。"""
+    from . import tts
+    if _is_stale(owner):
+        return False
     if tts.available(cfg):
         try:
             return tts.speak(piece, cfg, lambda: _is_stale(owner))
-        except Exception as exc:          # noqa: BLE001 - 任何失败都该退回本地
+        except tts.PlaybackStartedError as exc:
             core.note_tts_failure(str(exc))
-    return _say_locally(piece)
+            return False
+        except Exception as exc:  # noqa: BLE001 - 未播放的合成失败可退回本地
+            core.note_tts_failure(str(exc))
+    if _is_stale(owner):
+        return False
+    return _say_locally(piece, cfg, owner)
 
 
 def _is_stale(owner: object) -> bool:
     """这一轮播报还该继续吗：被打断了，或者已经换人了。"""
-    return bool(_TTS.get("stopped")) or _TTS.get("owner") is not owner
+    with _TTS_LOCK:
+        return bool(_TTS.get("stopped")) or _TTS.get("owner") is not owner
 
 
 def _speak(text: str, pipeline: audio.AudioPipeline, cfg: Config) -> None:
-    """播报。一句一句念，念完一句记一句。
-
-    以前是 `say text[:60]`：一句话被硬切在第 60 个字上，而且**不知道播到哪**，
-    上下文里只能记全文——下一轮模型就接着用户没听到的内容往下说。
-    现在按句念，被打断时 `heard` 里正好是用户真听到的那部分。
-
-    只有**当前所有者**能在结束时清理共享状态：旧实现里任何一条旧线程的 finally
-    都会把 `_TTS["proc"]` 清成 None 并提前放行回声门，新的播报还在响，
-    系统却以为它结束了。
-    """
+    """按句播报并记录完整播完的句子；仅当前 owner 能清理会话与回声门。"""
     from . import dsp, tts               # numpy 别拖进 --version 这类快路径
     if not tts.available(cfg) and not shutil.which("say"):
         return                           # 两条路都没有：一句话也念不出来
     owner = object()
-    _TTS.update(owner=owner, stopped=False, proc=None)
-    pipeline.echo.tts_start()
+    with _TTS_LOCK:
+        _signal_say(_TTS.get("proc"))
+        _TTS.update(owner=owner, stopped=False, proc=None)
+        pipeline.echo.tts_start()
     heard: list[str] = []
     try:
         for piece in dsp.sentences(text):
             if _is_stale(owner):
                 break
-            if _say_one(piece, cfg, owner):
-                heard.append(piece)
-    except (subprocess.SubprocessError, OSError):
-        pass
+            if not _say_one(piece, cfg, owner):
+                break
+            heard.append(piece)
+    except Exception as exc:  # noqa: BLE001 - 后台播报失败不影响采集
+        core.note_tts_failure(str(exc))
     finally:
-        proc = _TTS.get("proc")
-        if isinstance(proc, subprocess.Popen) and proc.poll() is None:
-            proc.kill()
-        if _TTS.get("owner") is owner:
-            _TTS.update(proc=None, owner=None, stopped=False)
-            pipeline.echo.tts_end()
-            core.note_spoken(text, "".join(heard))
+        with _TTS_LOCK:
+            if _TTS.get("owner") is owner:
+                _TTS.update(proc=None, owner=None, stopped=False)
+                pipeline.echo.tts_end()
+                core.note_spoken(text, "".join(heard))
 
 
 def cmd_enroll(args: argparse.Namespace, cfg: Config) -> int:
@@ -1159,6 +1327,17 @@ def cmd_schedule(_: argparse.Namespace, cfg: Config) -> int:
         repeat = "（每天）" if item.get("repeat") == "daily" else ""
         print(f"{scheduler.stamp(float(item['due']))}  {item['id']}  {item['label']}{repeat}")
     print(f"\n共 {len(items)} 条，存在 {scheduler.path_of(cfg)}")
+    return 0
+
+
+def cmd_cue(args: argparse.Namespace, cfg: Config) -> int:
+    """推一条提示。守护进程没在跑也不会静默丢失：起来后按新鲜度补，太旧的丢弃。"""
+    try:
+        path = cuebox.post(cfg, args.text, priority=args.priority, key=args.key)
+    except (OSError, ValueError) as exc:
+        print(f"没写成：{exc}")
+        return 2
+    print(f"已投递 {path.name}；`voxos run` 在跑的话几秒内会说一句。")
     return 0
 
 
@@ -1547,6 +1726,13 @@ def _add_extra(sub: argparse._SubParsersAction) -> None:
     log = sub.add_parser("log", help="会话时间线：说了什么、做了什么、为什么没做")
     log.add_argument("--limit", type=int, default=30, help="显示最近多少条（默认 30）")
     log.set_defaults(func=cmd_log)
+
+    tell = sub.add_parser("cue", help="推一条提示（只说，不执行任何动作）")
+    tell.add_argument("text")
+    tell.add_argument("--priority", choices=cue.PRIORITIES, default="normal",
+                      help="high 可以越过静音时段")
+    tell.add_argument("--key", default="", help="相同 key 在去重窗口内只提醒一次")
+    tell.set_defaults(func=cmd_cue)
 
     for name, hint, func in (("stop", "停掉在跑的 run", cmd_stop),
                              ("port", "打印界面端口", cmd_port),

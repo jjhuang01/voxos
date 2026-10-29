@@ -71,6 +71,14 @@ def test_test_count_matches_pytest_collection():
     assert collected == claimed, f"文档写 {claimed} 项，实际收集到 {collected} 项"
 
     text = (ROOT / "docs/ACCEPTANCE.md").read_text(encoding="utf-8")
+    if "当前全量结果：BLOCKED" in text:
+        # 受阻状态要么写「未发布」，要么显式写「已知阻断下发布」并声明没全绿。
+        # 两者都不许含糊带过：这个守卫防的不是「发版」，是「发了版还说全量跑过」。
+        declared = "未发布" in text or (
+            "已知阻断下发布" in text and "不得记成" in text)
+        assert "阻断原因：" in text and declared, (
+            "受阻状态必须写原因，并明确「未发布」或「已知阻断下发布」")
+        return  # 历史 passed/skip 不是本次结果；不能为了守卫而编造本次全绿。
     run = re.search(r"(\d+) passed \+ (\d+) skipped", text)
     assert run, "验收表里没写「N passed + M skipped」，无法核对跳过数"
     passed, skipped = int(run.group(1)), int(run.group(2))

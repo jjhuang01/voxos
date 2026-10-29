@@ -200,6 +200,7 @@ class UiContext:
     on_confirm: Callable[[bool], None] | None = None
     history: Callable[[], list[dict[str, object]]] | None = None
     on_listen: Callable[[bool], dict[str, object]] | None = None
+    on_cue: Callable[[dict[str, object]], dict[str, object]] | None = None
 
 
 _PAGE_CACHE: dict[Path, tuple[float, bytes]] = {}
@@ -354,6 +355,7 @@ class _PillHandler(BaseHTTPRequestHandler):
             "/api/enroll": self._enroll,
             "/api/confirm": self._confirm,
             "/api/listen": self._listen,
+            "/api/cue": self._cue,
         }
         route = routes.get(path)
         return route() if route else self._json({"ok": False, "error": "没有这个接口"}, 404)
@@ -412,6 +414,20 @@ class _PillHandler(BaseHTTPRequestHandler):
         if self.ctx.on_listen is None:
             return self._json({"ok": False, "error": "未启用监听开关"}, 400)
         return self._json(self.ctx.on_listen(on))
+
+    def _cue(self) -> None:
+        """外部触发器推一条提示：只上屏/出声，不执行任何动作。
+
+        与 `/command` 的区别是刻意分开的：command 会派发、可能改文件；
+        cue 只是说话。脚本、日历、CI 都该走这条，而不是拼一句「提醒我…」
+        塞进命令通道——那样一次误触发就可能变成一次执行。
+        """
+        body = self._body()
+        if body is None:
+            return self._json({"ok": False, "error": "请求体需要 JSON"}, 400)
+        if self.ctx.on_cue is None:
+            return self._json({"ok": False, "error": "未启用主动提示"}, 400)
+        return self._json(self.ctx.on_cue(body))
 
     def _confirm(self) -> None:
         body = self._body() or {}

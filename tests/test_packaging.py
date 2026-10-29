@@ -6,9 +6,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
+import subprocess
 import sys
 import tomllib
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
+from types import SimpleNamespace
+from unittest.mock import Mock
+from urllib.response import addinfourl
 
 import pytest
 
@@ -138,13 +147,8 @@ def test_no_asr_still_fetches_the_turn_model(monkeypatch, tmp_path):
     assert "model.int8.onnx" not in wanted
 
 
-def test_huggingface_files_get_a_mirror_on_the_same_route_first():
-    """HuggingFace 原站在国内常常不通，镜像要排在**同一条通路**上的原站之后。
-
-    实测（这台机器）：原站经代理立刻 502，直连却要等满超时。如果把所有直连
-    排在所有代理之前，镜像就被挡在两次超时后面——用户看到的只是「卡了两分钟
-    然后失败」。
-    """
+def test_huggingface_files_get_a_mirror_on_the_same_route_first() -> None:
+    """镜像排在同一条通路上的原站之后，测试只约束顺序，不推断网络故障原因。"""
     spec = {"url": "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/x.onnx"}
     attempts = models._attempts(spec, "http://127.0.0.1:1")
 
@@ -192,6 +196,307 @@ def test_fetch_reads_proxy_from_environment(monkeypatch, tmp_path):
     monkeypatch.setattr(models, "verify", lambda *_: False)
     models.fetch(tmp_path, with_asr=False)
     assert seen and seen[0] == "http://127.0.0.1:7890", f"没读到代理：{seen[:3]}"
+
+
+_MODEL_BYTES = b"valid model data"
+_DOWNLOAD_URL = "https://huggingface.co/test/model.onnx"
+_PROXY = "http://proxy-user:proxy-secret@proxy.test:8080"
+
+
+def _response(payload: bytes, length: int | None = None) -> addinfourl:
+    """内存 HTTP 响应，不创建连接。"""
+    headers = {"Content-Length": str(len(payload) if length is None else length)}
+    return addinfourl(io.BytesIO(payload), headers, _DOWNLOAD_URL, code=200)
+
+
+@pytest.fixture
+def _download_case(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple:
+    """保留真实 download/verify，只替换 HTTP 和子进程边界，禁止遗漏替身后联网。"""
+    target = tmp_path / "model.onnx"
+    target.write_bytes(_MODEL_BYTES)
+    spec = {"url": _DOWNLOAD_URL, "desc": "离线模型", "min_bytes": len(_MODEL_BYTES),
+            "sha256": hashlib.sha256(_MODEL_BYTES).hexdigest()}
+    http = Mock(side_effect=AssertionError("测试不得发起真实 HTTP 请求"))
+    curl = Mock(side_effect=AssertionError("测试不得启动真实 curl"))
+    monkeypatch.setattr(models.urllib.request.OpenerDirector, "open", http)
+    monkeypatch.setattr(models, "subprocess", SimpleNamespace(run=curl))
+    return target, spec, http, curl
+
+
+def test_download_direct_ignores_environment_proxies(
+    monkeypatch: pytest.MonkeyPatch, _download_case: tuple,
+) -> None:
+    """None 是显式直连，大小写环境代理和系统代理都不能被 build_opener 继承。"""
+    target, spec, http, curl = _download_case
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(key, _PROXY)
+    getproxies = Mock(return_value={"https": _PROXY})
+    monkeypatch.setattr(models.urllib.request, "getproxies", getproxies)
+    build = Mock(wraps=models.urllib.request.build_opener)
+    monkeypatch.setattr(models.urllib.request, "build_opener", build)
+    http.side_effect = lambda *args, **kwargs: _response(_MODEL_BYTES)
+    inode = target.stat().st_ino
+    assert models.download(_DOWNLOAD_URL, target, None, spec)
+    handler, = build.call_args.args
+    assert isinstance(handler, models.urllib.request.ProxyHandler) and handler.proxies == {}
+    getproxies.assert_not_called()
+    http.assert_called_once_with(_DOWNLOAD_URL, timeout=120)
+    curl.assert_not_called()
+    assert target.read_bytes() == _MODEL_BYTES and target.stat().st_ino != inode
+    assert not list(target.parent.glob("*.part"))
+
+
+def test_download_proxy_ignores_curlrc_and_no_proxy(
+    monkeypatch: pytest.MonkeyPatch, _download_case: tuple,
+) -> None:
+    """curl 必须有外层超时、首参数 -q 和显式空 noproxy，且使用独占临时文件。"""
+    target, spec, http, curl = _download_case
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "huggingface.co")
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        assert command[:2] == ["curl", "-q"]
+        assert command[command.index("--noproxy") + 1] == ""
+        assert command[command.index("-x") + 1] == _PROXY
+        assert 300 < kwargs["timeout"] <= 330
+        assert command[command.index("--max-time") + 1] == "300"
+        part = Path(command[command.index("-o") + 1])
+        assert part.parent == target.parent and part.exists() and part != target
+        assert part.stat().st_size == 0 and part.suffix == ".part"
+        part.write_bytes(_MODEL_BYTES)
+        return subprocess.CompletedProcess(command, 0, stdout="200", stderr="")
+
+    curl.side_effect = run
+    assert models.download(_DOWNLOAD_URL, target, _PROXY, spec)
+    http.assert_not_called()
+    assert target.read_bytes() == _MODEL_BYTES
+    assert not list(target.parent.glob("*.part"))
+
+
+@pytest.mark.parametrize("proxy", [None, _PROXY])
+@pytest.mark.parametrize("payload", [b"short", bytes(len(_MODEL_BYTES)), b"X" * len(_MODEL_BYTES)])
+def test_download_invalid_content_never_replaces_old_model(
+    _download_case: tuple, proxy: str | None, payload: bytes,
+) -> None:
+    """大小、全零或 SHA256 校验失败的响应都不得替换旧有效模型。"""
+    target, spec, http, curl = _download_case
+    inode = target.stat().st_ino
+    http.side_effect = lambda *args, **kwargs: _response(payload)
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        Path(command[command.index("-o") + 1]).write_bytes(payload)
+        return subprocess.CompletedProcess(command, 0, stdout="200", stderr="")
+
+    curl.side_effect = run
+    assert models.download(_DOWNLOAD_URL, target, proxy, spec) is False
+    assert target.read_bytes() == _MODEL_BYTES and target.stat().st_ino == inode
+    assert not list(target.parent.glob("*.part"))
+
+
+def test_download_rejects_truncated_response_without_sha256(_download_case: tuple) -> None:
+    """即使超过最小尺寸且无摘要，响应短于 Content-Length 也不能发布。"""
+    target, spec, http, _ = _download_case
+    spec.pop("sha256")
+    http.side_effect = lambda *args, **kwargs: _response(_MODEL_BYTES, len(_MODEL_BYTES) + 1)
+    inode = target.stat().st_ino
+    assert models.download(_DOWNLOAD_URL, target, None, spec) is False
+    assert target.read_bytes() == _MODEL_BYTES and target.stat().st_ino == inode
+    assert not list(target.parent.glob("*.part"))
+
+
+@pytest.mark.parametrize("proxy", [None, _PROXY])
+@pytest.mark.parametrize("stage", ["create", "write", "verify", "replace"])
+def test_download_io_errors_return_false_and_clean_up(
+    monkeypatch: pytest.MonkeyPatch, _download_case: tuple, proxy: str | None, stage: str,
+) -> None:
+    """临时文件创建、写入、校验及替换异常均返回 False，且不残留本次临时文件。"""
+    target, spec, http, curl = _download_case
+    inode = target.stat().st_ino
+    http.side_effect = lambda *args, **kwargs: _response(_MODEL_BYTES)
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        Path(command[command.index("-o") + 1]).write_bytes(_MODEL_BYTES)
+        if stage == "write":
+            raise OSError("proxy-secret")
+        return subprocess.CompletedProcess(command, 0, stdout="200", stderr="")
+
+    curl.side_effect = run
+    failure = Mock(side_effect=OSError("proxy-secret"))
+    if stage == "create":
+        monkeypatch.setattr(models.tempfile, "NamedTemporaryFile", failure)
+    elif stage == "write" and proxy is None:
+        monkeypatch.setattr(models, "open", failure, raising=False)
+    elif stage == "verify":
+        monkeypatch.setattr(models, "verify", failure)
+    elif stage == "replace":
+        monkeypatch.setattr(models, "os", SimpleNamespace(replace=failure))
+    assert models.download(_DOWNLOAD_URL, target, proxy, spec) is False
+    assert target.read_bytes() == _MODEL_BYTES and target.stat().st_ino == inode
+    assert not list(target.parent.glob("*.part"))
+
+
+def test_download_read_error_cleans_partial_file(_download_case: tuple) -> None:
+    """响应写入部分数据后读失败，已创建的临时文件仍须清理。"""
+    target, spec, http, _ = _download_case
+    response = _response(_MODEL_BYTES)
+    response.read = Mock(side_effect=[b"partial", OSError("proxy-secret")])
+    http.side_effect = None
+    http.return_value = response
+    assert models.download(_DOWNLOAD_URL, target, None, spec) is False
+    assert target.read_bytes() == _MODEL_BYTES
+    assert not list(target.parent.glob("*.part"))
+
+
+def test_download_cleanup_error_returns_false_without_leaking_credentials(
+    monkeypatch: pytest.MonkeyPatch, _download_case: tuple, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """清理本身失败也不能向调用方抛异常或打印异常中的凭据。"""
+    target, spec, http, _ = _download_case
+    http.side_effect = OSError("proxy-secret")
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", Mock(side_effect=PermissionError("proxy-secret")))
+        assert models.download(_DOWNLOAD_URL, target, None, spec) is False
+    output = capsys.readouterr().out
+    assert "临时文件清理失败：PermissionError" in output and "proxy-secret" not in output
+    assert target.read_bytes() == _MODEL_BYTES
+    for part in target.parent.glob("*.part"):
+        part.unlink()
+
+
+def test_verify_io_error_returns_false(
+    monkeypatch: pytest.MonkeyPatch, _download_case: tuple, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """真实校验函数遇到不可读模型时返回 False，不输出原始错误正文。"""
+    target, spec, _, _ = _download_case
+    monkeypatch.setattr(models, "open", Mock(side_effect=PermissionError("proxy-secret")), raising=False)
+    assert models.verify(target, spec) is False
+    output = capsys.readouterr().out
+    assert "PermissionError" in output and "proxy-secret" not in output
+
+
+@pytest.mark.parametrize("proxy", [None, _PROXY])
+def test_download_uses_exclusive_parts_during_concurrent_attempts(
+    monkeypatch: pytest.MonkeyPatch, _download_case: tuple, proxy: str | None,
+) -> None:
+    """重叠下载各自持有独占 part，不能覆盖或清理另一任务以及旧共享 part。"""
+    target, spec, http, curl = _download_case
+    stale = target.with_name(target.name + ".part")
+    stale.write_bytes(b"another attempt")
+    barrier = Barrier(2, timeout=5)
+    parts: list[Path] = []
+    verify = models.verify
+
+    def inspect(part: Path, manifest: dict) -> bool:
+        assert part.exists() and part.parent == target.parent and part != stale
+        assert part.stat().st_mode & 0o777 == 0o600
+        parts.append(part)
+        barrier.wait()
+        assert len(set(parts)) == 2 and all(path.exists() for path in parts)
+        result = verify(part, manifest)
+        barrier.wait()
+        return result
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        Path(command[command.index("-o") + 1]).write_bytes(_MODEL_BYTES)
+        return subprocess.CompletedProcess(command, 0, stdout="200", stderr="")
+
+    monkeypatch.setattr(models, "verify", inspect)
+    http.side_effect = lambda *args, **kwargs: _response(_MODEL_BYTES)
+    curl.side_effect = run
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        attempts = [pool.submit(models.download, _DOWNLOAD_URL, target, proxy, spec) for _ in range(2)]
+        assert all(attempt.result(timeout=10) for attempt in attempts)
+    assert target.read_bytes() == _MODEL_BYTES
+    assert stale.read_bytes() == b"another attempt"
+    assert all(not part.exists() for part in parts)
+
+
+@pytest.mark.parametrize("proxy", [None, _PROXY])
+def test_download_exception_logs_host_route_and_type_only(
+    _download_case: tuple, capsys: pytest.CaptureFixture[str], proxy: str | None,
+) -> None:
+    """HTTP 错误和 curl 超时只输出来源主机、真实通路、状态或类型，不打印凭据。"""
+    target, spec, http, curl = _download_case
+    url = "https://source-user:source-secret@huggingface.co/model?token=source-token"
+    http.side_effect = urllib.error.HTTPError(url, 403, "source-secret", {}, None)
+    curl.side_effect = subprocess.TimeoutExpired(["curl", "-x", _PROXY], 310, stderr="proxy-secret")
+    assert models.download(url, target, proxy, spec) is False
+    output = capsys.readouterr().out
+    assert "huggingface.co" in output
+    if proxy:
+        assert "代理(proxy.test)" in output and "TimeoutExpired" in output and "直连" not in output
+    else:
+        assert "直连" in output and "HTTP 403" in output and "HTTPError" in output
+    for secret in ("source-user", "source-secret", "source-token", "proxy-user", "proxy-secret"):
+        assert secret not in output
+    assert target.read_bytes() == _MODEL_BYTES
+    assert not list(target.parent.glob("*.part"))
+
+
+@pytest.mark.parametrize("status", ["502", "proxy-secret"])
+def test_download_curl_error_logs_sanitized_status(
+    _download_case: tuple, capsys: pytest.CaptureFixture[str], status: str,
+) -> None:
+    """curl 标准错误与非状态输出不能进入日志，数字 HTTP 状态和退出码仍可诊断。"""
+    target, spec, _, curl = _download_case
+    curl.side_effect = None
+    curl.return_value = subprocess.CompletedProcess(["curl"], 22, stdout=status, stderr=_PROXY)
+    assert models.download(_DOWNLOAD_URL, target, _PROXY, spec) is False
+    output = capsys.readouterr().out
+    assert "huggingface.co / 代理(proxy.test)" in output and "CurlExit 22" in output
+    assert ("HTTP 502" if status == "502" else "HTTP 未知") in output
+    assert "proxy-secret" not in output and "proxy-user" not in output and "直连" not in output
+    assert target.read_bytes() == _MODEL_BYTES
+    assert not list(target.parent.glob("*.part"))
+
+
+@pytest.mark.parametrize("state,expected", [("valid", 0), ("invalid", 1), ("missing", 1)])
+def test_fetch_force_failure_preserves_models_and_reports_availability(
+    monkeypatch: pytest.MonkeyPatch, _download_case: tuple, capsys: pytest.CaptureFixture[str],
+    state: str, expected: int,
+) -> None:
+    """所有通路失败时不删除旧文件；退出状态取决于必需项最终是否仍有效。"""
+    target, spec, http, curl = _download_case
+    if state == "invalid":
+        target.write_bytes(b"bad")
+    elif state == "missing":
+        target.unlink()
+    inode = target.stat().st_ino if target.exists() else None
+    monkeypatch.setattr(models, "MODELS", {target.name: spec})
+    monkeypatch.setenv("HTTPS_PROXY", _PROXY)
+    http.side_effect = OSError("source-secret")
+    curl.side_effect = None
+    curl.return_value = subprocess.CompletedProcess(["curl"], 22, stdout="502", stderr=_PROXY)
+    assert models.fetch(target.parent, force=True) == expected
+    assert http.call_count == 2 and curl.call_count == 2
+    output = capsys.readouterr().out
+    assert "huggingface.co" in output and "hf-mirror.com" in output
+    if state == "valid":
+        assert "下载失败，已保留旧有效模型，仍可用" in output
+        assert target.read_bytes() == _MODEL_BYTES
+    elif state == "invalid":
+        assert target.read_bytes() == b"bad" and "已保留旧有效模型" not in output
+    else:
+        assert not target.exists() and "已保留旧有效模型" not in output
+    if inode is not None:
+        assert target.stat().st_ino == inode
+    for secret in ("proxy-user", "proxy-secret", "source-secret"):
+        assert secret not in output
+    assert not list(target.parent.glob("*.part"))
+
+
+def test_fetch_optional_failure_does_not_change_success_status(
+    monkeypatch: pytest.MonkeyPatch, _download_case: tuple,
+) -> None:
+    """必需项可用时，可选项下载失败不能导致非零退出。"""
+    target, spec, http, curl = _download_case
+    monkeypatch.setattr(models, "MODELS", {target.name: spec, "smart-turn-v3.2-cpu.onnx": spec})
+    http.side_effect = OSError("离线")
+    curl.side_effect = OSError("离线")
+    assert models.fetch(target.parent, proxy=_PROXY, force=True) == 0
+    assert models.verify(target, spec)
+    assert not (target.parent / "smart-turn-v3.2-cpu.onnx").exists()
+    assert not list(target.parent.glob("*.part"))
 
 
 def test_version_literal_matches_pyproject():

@@ -69,15 +69,18 @@ class SmartTurn:
             return -1.0
 
     def _run(self, audio: np.ndarray) -> float:
-        x = np.asarray(audio, dtype=np.float32).reshape(-1)
-        if x.size == 0:
-            return -1.0
+        x = np.asarray(audio, dtype=np.float32)
+        if x.ndim != 1 or x.size == 0 or not np.isfinite(x).all():
+            raise ValueError("判停输入必须为非空有限单声道音频")
         x = x[-MAX_SAMPLES:]                       # 超过 8 秒：只留结尾
         if x.size < MAX_SAMPLES:
             x = np.pad(x, (MAX_SAMPLES - x.size, 0), mode="constant")
         features = mel.compute(x)[None]            # (1, 80, 800)
         out = self._session.run(None, {self._input: features})[0]
-        return float(np.asarray(out).reshape(-1)[0])
+        prob = float(np.asarray(out).reshape(-1)[0])
+        if not np.isfinite(prob) or not 0 <= prob <= 1:
+            raise ValueError("判停输出不是有效概率")
+        return prob
 
 
 def available(cfg: Config) -> tuple[bool, str]:

@@ -116,6 +116,13 @@ SCHEMA: tuple[Field, ...] = (
 
     Field("ui.earcons", "提示音", "bool", "ui", "开始与结束时各一声轻响。"),
     Field("ui.speak", "语音播报", "bool", "ui", "完成后用系统 TTS 念一遍结果。"),
+    Field("dialogue.mode", "对话模式", "enum", "ui",
+          "off = 只执行不出声；assistant = 短回执（默认）；chat = 可以聊天，回答更长、"
+          "支持追问。命令在任何模式下都照常执行。",
+          options=("off", "assistant", "chat")),
+    Field("dialogue.ack_after_ms", "慢动作先应一声", "int", "ui",
+          "派发超过这么久还没结果，就先说一句「收到，开始处理」，免得用户以为没听见。"
+          "0 = 关闭确认。", minimum=0, maximum=5000, step=100, unit="ms"),
     Field("ui.port", "本地端口", "int", "ui", "胶囊与设置页的监听端口。", 1024, 65535, 1,
           restart=True),
 )

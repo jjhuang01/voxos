@@ -4,7 +4,7 @@
 命令，`scripts/` 不在 wheel 里——装完的人没有任何官方途径拿到模型，只能去
 clone 源码。一个「装好了但用不了」的包，等于没装好。
 
-下载策略：先写 `.part`，校验通过再 `os.replace`。半截文件留在原地比没有更糟，
+下载策略：先写同目录独占 `.part`，校验通过再 `os.replace`。半截文件留在原地比没有更糟，
 因为下次启动会把它当成有效模型加载。
 """
 
@@ -13,8 +13,11 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # HuggingFace 的国内镜像。见 `_mirrors()`：它只是另一条通路，内容仍要过校验。
 _HF_MIRROR = "https://hf-mirror.com/"
@@ -110,34 +113,32 @@ def default_dir() -> Path:
 
 
 def verify(path: Path, spec: dict) -> bool:
-    """下载结果是否可信：大小、非全零、可选 SHA256。只看大小会被稀疏文件骗过。"""
-    if not path.exists() or path.stat().st_size < spec["min_bytes"]:  # type: ignore[operator]
-        return False
-    with open(path, "rb") as handle:
-        head = handle.read(4096)
-    if not any(head):
-        print("  校验失败：文件开头全是零，不是有效模型")
-        return False
-    expected = spec.get("sha256")
-    if expected:
-        digest = hashlib.sha256()
-        with open(path, "rb") as handle:
-            for block in iter(lambda: handle.read(1 << 20), b""):
-                digest.update(block)
-        if digest.hexdigest().lower() != str(expected).lower():
-            print("  校验失败：SHA256 与清单不一致")
+    """校验大小、非全零和可选 SHA256；文件不可读时返回 False。"""
+    try:
+        if not path.exists() or path.stat().st_size < spec["min_bytes"]:  # type: ignore[operator]
             return False
-    return True
+        with open(path, "rb") as handle:
+            head = handle.read(4096)
+        if not any(head):
+            print("  校验失败：文件开头全是零，不是有效模型")
+            return False
+        expected = spec.get("sha256")
+        if expected:
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for block in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(block)
+            if digest.hexdigest().lower() != str(expected).lower():
+                print("  校验失败：SHA256 与清单不一致")
+                return False
+        return True
+    except OSError as exc:
+        print(f"  校验失败：{type(exc).__name__}")
+        return False
 
 
 def _mirrors(url: str) -> list[str]:
-    """HuggingFace 原站在国内网络常常直接不通，给一个等价镜像。
-
-    实测（这台机器）：`huggingface.co` 经沙箱代理 502、直连 15 秒超时；
-    `hf-mirror.com` 同一条代理 200，取同一个文件返回 206 和合法的 ONNX 头。
-    镜像只是**另一条取文件的通路**，内容仍要过 `verify()`——有 sha256 的按
-    sha256 比，没有的至少过大小和非全零。
-    """
+    """提供候选镜像；下载内容仍须通过大小、非全零和可选 SHA256 校验。"""
     prefix = "https://huggingface.co/"
     if url.startswith(prefix):
         return [_HF_MIRROR + url[len(prefix):]]
@@ -145,11 +146,7 @@ def _mirrors(url: str) -> list[str]:
 
 
 def _attempts(spec: dict, proxy: str | None) -> list[tuple[str, str | None]]:
-    """按「先代理后直连、先原站后镜像」排队。
-
-    镜像排在同一条通路上的原站之后，而不是所有通路之后：原站经代理是**立刻**
-    502，直连却要等满超时——先试直连等于把镜像挡在两次超时后面。
-    """
+    """先代理后直连，每条通路按原站、镜像的顺序尝试，不推断失败原因。"""
     urls = [str(spec["url"]), *_mirrors(str(spec["url"]))]
     order: list[tuple[str, str | None]] = []
     if proxy:
@@ -158,35 +155,67 @@ def _attempts(spec: dict, proxy: str | None) -> list[tuple[str, str | None]]:
     return order
 
 
-def download(url: str, target: Path, proxy: str | None, spec: dict) -> bool:
-    """先写 `.part`，校验通过再原子替换；失败不破坏已有好模型。"""
-    part = target.with_name(target.name + ".part")
-    part.unlink(missing_ok=True)
+def _host(url: str) -> str:
+    """日志仅保留主机名，省略 URL 中的凭据、路径和查询参数。"""
     try:
-        if proxy:
-            result = subprocess.run(
-                ["curl", "-fsSL", "--http1.1", "--max-time", "300", "-x", proxy, "-o", str(part), url],
-                capture_output=True, text=True,
-            )
-            ok = result.returncode == 0
-            if not ok:
-                # 不说清楚「代理这条路也不通」，用户会以为只是网络慢。
-                reason = (result.stderr or "").strip().splitlines()[-1:] or [str(result.returncode)]
-                print(f"  经代理 {proxy} 失败：{reason[0][:160]}")
-        else:
-            opener = urllib.request.build_opener()
-            with opener.open(url, timeout=120) as response, open(part, "wb") as handle:
-                while chunk := response.read(1 << 16):
-                    handle.write(chunk)
-            ok = True
-    except Exception as exc:  # 网络问题种类很多，统一报告
-        print(f"  直连失败：{exc}")
-        ok = False
-    if ok and verify(part, spec):
-        os.replace(part, target)
-        return True
-    part.unlink(missing_ok=True)
-    return False
+        return urlsplit(url).hostname or "未知主机"
+    except ValueError:
+        return "未知主机"
+
+
+def _transfer(url: str, part: Path, proxy: str | None, route: str) -> bool:
+    """传输到临时文件，报告通路和状态；异常交由下载边界统一处理。"""
+    if proxy:
+        result = subprocess.run(
+            ["curl", "-q", "-fsSL", "--http1.1", "--max-time", "300",
+             "--noproxy", "", "-x", proxy, "-o", str(part), "-w", "%{http_code}", url],
+            capture_output=True, text=True, timeout=310,
+        )
+        status = result.stdout.strip()
+        status = status if len(status) == 3 and status.isascii() and status.isdecimal() else "未知"
+        print(f"  {route}：HTTP {status}")
+        if result.returncode:
+            print(f"  {route} 失败：CurlExit {result.returncode}")
+        return result.returncode == 0
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(url, timeout=120) as response, open(part, "wb") as handle:
+        print(f"  {route}：HTTP {response.status}")
+        while chunk := response.read(1 << 16):
+            handle.write(chunk)
+        expected = response.headers.get("Content-Length")
+        if expected is not None and handle.tell() != int(expected):
+            print(f"  {route} 失败：ContentLengthMismatch")
+            return False
+    return True
+
+
+def download(url: str, target: Path, proxy: str | None, spec: dict) -> bool:
+    """使用同目录独占临时文件，校验后原子替换；失败保留旧文件并返回 False。"""
+    route = f"{_host(url)} / " + (f"代理({_host(proxy)})" if proxy else "直连")
+    part: Path | None = None
+    ok = False
+    try:
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}.",
+                                         suffix=".part", delete=False) as handle:
+            part = Path(handle.name)
+        if _transfer(url, part, proxy, route):
+            if verify(part, spec):
+                os.replace(part, target)
+                ok = True
+            else:
+                print(f"  {route} 失败：模型校验失败")
+    except urllib.error.HTTPError as exc:
+        print(f"  {route} 失败：HTTP {exc.code} ({type(exc).__name__})")
+    except Exception as exc:  # 网络、子进程与文件 I/O 均在此边界兜底，不输出异常正文。
+        print(f"  {route} 失败：{type(exc).__name__}")
+    finally:
+        if part is not None:
+            try:
+                part.unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"  {route} 临时文件清理失败：{type(exc).__name__}")
+                ok = False
+    return ok
 
 
 def fetch(target: Path | None = None, *, proxy: str | None = None,
@@ -217,10 +246,12 @@ def fetch(target: Path | None = None, *, proxy: str | None = None,
             if download(url, path, via, spec):
                 ok = True
                 break
-        if ok and verify(path, spec):
-            print(f"✓ {name}（{path.stat().st_size / 1e6:.1f}MB）")
+        if verify(path, spec):
+            if ok:
+                print(f"{name} 下载完成（{path.stat().st_size / 1e6:.1f}MB）")
+            else:
+                print(f"{name} 下载失败，已保留旧有效模型，仍可用")
         else:
-            path.unlink(missing_ok=True)
             (skipped if name in OPTIONAL else failed).append(name)
 
     _report(failed, skipped, base, proxy)
@@ -239,6 +270,6 @@ def _report(failed: list[str], skipped: list[str], base: Path, proxy: str | None
     print("  可手动下载后放入上述目录；缺失时系统会自动降级（能量 VAD + 频谱声纹），")
     print("  但声纹精度会下降，FRR/FAR 不再满足 PRD 指标。")
     if proxy:
-        print(f"  当前用的代理是 {proxy}（来自 --proxy 或环境变量），换成能连 GitHub 的再试：")
+        print(f"  已尝试代理通路（主机 {_host(proxy)}，来自 --proxy 或环境变量）及直连通路。")
     print("  voxos models --proxy http://127.0.0.1:7890")
     print("  HuggingFace 上的那几个还会自动试镜像 hf-mirror.com；两边都不通才需要手动下。")

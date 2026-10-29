@@ -245,8 +245,13 @@ def dispatch(
     executor: Executor | None = None,
     cfg: Config | None = None,
     context: dict[str, Any] | None = None,
+    mode: str = "assistant",
 ) -> DispatchResult:
-    """一句话进，动作出。顺序：快通道 → LLM 慢通道 → 离线启发式。"""
+    """一句话进，动作出。顺序：快通道 → LLM 慢通道 → 离线启发式。
+
+    `mode` 只影响慢通道的**说话方式**，不影响工具权限：
+    命令该走哪条路还是哪条路，绝不因为「在聊天」就执行不了。
+    """
     ensure_tools()
     cfg = cfg or (executor.cfg if executor else load())
     executor = executor or Executor(cfg)
@@ -255,21 +260,14 @@ def dispatch(
     if not raw:
         return DispatchResult(route="ignore", text=raw, reply="")
 
-    if _segments(raw, cfg) > 1:
-        multi = _multi_intent(raw, cfg, executor, started)
-        if multi is not None:
-            return multi
-
-    hit = _fast_route(raw, _wake_pattern(cfg))
-    if hit:
-        name, args = hit
-        reply = executor.execute_safely(name, args, text=raw)
-        return DispatchResult("fast", raw, name, args, reply, _ms(started), [reply])
+    quick = _quick_route(raw, cfg, executor, started)
+    if quick is not None:
+        return quick
 
     if (chat := _small_talk(raw)):
         return _remember(DispatchResult("chat", raw, reply=chat, latency_ms=_ms(started)))
 
-    llm = _try_llm(raw, executor, cfg, context or {}, started)
+    llm = _try_llm(raw, executor, cfg, dict(context or {}, mode=mode), started)
     if llm is not None:
         return _remember(llm)
 
@@ -279,6 +277,22 @@ def dispatch(
     results = [executor.execute_safely(name, args, text=raw) for name, args in plan]
     name, args = plan[0]
     return DispatchResult("offline", raw, name, args, "；".join(results), _ms(started), results)
+
+
+def _quick_route(
+    raw: str, cfg: Config, executor: Executor, started: float
+) -> DispatchResult | None:
+    """多意图切分 + 快通道。命中就返回结果，没命中交回给慢通道。"""
+    if _segments(raw, cfg) > 1:
+        multi = _multi_intent(raw, cfg, executor, started)
+        if multi is not None:
+            return multi
+    hit = _fast_route(raw, _wake_pattern(cfg))
+    if not hit:
+        return None
+    name, args = hit
+    reply = executor.execute_safely(name, args, text=raw)
+    return DispatchResult("fast", raw, name, args, reply, _ms(started), [reply])
 
 
 def _small_talk(text: str) -> str:
@@ -382,6 +396,7 @@ def _prompt_values(cfg: Config, context: dict[str, Any]) -> dict[str, Any]:
         "workspace": context.get("workspace", str(cfg.path("workspace.default_code_dir", "~"))),
         "recent_files": ", ".join(context.get("recent_files", [])[-5:]) or "无",
         "max_rounds": int(cfg.get("llm.max_tool_rounds", 3)),
+        "mode": str(context.get("mode", "assistant")),
     }
 
 

@@ -14,6 +14,20 @@
 它说：日志已记录
 ```
 
+### 0.1.38 的关键变化
+
+对话有了三档开关（静音 / 回执 / 聊天），慢动作（派发超过 600ms）会先说一句「我先看看」；
+新增主动提示 `voxos cue "该喝水了"`，只说不动手，走文件投递箱，不把界面令牌落盘。
+**任何模式都不放宽工具权限**——`chat` 只影响说不说、说多长。
+
+本地 `say` 先合成 PCM，与云端共用可取消播放器，不需要先购买云 TTS；
+播放器可提供提交块参考，但**尚未接入实时 AEC，不是真双工**。
+播放中插话可请求停播报；未经消回声的混音不再回灌指令，按提示停顿后完整重说。
+模型下载已修复「直连仍走代理」和「强制更新失败删除旧模型」。
+
+单进程 `make test` 仍受环境临时文件清理保护阻断（详见 `docs/ACCEPTANCE.md`），
+按文件隔离复跑为 538 passed / 2 skipped / 0 failed；这一版已装上本机并覆盖 App。
+
 ### 现在能做什么
 
 18 个工具，**都是真的会执行**，不是「已为您准备好」：
@@ -105,6 +119,7 @@ voxos doctor              # 环境自检（含「配置文件在哪、能不能�
 voxos enroll              # 录声纹：说 2~3 句，句间停半秒（默认录 10 秒）
 voxos run                 # 守护进程 + 胶囊
 voxos text "Siri，检查一下服务器负载"   # 不打字说话，直接打字
+voxos cue "该喝水了"      # 推一条提示：只说，不执行（脚本/cron 用；默认 5 分钟内有效）
 ```
 
 ### macOS：装成 App，双击就用
@@ -149,7 +164,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 四个模型一次下齐（约 276MB）
 python scripts/fetch_models.py --no-asr      # 跳过 239MB 识别模型（37MB：声纹 + VAD + 判停）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 421 项测试
+make test                                    # 540 项测试（当前源码全量待验收，见 docs/ACCEPTANCE.md）
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）

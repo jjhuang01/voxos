@@ -575,7 +575,6 @@ class AudioPipeline:
     on_barge_in: Callable[[], None] | None = None
     echo: dsp.EchoGate = field(default_factory=dsp.EchoGate)
     partial_interval_ms: float = 400.0
-    carry_ttl_ms: float = 2000.0      # 打断时攒下的音频最多等这么久，过时作废
     turn_detector: Any = None        # 显式注入（测试用）；None 时按配置造
     stats: dict[str, int] = field(default_factory=lambda: {"chunks": 0, "utterances": 0, "rejected": 0})
 
@@ -594,7 +593,7 @@ class AudioPipeline:
         # 这一步**不加载模型**（`turn.make` 里才建 session），所以构造管道仍然是毫秒级。
         self.smart_turn = self.turn_detector if self.turn_detector is not None else turn.make(self.cfg)
         self.turn_threshold = turn.threshold(self.cfg)
-        # 只否决、不拍板的门槛。见 `_audio_says_unfinished`：低于它才推迟收尾。
+        # 三态下界：低于它延长等待，中间地带才交给文本判据。
         self.turn_veto = float(self.cfg.get("audio.turn_veto", 0.2))
         self.mask_mode = self.cfg.flag("audio.mask_mode", False)
         self.prefix_ms = float(self.cfg.get("audio.prefix_padding_ms", 300))
@@ -612,17 +611,19 @@ class AudioPipeline:
         self._shown = ""           # 上次推给界面的字幕，重复的不推
         self._barge: list[np.ndarray] = []   # TTS 期间攒下的「可能是插话」的音频
         self._barge_ms = 0.0
-        # 判定为插话后，那 500ms **不是可疑音频，是用户这句话的前半句**。
-        # 丢掉它，转写出来就是「…我说的是另一个」，开头没了；留着并在下一句
-        # 起手时补回去，用户就不用把整句重说一遍。
-        self._carry: list[np.ndarray] = []
-        self._carry_at = 0.0                 # 攒下它的时刻（monotonic），过久就作废
+        # 声纹不是分离器：重叠音频仍含回声，不能作为可执行指令回灌。
+        self._await_restart = False
+        self._restart_silence_ms = 0.0
+        self._restart_wait_ms = 0.0
+        self._raw_level_dbfs = -120.0
 
     def reset(self) -> None:
         """设备断流后清掉句级状态：旧缓冲、端点状态和 VAD 上下文都不能跨断流。"""
         self._ep.reset()
         self._prefix, self._prefix_ms = [], 0.0
-        self._carry = []
+        self._barge, self._barge_ms = [], 0.0
+        self._await_restart, self._restart_silence_ms = False, 0.0
+        self._restart_wait_ms = 0.0
         self._clear_sentence()
         reset = getattr(self.vad, "reset", None)
         if callable(reset):
@@ -660,10 +661,7 @@ class AudioPipeline:
         self._clear_sentence()
         for raw in source:
             chunk = self._preprocess(raw)
-            if self.echo.muted:
-                chunk = self._during_playback(chunk)
-            else:
-                self._barge, self._barge_ms = [], 0.0
+            chunk = self._gate_playback(chunk)
             state = self._ep.push(bool(self.vad.is_speech(chunk)), chunk.size)  # type: ignore[attr-defined]
             if state == "idle":
                 self._keep_prefix(chunk)
@@ -702,30 +700,16 @@ class AudioPipeline:
             self._maybe_subtitle()
 
     def _start_sentence(self, buffer: list[np.ndarray]) -> None:
-        """一句话开始：把该补的音频补回开头，再清句级状态。
-
-        两段来源，时间上先 `carry`（打断时攒下的前半句）后 `prefix`（起手
-        300ms）——顺序反了，转写出来的字序就是乱的。
-        """
-        carry = self._take_carry()
-        buffer.extend(carry)
+        """只补未与播放重叠的起手音频，不把原始混音拼入指令。"""
         buffer.extend(self._prefix)
-        self._begin_sentence(carry)
+        self._begin_sentence()
         self._prefix, self._prefix_ms = [], 0.0
 
-    def _begin_sentence(self, carry: list[np.ndarray] | None = None) -> None:
-        """一句话开始：清句级状态，并把补回来的音频也喂给流式识别器。
-
-        漏了最后这一步，字幕的开头会永远少一个字——用户说「帮我把」，字幕显示
-        「我把」。原因和 `prefix_padding_ms` 那个 bug 一模一样：VAD 判出人声时，
-        第一个音素已经在上一块里了。
-
-        `carry` 是打断时攒下的那 500ms（见 `_keep_carry`），比 `_prefix` 更早，
-        所以先喂它。
-        """
+    def _begin_sentence(self) -> None:
+        """清句级状态，同时把起手缓冲送入流式识别器，防止字幕丢首字。"""
         self._clear_sentence()
         if self.streamer is not None:
-            for item in (*(carry or []), *self._prefix):
+            for item in self._prefix:
                 self.streamer.push(item)
                 self._buf_ms += item.size / dsp.SR * 1000.0
 
@@ -794,28 +778,46 @@ class AudioPipeline:
 
     def _preprocess(self, chunk: np.ndarray) -> np.ndarray:
         audio = dsp.as_float(chunk)
+        self._raw_level_dbfs = dsp.dbfs(audio)
         self.echo.tick(audio.size / dsp.SR * 1000.0)
         if self.mask_mode:
             audio = dsp.agc(dsp.high_shelf(audio), float(self.cfg.get("audio.agc_target_dbfs", -3.0)))
         self.stats["chunks"] += 1
         return audio
 
+    def _gate_playback(self, chunk: np.ndarray) -> np.ndarray:
+        """播放重叠段仅用于打断；打断后等一次静音，再接受完整重说。"""
+        if self.echo.muted:
+            return self._during_playback(chunk)
+        self._barge, self._barge_ms = [], 0.0
+        if not self._await_restart:
+            return chunk
+        self._restart_wait_ms += chunk.size / dsp.SR * 1000.0
+        # 使用增益补偿前的能量；否则面罩 AGC 抬高底噪会让重说等待永不结束。
+        if self._raw_level_dbfs > float(self.cfg.get("audio.restart_silence_dbfs", -42.0)):
+            self._restart_silence_ms = 0.0
+        else:
+            self._restart_silence_ms += chunk.size / dsp.SR * 1000.0
+        if self._restart_silence_ms >= self._ep.silence_ms:
+            self._resume_restart("请重说", "播报已停，请完整重说指令")
+        elif self._restart_wait_ms >= self._restart_max_ms():
+            # 屋里底噪本来就高于门限时，「等一段安静」永远等不到；无限等待
+            # 会让麦克风从此只听不说，比多一段残留回声糟得多。
+            self._resume_restart("恢复收音", "未等到安静间隔，已恢复收音；开头可能含残留回声")
+        return np.zeros_like(chunk)
+
+    def _restart_max_ms(self) -> float:
+        """重说等待的上限：至少两秒，正常情况是静音门槛的四倍。"""
+        return max(2000.0, 4.0 * self._ep.silence_ms)
+
+    def _resume_restart(self, title: str, detail: str) -> None:
+        self._await_restart, self._restart_wait_ms = False, 0.0
+        self.on_event("idle", title, detail)
+
     def _during_playback(self, chunk: np.ndarray) -> np.ndarray:
-        """播报期间的音频：攒够时长的「响音频」判一次是不是用户插话。
-
-        这一段最终仍按静音走（返回全零），因为**不能一边播报一边把混着回声的
-        音频送去识别**——转写出来会是「TTS 内容 + 用户的话」粘在一起。但
-        「用户想打断」这件事必须被听见，所以先攒着判一次。
-
-        判定为插话的那 500ms **不丢**：交给 `_keep_carry`，等下一句起手时补回
-        开头（见 `_keep_carry`）。不补的话，用户插话后的转写会是「…说的是另一个」，
-        前半句没了，得整句重说一遍。
-        """
-        if dsp.dbfs(chunk) <= self.echo.gate_dbfs:
-            return np.zeros_like(chunk)
-        if not self.echo.speaking:                 # 已经打断过，还在混响期
-            if self._carry:
-                self._carry.append(chunk)          # 同一句话的延续，接着攒
+        """连续越过能量门才做声纹验证；静音断开候选，混响不进入识别。"""
+        if not self.echo.speaking or dsp.dbfs(chunk) <= self.echo.gate_dbfs:
+            self._barge, self._barge_ms = [], 0.0
             return np.zeros_like(chunk)
         self._barge.append(chunk)
         self._barge_ms += chunk.size / dsp.SR * 1000.0
@@ -824,12 +826,7 @@ class AudioPipeline:
         return np.zeros_like(chunk)
 
     def _fire_barge_in(self) -> None:
-        """攒够时长后用**声纹**判：这是用户，还是我们自己的回声。
-
-        能量分不开——实测 TTS 回声的 p95 约 -25.8 dBFS，和正常说话只差几 dB，
-        门限卡在哪个值都会两头不讨好。音色分得开：TTS 是合成音色，和本人模板
-        的相似度远低于阈值。这一步只在攒够 500ms 后跑一次，成本可忽略。
-        """
+        """声纹分数只触发停播报，不证明混音中所有字都出自本人。"""
         if not self.echo.speaking:
             return                              # 已经打断过了，别重复触发
         audio = np.concatenate(self._barge) if self._barge else np.zeros(0, dtype=np.float32)
@@ -838,29 +835,12 @@ class AudioPipeline:
         if not ok:
             return                              # 自己的回声：继续播报
         self.echo.tts_end()
-        self._keep_carry(audio)
-        self.on_event("warn", "打断", f"检测到插话（声纹 {score:.2f}），已停止播报")
+        self._await_restart, self._restart_silence_ms = True, 0.0
+        self._restart_wait_ms = 0.0
+        self._prefix, self._prefix_ms = [], 0.0
+        self.on_event("warn", "打断", f"已请求停止播报（声纹 {score:.2f}）；请停顿后完整重说，重叠音频未执行")
         if self.on_barge_in is not None:
             self.on_barge_in()
-
-    def _keep_carry(self, audio: np.ndarray) -> None:
-        """把判定为插话的音频留下来，下一句起手时补回开头。
-
-        超过 `carry_ttl_ms` 还没等到下一句就作废：用户只说了半句「等一下」
-        就走了，那半句不该在十秒后粘到另一句话前面。
-        """
-        span = int(dsp.SR * self.carry_ttl_ms / 1000.0)
-        self._carry = [audio] if audio.size and span > 0 else []
-        self._carry_at = time.monotonic()
-
-    def _take_carry(self) -> list[np.ndarray]:
-        """取走待补的音频；过期了就丢掉并返回空。"""
-        if not self._carry:
-            return []
-        carry, self._carry = self._carry, []
-        if (time.monotonic() - self._carry_at) * 1000.0 > self.carry_ttl_ms:
-            return []
-        return carry
 
     def _maybe_finalize(self, buffer: list[np.ndarray], state: str,
                         last_partial_ms: float) -> Utterance | None:
@@ -876,6 +856,9 @@ class AudioPipeline:
             if verdict == "end":
                 return self._finalize(buffer)
             if verdict == "wait":
+                rejected, _ = self._verify_owner(audio, audio_ms)
+                if rejected is not None:
+                    return rejected  # 别人的半句不能占住回合，把本人下一句粘进来。
                 if self._ep.extended:              # 宽限也走完了，不再等
                     return self._finalize(buffer)
                 self._ep.extend()
@@ -889,7 +872,7 @@ class AudioPipeline:
         上游是两态（`prob >= 0.5` 收尾，否则等）。三态的理由是**中文上的置信度
         不均匀**：实测 6 句完整指令里 4 句落在 0.94–0.99，2 句只有 0.27 和 0.42
         （「今天下午三点提醒我开会」「把刚才那段话翻译成英文」）。二态的话这两句
-        会白等 2.5 秒；三态把中间那段交给文本判据，两边都不吃亏。
+        会走延长等待。该实验是合成音频，不能推断真人错误率或三态收益。
 
         | 概率 | 结论 | 为什么 |
         | :--- | :--- | :--- |
@@ -901,7 +884,7 @@ class AudioPipeline:
         不确定的那部分退回去了。
         """
         prob = self.smart_turn.complete(audio)
-        if prob < 0:
+        if not np.isfinite(prob) or not 0 <= prob <= 1:
             # 模型坏了（文件截断、onnxruntime 版本不对、输入对不上）。摘掉它，
             # 本轮起退回文本判停——一个坏模型不该把整条采集链一起带下去。
             self.on_event("warn", "判停", "smart-turn 推理失败，本轮起退回文本判停")

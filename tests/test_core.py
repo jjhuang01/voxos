@@ -238,7 +238,7 @@ def test_a_very_old_utterance_is_skipped_instead_of_executed(cfg):
     shown: list[tuple[str, str, str]] = []
     runtime.bus.emit = lambda state, label, detail="": shown.append((state, label, detail))
     executed: list[str] = []
-    runtime.dispatch = lambda text, context=None: executed.append(text)
+    runtime.dispatch = lambda text, context=None, mode="assistant": executed.append(text)
 
     pipeline = types.SimpleNamespace(echo=types.SimpleNamespace(is_interrupt=lambda t: False))
     box: queue.Queue = queue.Queue()
@@ -265,10 +265,11 @@ def test_a_fresh_utterance_still_runs(cfg):
 
     runtime = Runtime(cfg, ui.StatusBus())
     runtime.bus.emit = lambda state, label, detail="": None
-    executed: list[str] = []
+    executed: list[tuple[str, str]] = []
 
-    def fake_dispatch(text, context=None):
-        executed.append(text)
+    def fake_dispatch(text, context=None, mode="assistant"):
+        """替身也要守契约：派发循环现在会带上对话模式。"""
+        executed.append((text, mode))
         return core.DispatchResult(route="fast", text=text, reply="日志已记录")
 
     runtime.dispatch = fake_dispatch
@@ -282,7 +283,7 @@ def test_a_fresh_utterance_still_runs(cfg):
 
     with patch("voxos.main.time.monotonic", return_value=1000.0):
         _dispatch_loop(runtime, pipeline, box, {}, threading.Event())
-    assert executed == ["记一下日志"]
+    assert executed == [("记一下日志", "assistant")], "模式没传下去或话被吞了"
 
 
 def test_the_voiceprint_hint_only_appears_after_three_rejections(cfg):

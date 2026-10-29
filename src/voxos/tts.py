@@ -1,4 +1,4 @@
-"""云端语音合成（豆包语音合成 2.0）：一次输入、流式出音频。
+"""云端语音合成（豆包 2.0）与云端/本地共用的 PCM 播放。
 
 这一层只做「文本 → PCM 字节流 → 扬声器」，**不碰分段、不碰上下文**：
 分段在 `dsp.sentences`，播报编排在 `main._speak`。分开的理由很实际——
@@ -20,17 +20,21 @@
 「一整句已经拿到手 → 送合成」，单向就够，而且少一个长连接要维护。
 等真要做「边生成边播」，再换 WebSocket 那条。
 
-没有配 Key 时 `available()` 返回 False，一切照旧走系统 `say`——
-**没买接口的机器行为一个字都不变**。
+没有配 Key 时 `available()` 返回 False，由 main 用系统 `say` 合成临时 WAV，
+交给公共 PCM 播放；只有缺少 sounddevice 时才退回无参考信号的 say 直播。
 """
 
 from __future__ import annotations
 
 import base64
+import codecs
 import json
 import threading
+import time
 import urllib.request
 import uuid
+import wave
+from pathlib import Path
 from typing import Callable, Iterator
 
 from .config import Config
@@ -96,37 +100,59 @@ def _objects(buffer: str) -> tuple[list[dict], str]:
             obj, end = _DECODER.raw_decode(buffer)
         except ValueError:
             return out, buffer       # 半个对象，等下一块
-        if isinstance(obj, dict):
-            out.append(obj)
+        if not isinstance(obj, dict):
+            raise RuntimeError("语音合成响应必须为 JSON 对象")
+        out.append(obj)
         buffer = buffer[end:]
+
+
+def _stopped(should_stop: Callable[[], bool] | None) -> bool:
+    return should_stop is not None and should_stop()
+
+
+def _response_objects(response: object, should_stop: Callable[[], bool] | None
+                      ) -> Iterator[dict]:
+    """增量读取相接的 JSON；UTF-8 字符和对象都允许跨网络块。"""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    buffer = ""
+    while not _stopped(should_stop):
+        chunk = response.read1(4096)
+        if _stopped(should_stop):
+            return
+        buffer += decoder.decode(chunk, final=not chunk)
+        objects, buffer = _objects(buffer)
+        yield from objects
+        if not chunk:
+            if buffer.strip():
+                raise RuntimeError("语音合成响应截断或格式无效")
+            return
 
 
 def synthesize(text: str, cfg: Config, should_stop: Callable[[], bool] | None = None
                ) -> Iterator[bytes]:
-    """文本 → PCM 字节流（16 bit 小端单声道）。
-
-    一块一块 yield，调用方边收边播——**首字节到了就能出声**，不用等整句合成完。
-    `timeout` 同时管连接和读：首字节迟迟不来会抛 `socket.timeout`，
-    上层据此退回系统 `say`，用户不会干等。
-    """
-    if not text.strip():
+    """文本 → 小端 int16 单声道 PCM；仅有非空音频和 DONE 才算合成完成。"""
+    if not text.strip() or _stopped(should_stop):
         return
     request = urllib.request.Request(
         ENDPOINT, data=json.dumps(body(text, cfg)).encode("utf-8"),
         headers=headers(cfg), method="POST")
     timeout = float(cfg.get("tts.timeout_s", 8))
+    if _stopped(should_stop):
+        return
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        buffer = ""
-        while True:
-            if should_stop is not None and should_stop():
+        size = 0
+        for obj in _response_objects(response, should_stop):
+            if _stopped(should_stop):
                 return
-            chunk = response.read(4096)
-            if not chunk:
+            if int(obj.get("code", 0) or 0) == DONE_CODE:
+                if not size or size % 2:
+                    raise RuntimeError("语音合成音频为空或采样截断")
                 return
-            buffer += chunk.decode("utf-8", "ignore")
-            objects, buffer = _objects(buffer)
-            for obj in objects:
-                yield from _audio(obj)
+            for audio in _audio(obj):
+                size += len(audio)
+                yield audio
+        if not _stopped(should_stop):
+            raise RuntimeError("语音合成未收到 DONE")
 
 
 def _audio(obj: dict) -> Iterator[bytes]:
@@ -138,25 +164,125 @@ def _audio(obj: dict) -> Iterator[bytes]:
         raise RuntimeError(f"语音合成失败（{code}）：{obj.get('message') or '未知'}")
     data = obj.get("data")
     if data:
-        yield base64.b64decode(data)
+        yield base64.b64decode(data, validate=True)
+
+
+class PlaybackStartedError(RuntimeError):
+    """写入已开始，可能已有内容出声；调用方不得整句降级重播。"""
+
+
+def _pcm_blocks(chunks: Iterator[bytes], rate: int,
+                should_stop: Callable[[], bool] | None) -> Iterator[bytes]:
+    """跨任意字节边界合并为约 10ms 块；尾块不补零，不提交半个采样。"""
+    if rate <= 0:
+        raise ValueError("播放采样率必须为正数")
+    size = max(1, rate // 100) * 2
+    pending = bytearray()
+    while not _stopped(should_stop):
+        piece = next(chunks, None)
+        if _stopped(should_stop):
+            return
+        if piece is None:
+            break
+        pending.extend(piece)
+        while len(pending) >= size:
+            if _stopped(should_stop):
+                return
+            block = bytes(pending[:size])
+            del pending[:size]
+            yield block
+    if _stopped(should_stop):
+        return
+    if len(pending) % 2:
+        raise ValueError("PCM 尾部存在半个 int16 采样")
+    if pending:
+        yield bytes(pending)
+
+
+def _close_chunks(chunks: Iterator[bytes]) -> None:
+    close = getattr(chunks, "close", None)
+    if close is not None:
+        close()
+
+
+def _close_playback(stream: object, chunks: Iterator[bytes], complete: bool,
+                    should_stop: Callable[[], bool] | None) -> bool:
+    finished = False
+    try:
+        _close_chunks(chunks)
+        if complete and not _stopped(should_stop):
+            stream.stop(ignore_errors=False)
+            finished = not _stopped(should_stop)
+        return finished
+    finally:
+        if stream is not None:
+            try:
+                if not finished:
+                    stream.abort()
+            finally:
+                stream.close()
 
 
 def play(chunks: Iterator[bytes], cfg: Config,
-         should_stop: Callable[[], bool] | None = None) -> bool:
-    """把 PCM 流放出来。返回是否**放完**（被打断就是 False）。
+         should_stop: Callable[[], bool] | None = None,
+         reference: Callable[[bytes, int, float], None] | None = None) -> bool:
+    """播放 int16 单声道 PCM，空流或取消返回 False。
 
-    用 `RawOutputStream` 而不是 `OutputStream`：数据本来就是 int16 PCM，
-    再让 sounddevice 转一次是白花 CPU，还会在流边界上引入一个缓冲延迟。
+    可选 reference 仅报告 write 成功的约 10ms 块（末块可更短）、采样率和
+    提交后的单调时间；不是 DAC 时间，不表示声学对齐，也不是 AEC。
     """
-    import sounddevice as sd           # 只有真要出声时才导入
-
-    rate = int(cfg.get("tts.sample_rate", 24000))
-    with sd.RawOutputStream(samplerate=rate, channels=1, dtype="int16") as stream:
-        for piece in chunks:
-            if should_stop is not None and should_stop():
+    stream, started, complete = None, False, False
+    try:
+        try:
+            if _stopped(should_stop):
                 return False
-            stream.write(piece)
-    return True
+            import sounddevice as sd
+
+            rate = int(cfg.get("tts.sample_rate", 24000))
+            stream = sd.RawOutputStream(samplerate=rate, channels=1, dtype="int16")
+            stream.start()
+            for piece in _pcm_blocks(chunks, rate, should_stop):
+                if _stopped(should_stop):
+                    return False
+                started = True  # write 抛错也可能已部分提交，禁止降级重播。
+                stream.write(piece)
+                if reference is not None:
+                    reference(piece, rate, time.monotonic())
+                if _stopped(should_stop):
+                    return False
+            complete = started and not _stopped(should_stop)
+        finally:
+            finished = _close_playback(stream, chunks, complete, should_stop)
+        return finished
+    except Exception as exc:
+        if started:
+            raise PlaybackStartedError(str(exc)) from exc
+        raise
+
+
+def _wav_chunks(source: wave.Wave_read) -> Iterator[bytes]:
+    remaining = source.getnframes()
+    while remaining:
+        frames = min(remaining, 4096)
+        chunk = source.readframes(frames)
+        if len(chunk) != frames * 2:
+            raise ValueError("本地 WAV 音频截断")
+        remaining -= frames
+        yield chunk
+
+
+def play_wav(path: Path, cfg: Config,
+             should_stop: Callable[[], bool] | None = None,
+             reference: Callable[[bytes, int, float], None] | None = None) -> bool:
+    """校验本地 WAV，以文件实际采样率走公共 PCM 播放路径。"""
+    if _stopped(should_stop):
+        return False
+    with wave.open(str(path), "rb") as source:
+        if (source.getnchannels() != 1 or source.getsampwidth() != 2
+                or source.getcomptype() != "NONE" or source.getframerate() <= 0):
+            raise ValueError("本地 WAV 必须为单声道 16bit PCM")
+        actual = cfg.with_overrides(**{"tts.sample_rate": source.getframerate()})
+        return play(_wav_chunks(source), actual, should_stop, reference)
 
 
 def speak(text: str, cfg: Config, should_stop: Callable[[], bool] | None = None) -> bool:

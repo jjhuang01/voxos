@@ -333,6 +333,31 @@ def test_pill_has_a_mute_button_and_a_listen_switch():
     assert 'id="said"' in html and 'id="replied"' in html
 
 
+def test_pill_has_a_dialogue_mode_switch_with_three_notches():
+    """「能对话、且能关」必须是状态页上的一个开关，不能只躺在设置页深处。
+
+    三档都要在页面上，并且走的是**已有的** `/api/settings`——为它单开一条通道，
+    等于让「保存配置」有两套写入口，迟早有一套不校验。
+    """
+    html = (REPO / "web" / "pill.html").read_text(encoding="utf-8")
+    assert 'id="modes"' in html and 'id="mode-row"' in html
+    for mode in ("off", "assistant", "chat"):
+        assert f'data-mode="{mode}"' in html, mode
+    assert "/api/settings" in html and "dialogue.mode" in html
+
+
+def test_status_tells_the_pill_which_dialogue_mode_is_on(cfg, bus):
+    """页面不能自己猜当前模式：状态接口得说，否则刷新一次就回落到默认值。"""
+    from voxos import dialogue
+    from voxos.main import Runtime, _status
+
+    runtime = Runtime(cfg, bus)
+    runtime.cfg = cfg.with_overrides(**{"dialogue.mode": "chat"})
+
+    assert _status(runtime, None)["dialogue"] == "chat"
+    assert dialogue.mode(runtime.cfg) == "chat"
+
+
 def test_page_is_read_from_disk_once_until_it_changes(server, monkeypatch):
     """#9：每次请求都读盘返回 HTML 曾经是热路径上的浪费。
 

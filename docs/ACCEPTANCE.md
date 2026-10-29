@@ -1,9 +1,49 @@
 # 验收报告（ACCEPTANCE）
 
-> 本文所有数字均由 `scripts/verify.py` 实测产生，不是估算值。
-> 原始数据：`docs/acceptance.json`｜可视化：`docs/ACCEPTANCE.html`｜复现：`make verify`
+> 下方历史指标来自此前验收；本节是 0.1.38 的新增验证，不能沿用旧版全绿结论。
+> 历史原始数据：`docs/acceptance.json`｜可视化：`docs/ACCEPTANCE.html`｜复现：`make verify`
 
-**结论：17 项通过，2 项未达标（声纹 FAR 标定边界 / 中英混说术语召回），均已显式豁免至 2027-03-31。**
+## 0.1.38 源码（2026-10-29）
+
+**当前收集：540 项测试。当前全量结果：BLOCKED（单进程 `make test`）；按文件隔离复跑：538 passed / 2 skipped / 0 failed。**
+阻断原因：运行时就绪脚本给每个 shell 调用装了一条「安全删除」通道，同一次调用内累计第 50 次
+删除就会触发 `SAFE_DELETE_BULK_CONFIRM_REQUIRED` 并 `SystemExit(1)`——被杀的是**当时正在删文件的
+那个进程**，其后夹具连带报错（不是用例断言失败）。用户确认后仍被拦截，未绕过。
+所以「一个进程跑 25 个文件」这种循环必然在第 14 个文件前后被掐断；改成**每个测试文件一次独立调用**
+复跑（这也是上表数字的取法），保护照样生效、不跳用例、不改删除方式：
+25 个文件全部跑完，538 passed、2 skipped（需 239MB 识别模型与真实语音的两项按设计跳过），0 failed。
+必须说明：按文件隔离**不等于** `make test` 单进程一次跑完，后者仍受环境限制，
+**不得记成 `make test` 全绿**；`make verify` 内部会重跑 pytest 并清理目录，
+本轮未执行，历史基线未被替换。
+
+**已知阻断下发布**：0.1.38 是在上面这条环境阻断仍然存在的情况下发出去的
+（用户明确要求上机），不是「阻断解除后发版」。已打标签 `v0.1.38`、
+已覆盖安装 pipx 与 `/Applications/VoxOS.app`；安装自检见文末「安装覆盖」。
+
+独立无清理验证：
+- 插话 5 项内存断言通过；smart-turn 无效输入/输出 2 项通过。
+- 真实模型 SHA256 与清单相同，实际推理概率 0.96472；只证明可运行，不是准确率。
+- say 静默生成 24kHz/mono/int16、65848 帧；播放完成/取消/异常/空流 4 组内存验证通过。
+- 本机 VPIO 可由 AudioToolbox 直接枚举，全程未启动设备。
+- SpeexDSP 离线消融：正确参考回声区 ERLE 34.64dB，零参考 0.29dB；模拟双讲近端误差
+  SNR 8.54dB vs -5.04dB。固定种子 371、16kHz/12s、线性两径回声，非真人/真实房间验收。
+- 演示曾发现 smart-turn 将他人半句与下一条本人指令合并；已增加非本人延长等待前的拒绝检查，
+  同一份现有语料复验，文本与 smart 两后端均恢复为 2 条接受、1 条拒绝。
+  默认模型 demo 同样完成日志与只读巡检两条快通道、拒绝他人一条（615 块）。
+- 另补验证：面罩模式按 AGC 前电平恢复、清理 OSError 不抹掉已播放结果、播放 stop 显式报错。
+- 重说等待上限：底噪高于安静门限时不再无限等待，超时恢复收音并提示残留回声可能混入开头。
+- 对话模式与提示通道（本轮新增，只证明接线与策略，不代表回答质量）：
+  - 真起一次界面服务：页面含「对话」三档控件；`/api/status` 报 `dialogue=assistant`；
+    保存 `dialogue.mode=chat` 后立即生效且 TOML 注释原样保留；写非法值返回 400
+    「只能取 off / assistant / chat」，文件未被写坏。截图走查过窄布局，无截断/重叠。
+  - `voxos cue "…"` 真的落进投递箱并被守护进程取走；与 `/api/cue` 共用同一条
+    降噪与播报路径（`tests/test_cuebox.py` 用同一断言钉住），静音时段返回
+    「静音时段」而不是静默丢弃。
+  - 保存设置不会清零已发的提示配额（guard 挂在 Runtime 上，重载只换门限）。
+  - **未做**：真人/主观的「聊得像不像人」评价、长对话的上下文遗忘、模型在 chat 模式下
+    是否真的少调工具——这些要接真实模型跑，不能靠单测声明。
+
+以下是**历史基线：17 项通过，2 项未达标**（声纹 FAR / 中英混说），不是本轮发布验收结论。
 
 生成时间：2026-10-28｜环境：macOS (darwin) / Python 3.13.12 / numpy 2.5.4 / sherpa-onnx 2.0.1
 
@@ -138,32 +178,35 @@ FRR = FAR = 0 的点，说明后端分得开，差的只是「一个阈值服务
 
 | 模块 | 行数 | 职责 |
 | :--- | ---: | :--- |
-| `main.py` | 1567 | CLI 编排 / 守护循环 / 确认闸门 / 监听总开关 / 胶囊窗口 / 定时任务线程 / `llm`·`prompts`·`schedule` 子命令 |
-| `audio.py` | 989 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
+| `main.py` | 1753 | CLI 编排 / 守护循环 / 确认闸门 / 监听总开关 / 胶囊窗口 / 定时任务线程 / 慢动作确认 / 提示投递 / `llm`·`prompts`·`schedule`·`cue` 子命令 |
+| `audio.py` | 972 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
+| `core.py` | 606 | 快慢双通道路由 / 多意图切分 / 闲聊 / LLM 客户端（网关信封·渠道私有字段） |
 | `tools.py` | 581 | 18 个原子工具（含 `run_command` / `open_path` / `send_message` / `schedule_task`） |
-| `core.py` | 591 | 快慢双通道路由 / 多意图切分 / 闲聊 / LLM 客户端（网关信封·渠道私有字段） |
-| `ui.py` | 488 | 状态总线 / SSE / Earcon / 本地接口 |
-| `settings.py` | 368 | 字段模式 / 范围校验 / 保留注释的 TOML 写回 / 撤销 |
-| `safety.py` | 351 | 红线网关 / 快照 / 执行器 / 审计 |
+| `ui.py` | 504 | 状态总线 / SSE / Earcon / 本地接口 |
 | `dsp.py` | 412 | 纯函数信号处理（零 I/O，可离线测） |
-| `mel.py` | 129 | Whisper log-mel 特征（80×800），移植自 pipecat/transformers，给 smart-turn 喂输入 |
-| `turn.py` | 122 | 语义判停：smart-turn v3.2 音频判停，缺模型时退回文本尾词 |
+| `settings.py` | 375 | 字段模式 / 范围校验 / 保留注释的 TOML 写回 / 撤销 |
+| `safety.py` | 351 | 红线网关 / 快照 / 执行器 / 审计 |
+| `tts.py` | 304 | 云端合成、WAV 校验、公共 PCM 播放和可选参考回调（非 AEC） |
+| `models.py` | 275 | 模型下载 / 校验 / 原子替换（`voxos models`） |
 | `config.py` | 270 | TOML + 环境变量 + 资源根/数据根分离 + 密钥文件 |
-| `corpus.py` | 224 | 验收语料生成 |
 | `stream.py` | 266 | 流式识别：窗口字幕（无新模型）/ sherpa 真流式，字幕与文本判停共用一次解码 |
+| `corpus.py` | 224 | 验收语料生成 |
+| `sandbox.py` | 201 | 命令沙箱：抄 codex 的 seatbelt 三档（`read-only` / `workspace-write` / `danger-full-access`） |
+| `registry.py` | 191 | 工具契约 / `@tool` 自省 / 注册表 |
+| `scheduler.py` | 154 | 定时任务：落 JSON + 5 秒轮询线程，存那句话本身 |
 | `lessons.py` | 135 | 抗体库：症状→修法、从时间线数出最该修的、没听懂的话术 |
 | `timeline.py` | 133 | 会话时间线：说→意图→动作→结果，含被丢弃的回合 |
-| `registry.py` | 191 | 工具契约 / `@tool` 自省 / 注册表 |
-| `models.py` | 244 | 模型下载 / 校验 / 原子替换（`voxos models`） |
-| `scheduler.py` | 154 | 定时任务：落 JSON + 5 秒轮询线程，存那句话本身 |
-| `prompts.py` | 123 | 内置提示词系统：三层来源 / 角色叠加 / 按 mtime 热更新 |
-| `sandbox.py` | 201 | 命令沙箱：抄 codex 的 seatbelt 三档（`read-only` / `workspace-write` / `danger-full-access`） |
-| `tts.py` | 178 | 云端语音合成（豆包 2.0 单向流式）：文本 → PCM 流，不碰播放设备 |
+| `prompts.py` | 132 | 内置提示词系统：三层来源 / 角色叠加 / 对话模式段 / 按 mtime 热更新 |
+| `mel.py` | 129 | Whisper log-mel 特征（80×800），移植自 pipecat/transformers，给 smart-turn 喂输入 |
+| `turn.py` | 125 | 语义判停：smart-turn v3.2 音频判停，缺模型时退回文本尾词 |
+| `dialogue.py` | 123 | 对话策略（零 I/O）：模式、慢动作确认语、播报文本整形与截断 |
+| `cue.py` | 110 | 提示降噪：静音时段 / 去重 / 每小时上限 / 最小间隔，只提醒不执行 |
+| `cuebox.py` | 88 | 提示的文件投递箱：原子写入 / 取过即删 / 过期丢弃，给脚本一条不碰令牌的入口 |
 | `messaging.py` | 91 | 发消息：微信没有 AppleScript 字典，只能生成 System Events 按键脚本 |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **7815** | 18 个工具 / 10 条快通道 / 421 项测试 |
+| **合计** | **8512** | 18 个工具 / 10 条快通道 / 540 项测试（全量受阻） |
 
-- 最长函数 **40 行**（`src/voxos/core.py:dispatch`），预算 40 行，无超限函数。
+- 最长函数 **39 行**（`scripts/verify.py:measure_stt`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；
   `audio.py` 的 13 个类全是可替换后端，各自只有一个职责。
 - 核心链路（registry/safety/core/config）**零第三方依赖**；numpy 仅用于音频。
