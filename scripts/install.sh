@@ -133,7 +133,7 @@ cat <<EOF
 下一步
   voxos models --no-asr     # 28MB：声纹 + VAD，够跑核心链路
   voxos models              # 267MB：再加 SenseVoice，本地真识别
-  voxos enroll --record 3   # 录 3 遍声纹
+  voxos enroll              # 10 秒说 2~3 句（句间停半秒）
   voxos run                 # 守护进程 + 胶囊
 
 升级：重跑这条命令即可（依赖会跟着重放，不会丢）

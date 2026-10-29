@@ -86,7 +86,7 @@ if not utterance.accepted:
 ```python
 SYMPTOMS = {
     "声纹不匹配": ("档案和麦克风对不上，或只录了 1 句",
-                   "voxos enroll --record 3   # 录 3 句取均值"),
+                   "voxos enroll   # 10 秒说 2~3 句，3 句取均值才有余量"),
     "太短":      ("人声没到 min_speech_ms，被当咳嗽放过去了", "..."),
     "空转写":    ("识别没出字：麦克风静音、增益太低", "..."),
     ...

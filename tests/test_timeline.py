@@ -190,3 +190,22 @@ def test_note_dropped_keeps_the_sentence_and_the_reason(tmp_path: Path):
     assert row["score"] == 0.74
     assert row["audio_ms"] == 1400
     assert row["reason"] == "声纹不匹配，已丢弃"
+
+
+def test_enroll_advice_suggests_a_duration_that_can_hold_three_sentences():
+    """抗体库给的修法必须**照做就有效**。
+
+    `voxos enroll --record N` 的 `N` 是**秒数**不是句数（默认 10 秒）。
+    写 `--record 3` 只录 3 秒，说不出 2~3 句、切不出多段，录完还是 1 个
+    样本——用户照着做一遍问题没解决，还白花一次信任。这比不给建议更糟。
+    """
+    import re
+
+    from voxos.main import _voiceprint_note
+
+    texts = [advice for _, advice in lessons.SYMPTOMS.values()]
+    texts.append(_voiceprint_note(_cfg()))          # 未录入时的提示
+
+    for text in texts:
+        for seconds in re.findall(r"voxos enroll[^\n]*?--record\s+(\d+)", text):
+            assert int(seconds) >= 6, f"建议的录音时长切不出 2 句：{text}"

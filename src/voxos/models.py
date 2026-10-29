@@ -199,7 +199,7 @@ def _report(failed: list[str], skipped: list[str], base: Path, proxy: str | None
         print(f"\n· 可选模型未下载：{', '.join(skipped)}")
         print("  不影响核心功能：识别会退回脚本回放，判停会退回文本尾词。")
     if not failed:
-        print(f"\n完成，模型在 {base}。下一步：voxos enroll --record 3 && voxos run")
+        print(f"\n完成，模型在 {base}。下一步：voxos enroll（10 秒说 2~3 句）&& voxos run")
         return
     print(f"\n⚠️ 下载失败：{', '.join(failed)}")
     print("  可手动下载后放入上述目录；缺失时系统会自动降级（能量 VAD + 频谱声纹），")

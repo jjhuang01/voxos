@@ -29,6 +29,23 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 - 代码度量表 `timeline.py` 130 → 133，合计 7391 → 7394，测试 385 → 386 项。
 - CHANGELOG 0.1.31 段里写「四种结局」但表里是五行，改为「五种结局」。
 
+### 修正：建议的录入命令根本录不出 3 句
+
+`voxos enroll --record N` 的 `N` 是**秒数**，不是句数（默认 10 秒）。而
+0.1.31 里凡是提到录入的地方都写成了 `voxos enroll --record 3`——3 秒只够说
+**一句**，`_record_segments` 切不出 2~3 段，录完还是 1 个样本。
+
+这比不给建议更糟：用户照着做一遍，问题没解决，还白花一次信任。胶囊上的
+「录入声纹」按钮一直用的是 10 秒，说明正确时长从来没变过，错的只是文案。
+
+统一改成 `voxos enroll`（默认 10 秒，期间说 2~3 句、句间停半秒），涉及
+`main.py` 三处提示、`models.py` 下载完成提示、`scripts/install.sh`、`README.md`、
+`docs/OBSERVABILITY.md`。
+
+`test_enroll_advice_suggests_a_duration_that_can_hold_three_sentences` 从
+`SYMPTOMS` 和 `_voiceprint_note` 里抽出所有 `voxos enroll ... --record N`，
+断言 `N >= 6`——防止再写一个「照做也无效」的修法。
+
 ### 补上核心路径的回归测试
 
 `note_dropped()` 是这一版修复的核心（丢弃的句子要留下「说了什么 + 为什么丢」），
@@ -58,7 +75,7 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 
 修法分两层：
 - `doctor` 的「声纹档案」现在报**样本数**，只有 1 个时直接写
-  「← 阈值边缘，建议重录：voxos enroll --record 3」。
+  「← 阈值边缘，建议重录：voxos enroll（10 秒说 2~3 句）」。
 - 连续 3 句被声纹拒，胶囊提示一次。单次拒绝是正常行为（屋里别人说话就该被拒），
   每句都弹提示会把胶囊变成报警器——但连续 3 句就是「麦克风变了」的信号。
 
@@ -109,7 +126,7 @@ voxos log --limit 100
 
 当前最该修的：
     1× 声纹不匹配
-       → voxos enroll --record 3   # 录 3 句取均值，单句在阈值边缘会时通时不通
+       → voxos enroll   # 10 秒说 2~3 句，3 句取均值才有余量
        例：请打开微信
 ```
 
@@ -129,7 +146,7 @@ voxos log --limit 100
   会把「随便聊两句」记成「执行了某个动作」。改成看 `tool` 空不空。
 - **`timeline.Turn.line()` 对打字入口显示「声纹0.00 / 0ms」**：让人以为声纹坏了。
 
-测试 387 项（385 passed + 2 skipped）。
+测试 388 项（386 passed + 2 skipped）。
 
 ## [0.1.30] - 2026-10-30
 

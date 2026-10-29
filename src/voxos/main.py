@@ -200,7 +200,7 @@ def _hint_rejection(runtime: Runtime, utterance: object) -> None:
     if _REJECT["voice"] >= 3 and not _REJECT["hinted"]:
         _REJECT["hinted"] = True
         runtime.bus.emit("warn", "声纹连续拒绝",
-                         "连续 3 句没通过声纹，可能是麦克风变了：voxos enroll --record 3")
+                         "连续 3 句没通过声纹，可能是麦克风变了：voxos enroll（10 秒说 2~3 句）")
 
 
 # ------------------------------------------------------------------ 隐式上下文
@@ -488,7 +488,7 @@ def _run_forever(cfg: Config) -> int:
     _, threshold, kind = audio.make_embedder(cfg)
     print(f"声纹后端={kind} 阈值={threshold} 识别={_hotword_note(cfg, hotwords)}", flush=True)
     if not lock.profiles:
-        print("首次使用：在胶囊面板里点「录入声纹」（3 秒），或运行 voxos enroll --record 3")
+        print("首次使用：在胶囊面板里点「录入声纹」，或运行 voxos enroll（10 秒说 2~3 句）")
         runtime.bus.emit("onboard", "请先录入声纹", "点胶囊 → 录入声纹")
         try:
             enrolled.wait()
@@ -1196,7 +1196,7 @@ def _voiceprint_note(cfg: Config) -> str:
     """
     path = cfg.path("audio.voiceprint_profiles")
     if not path.exists():
-        return "未录入（voxos enroll --record 3）"
+        return "未录入（voxos enroll，10 秒说 2~3 句）"
     try:
         import numpy as np  # noqa: PLC0415
 
@@ -1206,7 +1206,7 @@ def _voiceprint_note(cfg: Config) -> str:
         return f"已录入（读不出来：{exc}）"
     low = min(counts) if counts else 0
     if low < 2:
-        return f"已录入，但只有 {low} 个样本 ← 阈值边缘，建议重录：voxos enroll --record 3"
+        return f"已录入，但只有 {low} 个样本 ← 阈值边缘，建议重录：voxos enroll（10 秒说 2~3 句）"
     return f"已录入（{low} 个样本取均值）"
 
 

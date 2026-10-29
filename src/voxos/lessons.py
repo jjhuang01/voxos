@@ -32,7 +32,7 @@ __all__ = ["SYMPTOMS", "Finding", "diagnose", "unmatched", "advice_for"]
 SYMPTOMS: dict[str, tuple[str, str]] = {
     "声纹不匹配": (
         "档案里的声纹和现在这个麦克风对不上，或者只录了 1 句（同人换句话就可能掉到阈值以下）",
-        "voxos enroll --record 3   # 录 3 句取均值，单句在阈值边缘会时通时不通",
+        "voxos enroll   # 默认录 10 秒，期间说 2~3 句、句间停半秒；3 句取均值才有余量",
     ),
     "太短": (
         "人声时长没到 audio.min_speech_ms（默认 200ms），被当成咳嗽放过去了",
