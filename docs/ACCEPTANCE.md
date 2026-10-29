@@ -18,7 +18,20 @@
 
 **已知阻断下发布**：0.1.38 是在上面这条环境阻断仍然存在的情况下发出去的
 （用户明确要求上机），不是「阻断解除后发版」。已打标签 `v0.1.38`、
-已覆盖安装 pipx 与 `/Applications/VoxOS.app`；安装自检见文末「安装覆盖」。
+已覆盖安装 pipx 与 `/Applications/VoxOS.app`。
+
+安装覆盖（都是这台机器上真跑出来的，不是「应该可以」）：
+- `python -m build --no-isolation` → `dist/voxos-0.1.38-py3-none-any.whl` / `.tar.gz`；
+- `bash scripts/install_smoke.sh <whl>` → **6/6 通过**（临时 HOME + 临时 venv）：
+  `--version` 报 0.1.38；`doctor` 说得清配置在哪；首次启动 seed 出用户配置；
+  资源根与数据根分家；`make_stt` 的相对 `model_dir` 按数据根解析；
+  改配置后重启仍在，且安装目录那份一个字节没动；
+- `pipx install --force` → `voxos 0.1.38`（Python 3.14.7），`voxos --version` 一致；
+- `bash scripts/build_app.sh --install` → `/Applications/VoxOS.app`，
+  `Info.plist` 的 `CFBundleShortVersionString` = 0.1.38；
+- `voxos cue "…"` 真的落进 `~/.voxos/cues/` 并被取走（自检文件已清理）。
+- 装好的 CLI 里 `onnxruntime` / `sounddevice` 缺失、判停退回文本判停、输入设备不可用——
+  这是 pipx 只装基础依赖的既有状态，不是本版回归；要麦克风仍按 `doctor` 提示 inject。
 
 独立无清理验证：
 - 插话 5 项内存断言通过；smart-turn 无效输入/输出 2 项通过。
