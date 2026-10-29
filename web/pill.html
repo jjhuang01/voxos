@@ -613,7 +613,9 @@ const OUTCOME = {dropped:'丢弃', missed:'没懂', acted:'执行', failed:'失�
 
 function rowHtml(row) {
   const outcome = row.outcome || 'acted';
-  const time = String(row.ts || '').slice(11, 19);
+  /* 按 'T' 切而不是固定下标：后端补的是 ISO 全格式，但手工构造 / 反序列化
+     的记录可能只有 `13:46:55`，slice(11,19) 会切出空字符串，时间列整列消失。 */
+  const time = String(row.ts || '').split('T').pop().slice(0, 8);
   const said = row.text || '（没识别出字）';
   /* 中间那行只放「能定位问题」的信息：调了哪个工具、识别花了多久、声纹多少。
      声纹这项最有用——它掉到 0.7x 的时候用户才知道「不是它不听话，是没认出来」。 */

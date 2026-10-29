@@ -20,6 +20,10 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 改成按 `T` 切：`self.ts.rsplit("T", 1)[-1][:8]`。两种格式都对。
 `test_timeline_line_shows_the_clock_for_both_timestamp_shapes` 钉住。
 
+**胶囊页面（`web/pill.html`）里有同一处写法**（`String(row.ts).slice(11, 19)`），
+一起改成 `split('T').pop().slice(0, 8)`。只修 Python 会得到「`voxos log` 有时间、
+胶囊没时间」这种更难查的不一致。
+
 ### 文档
 
 - 代码度量表 `timeline.py` 130 → 133，合计 7391 → 7394，测试 385 → 386 项。
