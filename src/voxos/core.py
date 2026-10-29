@@ -439,8 +439,19 @@ def _seed_messages(cfg: Config, context: dict[str, Any], text: str) -> list[dict
 
     历史必须排在 system **之后**：有的网关按消息顺序算前缀缓存，放前面会让每一轮
     都全量重算，白花时间和钱。
+
+    `previous` 单独成一条 system 消息，**不拼进 user 那句**：拼进去模型很可能把
+    上一句的指令再执行一遍（「帮我打开微信」+「然后发个消息」会开两次微信）。
+    这里明确要求它只用来补全省略的主语/宾语。
     """
-    return [_system_message(cfg, context), *_HISTORY, {"role": "user", "content": text}]
+    messages = [_system_message(cfg, context), *_HISTORY]
+    previous = str(context.get("previous") or "").strip()
+    if previous:
+        messages.append({"role": "system", "content": (
+            f"用户上一句说的是「{previous}」。这一句可能是接着说的，缺主语或宾语时"
+            f"参考上一句理解；但**不要重复执行上一句已经做过的事**。")})
+    messages.append({"role": "user", "content": text})
+    return messages
 
 
 def _llm_route(

@@ -570,6 +570,7 @@ class AudioPipeline:
     vad: object = field(default_factory=dsp.EnergyVad)
     on_event: Callable[[str, str, str], None] = lambda state, label, detail: None
     on_partial: Callable[[str], None] | None = None
+    on_barge_in: Callable[[], None] | None = None
     echo: dsp.EchoGate = field(default_factory=dsp.EchoGate)
     partial_interval_ms: float = 400.0
     turn_detector: Any = None        # 显式注入（测试用）；None 时按配置造
@@ -604,6 +605,8 @@ class AudioPipeline:
         self._text_ms = 0.0        # 上次解码时的句内时长
         self._buf_ms = 0.0         # 本句已攒多长
         self._shown = ""           # 上次推给界面的字幕，重复的不推
+        self._barge: list[np.ndarray] = []   # TTS 期间攒下的「可能是插话」的音频
+        self._barge_ms = 0.0
 
     def reset(self) -> None:
         """设备断流后清掉句级状态：旧缓冲、端点状态和 VAD 上下文都不能跨断流。"""
@@ -646,10 +649,10 @@ class AudioPipeline:
         self._clear_sentence()
         for raw in source:
             chunk = self._preprocess(raw)
-            if not self.echo.allow_chunk(dsp.dbfs(chunk)):
-                # 半双工：这一段按静音处理，但**不能清空已有缓冲**。
-                # 清空会把「用户喊停之后的那一下停顿」连同喊停本身一起丢掉。
-                chunk = np.zeros_like(chunk)
+            if self.echo.muted:
+                chunk = self._during_playback(chunk)
+            else:
+                self._barge, self._barge_ms = [], 0.0
             state = self._ep.push(bool(self.vad.is_speech(chunk)), chunk.size)  # type: ignore[attr-defined]
             if state == "idle":
                 self._keep_prefix(chunk)
@@ -733,6 +736,38 @@ class AudioPipeline:
             self._shown = text
             self.on_partial(text)
 
+    def _verify(self, audio: np.ndarray) -> tuple[bool, float, float]:
+        """声纹验证，返回 (是否本人, 最高相似度, 像本人的窗口占比)。
+
+        **分段而不是整段**：整段一个嵌入会把「我说 + 别人插一句」平均成一个谁也
+        不像的音色，结果是本人被拒、指令丢掉。判据换成「多数窗口像不像」。
+
+        `SpeakerLock` 没实现 `verify_segments` 时（测试替身、将来的别的后端）
+        退回整段验证，占比按「通过=1.0 / 拒绝=0.0」处理，语义保持一致。
+        """
+        segmented = getattr(self.lock, "verify_segments", None)
+        if callable(segmented):
+            return segmented(audio)
+        ok, score = self.lock.verify(audio)
+        return ok, score, 1.0 if ok else 0.0
+
+    def _verify_owner(self, audio: np.ndarray, audio_ms: float) -> tuple[Utterance | None, float]:
+        """声纹校验。返回 (被拒的那条记录 或 None, 相似度)。
+
+        相似度要一起返回：后面几处丢弃（识别失败、空转写、回声门）都要把它带进
+        时间线，否则「为什么没反应」又少一个维度。
+
+        拒绝原因要能区分「不是本人」和「混了别人的话」：后者多半是屋里有人
+        插嘴，用户的重试方式完全不同（重说 vs 让别人先说完）。
+        """
+        ok, score, ratio = self._verify(audio)
+        if ok:
+            return None, score
+        reason = "声纹不匹配，已丢弃"
+        if 0.0 < ratio < 0.5:
+            reason = f"声纹不匹配（只有 {ratio:.0%} 的片段像本人，可能混进了别人的话）"
+        return self._drop(audio_ms, score, reason), score
+
     def _preprocess(self, chunk: np.ndarray) -> np.ndarray:
         audio = dsp.as_float(chunk)
         self.echo.tick(audio.size / dsp.SR * 1000.0)
@@ -740,6 +775,42 @@ class AudioPipeline:
             audio = dsp.agc(dsp.high_shelf(audio), float(self.cfg.get("audio.agc_target_dbfs", -3.0)))
         self.stats["chunks"] += 1
         return audio
+
+    def _during_playback(self, chunk: np.ndarray) -> np.ndarray:
+        """播报期间的音频：攒够时长的「响音频」判一次是不是用户插话。
+
+        这一段最终仍按静音走（返回全零），因为**不能一边播报一边把混着回声的
+        音频送去识别**——转写出来会是「TTS 内容 + 用户的话」粘在一起。但
+        「用户想打断」这件事必须被听见，所以先攒着判一次。
+
+        攒下来的这 500ms 不塞回缓冲：塞回去要伪造 VAD 状态，出错时更难查。
+        代价是用户插话后得把话说完整一遍——但比「说了完全没反应」好得多。
+        """
+        if dsp.dbfs(chunk) > self.echo.gate_dbfs:
+            self._barge.append(chunk)
+            self._barge_ms += chunk.size / dsp.SR * 1000.0
+            if self._barge_ms >= self.echo.interrupt_ms:
+                self._fire_barge_in()
+        return np.zeros_like(chunk)
+
+    def _fire_barge_in(self) -> None:
+        """攒够时长后用**声纹**判：这是用户，还是我们自己的回声。
+
+        能量分不开——实测 TTS 回声的 p95 约 -25.8 dBFS，和正常说话只差几 dB，
+        门限卡在哪个值都会两头不讨好。音色分得开：TTS 是合成音色，和本人模板
+        的相似度远低于阈值。这一步只在攒够 500ms 后跑一次，成本可忽略。
+        """
+        if not self.echo.speaking:
+            return                              # 已经打断过了，别重复触发
+        audio = np.concatenate(self._barge) if self._barge else np.zeros(0, dtype=np.float32)
+        self._barge, self._barge_ms = [], 0.0
+        ok, score = self.lock.verify(audio)
+        if not ok:
+            return                              # 自己的回声：继续播报
+        self.echo.tts_end()
+        self.on_event("warn", "打断", f"检测到插话（声纹 {score:.2f}），已停止播报")
+        if self.on_barge_in is not None:
+            self.on_barge_in()
 
     def _maybe_finalize(self, buffer: list[np.ndarray], state: str,
                         last_partial_ms: float) -> Utterance | None:
@@ -823,9 +894,9 @@ class AudioPipeline:
         # 缓冲一定比人声长 300ms，一声咳嗽就能凑过 200ms 的门槛。
         if self._ep.speech_ms < float(self.cfg.get("audio.min_speech_ms", 200)):
             return self._drop(audio_ms, 0.0, "太短，已丢弃")
-        ok, score = self.lock.verify(audio)
-        if not ok:
-            return self._drop(audio_ms, score, "声纹不匹配，已丢弃")
+        rejected, score = self._verify_owner(audio, audio_ms)
+        if rejected is not None:
+            return rejected
         try:
             if self.streamer is not None:
                 text = self.streamer.finish(audio)

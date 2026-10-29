@@ -1,4 +1,4 @@
-"""打断词：播报期间喊「停」必须真的停下来，而不是被当成一条新指令。"""
+"""播报期间被打断：本人持续说话就该停下来，而不是要求用户先学会一句咒语。"""
 
 from __future__ import annotations
 
@@ -22,12 +22,8 @@ def _loud(ms: float = 900, amplitude: float = 0.6) -> np.ndarray:
     return (tone * amplitude).astype(np.float32)
 
 
-def _pipeline(cfg) -> audio.AudioPipeline:
-    return audio.AudioPipeline(cfg=cfg, stt=_StopStt(), lock=_AlwaysOn(), vad=dsp.EnergyVad())
-
-
 class _AlwaysOn:
-    """声纹桩：永远认为是本人，把注意力集中在打断逻辑上。"""
+    """声纹桩：永远认为是本人。"""
 
     profiles = {"normal": np.ones(4, dtype=np.float32)}
 
@@ -35,20 +31,117 @@ class _AlwaysOn:
         return True, 0.99
 
 
-def test_loud_speech_passes_echo_gate_while_speaking(cfg):
-    """回声门不该把喊出来的「停」也一起丢掉。"""
+class _NeverMe:
+    """声纹桩：永远认为不是本人（模拟我们自己的 TTS 回声）。"""
+
+    profiles = {"normal": np.ones(4, dtype=np.float32)}
+
+    def verify(self, chunk: np.ndarray) -> tuple[bool, float]:
+        return False, 0.31
+
+
+def _pipeline(cfg, lock=None, on_barge_in=None) -> audio.AudioPipeline:
+    return audio.AudioPipeline(cfg=cfg, stt=_StopStt(), lock=lock or _AlwaysOn(),
+                               vad=dsp.EnergyVad(), on_barge_in=on_barge_in)
+
+
+def test_loud_audio_is_collected_only_while_muted(cfg):
+    """只有「播报中 + 够响」才值得攒起来做插话判断。"""
     gate = dsp.EchoGate()
+    assert gate.loud_enough(-12.0) is False      # 没在播报：正常收音，不用攒
     gate.tts_start()
-    assert gate.allow_chunk(-12.0) is True       # 用户喊得够响
-    assert gate.allow_chunk(-60.0) is False      # Agent 自己的尾音被丢掉
+    assert gate.loud_enough(-12.0) is True       # 播报中 + 够响：可能是用户插话
+    assert gate.loud_enough(-60.0) is False      # 播报中 + 太轻：自己的尾音
 
 
-def test_pipeline_yields_interrupt_utterance_during_tts(cfg):
-    pipeline = _pipeline(cfg)
+def test_pipeline_fires_barge_in_when_the_owner_speaks_over_tts(cfg):
+    """播报期间本人持续说话 → 触发打断回调。
+
+    旧链路要求「放行 → 识别 → 文本含打断词」三步都对，任何一步出错就静默：
+    用户说「等一下，我说的是另一个」，被静音门丢掉，感知是「我说话它不理我」。
+    新链路是「能量够 + 持续 interrupt_ms + 声纹像本人」，对齐 LiveKit 的
+    `min_interruption_duration`（默认 0.5s）——不看用户说了哪个词。
+    """
+    fired: list[bool] = []
+    pipeline = _pipeline(cfg, on_barge_in=lambda: fired.append(True))
     pipeline.echo.tts_start()
-    utterances = list(pipeline.run(audio.ArraySource(_loud())))
-    assert utterances, "播报期间的高能量语音应当进入管道"
-    assert pipeline.echo.is_interrupt(utterances[0].text)
+
+    list(pipeline.run(audio.ArraySource(_loud())))
+
+    assert fired, "播报期间本人持续说话应当触发打断"
+    assert not pipeline.echo.speaking, "触发打断后回声门应当关闭"
+
+
+def test_pipeline_ignores_its_own_echo(cfg):
+    """能量够但声纹不像本人 → 那是我们自己的回声，继续播报。
+
+    能量分不开两者（实测 TTS 回声 p95 约 -25.8 dBFS，和正常说话只差几 dB），
+    所以最终判定必须落在音色上：TTS 是合成音，和本人模板差得远。
+    """
+    fired: list[bool] = []
+    pipeline = _pipeline(cfg, lock=_NeverMe(), on_barge_in=lambda: fired.append(True))
+    pipeline.echo.tts_start()
+
+    list(pipeline.run(audio.ArraySource(_loud())))
+
+    assert not fired, "自己的回声不该触发打断"
+    assert pipeline.echo.speaking, "回声不该把播报关掉"
+
+
+def test_short_burst_does_not_interrupt(cfg):
+    """只有 200ms 的响声不打断——太短的多半是回声尖峰或关门声。"""
+    fired: list[bool] = []
+    pipeline = _pipeline(cfg, on_barge_in=lambda: fired.append(True))
+    pipeline.echo.tts_start()
+
+    list(pipeline.run(audio.ArraySource(_loud(ms=200))))
+
+    assert not fired
+
+
+def _fires(cfg, ms: float, lock=None, interrupt_ms: float | None = None) -> bool:
+    """喂一段 ms 毫秒的响声，返回是否触发打断。"""
+    gate = dsp.EchoGate() if interrupt_ms is None else dsp.EchoGate(interrupt_ms=interrupt_ms)
+    fired: list[bool] = []
+    pipeline = audio.AudioPipeline(cfg=cfg, stt=_StopStt(), lock=lock or _AlwaysOn(),
+                                   vad=dsp.EnergyVad(), echo=gate,
+                                   on_barge_in=lambda: fired.append(True))
+    gate.tts_start()
+    list(pipeline.run(audio.ArraySource(_loud(ms=ms))))
+    return bool(fired)
+
+
+def test_barge_in_waits_for_interrupt_ms_not_a_magic_number(cfg):
+    """时长消融：判决点就在 `interrupt_ms` 上，一个 chunk 之内。
+
+    实测（512 样本 = 32ms 一块，默认 500ms）：
+
+        时长   本人    自己的回声
+        100ms  False   False
+        300ms  False   False
+        500ms  True    False
+        700ms  True    False
+        900ms  True    False
+
+    所以「喊一句特定的话才算打断」那套被换掉了：只要**持续**说够时长就打断。
+    卡死在 500 而不是随便一个数，是因为它和 LiveKit 的
+    `min_interruption_duration` 默认值一致——短于此的多半是回声尖峰或关门声。
+    """
+    for ms in (100, 300, 400):
+        assert _fires(cfg, ms) is False, f"{ms}ms 不该打断"
+
+    for ms in (512, 700, 900):
+        assert _fires(cfg, ms) is True, f"{ms}ms 应当打断"
+
+
+def test_the_threshold_really_comes_from_the_config(cfg):
+    """把 `interrupt_ms` 调到 1200，900ms 就不该再打断——证明它不是在读魔法数。
+
+    没有这条，谁把配置里的 500 改成 100 也不会有测试失败；而 100ms 会把
+    「嗯」「啊」这种口头语全判成插话，播报被打断得七零八落。
+    """
+    assert _fires(cfg, 900) is True
+    assert _fires(cfg, 900, interrupt_ms=1200.0) is False
 
 
 def test_is_interrupt_matches_common_phrasings():

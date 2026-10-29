@@ -45,6 +45,10 @@ voiceprint_profiles = ".voxos/voiceprint_profiles.npz"
 mask_mode = false             # 静音面罩/低语补偿
 agc_target_dbfs = -3.0
 echo_decay_ms = 300           # TTS 结束后的混响消退期
+interrupt_ms = 500            # 播报中「人声持续多久」才算打断（对齐 LiveKit 的
+                              # min_interruption_duration）。不要求用户喊特定词：
+                              # 「等一下，我说的是另一个」也算。判定还要过声纹——
+                              # 自己的 TTS 回声能量够但音色不像本人，会被挡住。
 hotwords_path = "config/hotwords.txt"
 hotwords_generated = "config/hotwords.txt.generated"
 hotwords_max = 2000

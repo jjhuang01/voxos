@@ -16,6 +16,20 @@ import numpy as np
 SR = 16000
 _EPS = 1e-10
 
+# 一句话说完就想撤回时用的词。这是**整句匹配**（见 `bare_interrupt`），不是
+# 「句子里含这几个字」——「我要把服务器停下来」里也有「停」，那是一条指令。
+INTERRUPT_WORDS = ("停", "停一下", "算了", "取消", "别说了", "不用了")
+
+
+def bare_interrupt(text: str, words: tuple[str, ...] = INTERRUPT_WORDS) -> bool:
+    """整句就是一句撤回话，而不是「这句话里出现了『停』」。
+
+    标点、空格先去掉再比：「算了。」「停一下！」都算。反过来，
+    「我要把服务器停下来」不算——它不是要你闭嘴，是要你干活。
+    """
+    return re.sub(r"[\s，。！？、,.!?~～]", "", text or "") in words
+
+
 # 语义未完结尾词（PROMPTS_AND_ROUTING.md §6）
 UNFINISHED_TAILS = (
     "我要", "我要写", "写代码", "改代码", "加个", "做个", "修复", "重构", "然后", "接着",
@@ -170,11 +184,26 @@ class EndpointDetector:
 
 @dataclass
 class EchoGate:
-    """半双工回声门：TTS 期间及混响期内只放行「打断词 + 高能量」音频。"""
+    """回声门：TTS 期间判断「这段音频是不是用户插话」。
+
+    现在有两条判据，顺序很重要：
+
+    1. **能量**（`gate_dbfs`）：低于它一律当回声。实测 TTS 回声的 p95 约
+       -25.8 dBFS，所以 -25 这个门限只能挡住大部分回声，挡不住全部。
+    2. **持续时长**（`interrupt_ms`）：能量够且**连续够久**才算插话。这一条
+       对齐 LiveKit 的 `min_interruption_duration`（默认 0.5s）——业界不要求
+       用户喊特定词，而是看「人声持续了多久」。我们以前只认「停/算了/取消」，
+       用户说「等一下，我说的是另一个」会被整句丢掉，感知是「我说话它不理我」。
+
+    光靠能量分不开「用户说话」和「自己的回声」（两者只差几 dB），所以真正的
+    判定放在 `audio.AudioPipeline` 里：攒够时长的音频过一遍**声纹**，像本人才
+    算插话。TTS 是合成音色，和本人模板的相似度远低于阈值。
+    """
 
     decay_ms: float = 300.0
     gate_dbfs: float = -25.0
-    interrupt_words: tuple[str, ...] = ("停", "停一下", "算了", "取消", "别说了", "不用了")
+    interrupt_ms: float = 500.0
+    interrupt_words: tuple[str, ...] = INTERRUPT_WORDS
     speaking: bool = False
     _decay_left: float = 0.0
 
@@ -193,14 +222,18 @@ class EchoGate:
         return self.speaking or self._decay_left > 0.0
 
     def allow_chunk(self, level_dbfs: float) -> bool:
-        """未静音时全放行；静音期间只放行足够响的（用户喊“停”）。"""
+        """未静音时全放行；静音期间只放行足够响的（可能是用户插话）。"""
         return not self.muted or level_dbfs > self.gate_dbfs
 
     def allow_text(self, text: str) -> bool:
         return not self.muted or any(word in text for word in self.interrupt_words)
 
     def is_interrupt(self, text: str) -> bool:
-        return any(word in text for word in self.interrupt_words)
+        return bare_interrupt(text, self.interrupt_words)
+
+    def loud_enough(self, level_dbfs: float) -> bool:
+        """静音期间这块音频是否值得攒起来做插话判断（能量门）。"""
+        return self.muted and level_dbfs > self.gate_dbfs
 
 
 def spectral_features(x: np.ndarray, sr: int = SR, bands: int = 40) -> np.ndarray:
@@ -305,6 +338,37 @@ class SpeakerLock:
         current = self.embedder(audio)
         best = max(cosine(current, profile) for profile in self.profiles.values())
         return best >= self.threshold, round(best, 4)
+
+    def verify_segments(self, audio: np.ndarray, window_ms: float = 1500.0,
+                        min_ratio: float = 0.5) -> tuple[bool, float, float]:
+        """分段验证：返回 (是否本人, 最高相似度, 像本人的窗口占比)。
+
+        **为什么整段一个嵌入不够**：旁边有人插一句，整段的嵌入会变成「两个人
+        的音色平均」，谁也不像——结果本人被拒，指令丢掉。反过来，如果别人的
+        话占多数，又可能误过。
+
+        学术上的对应做法是 TS-VAD / Personal VAD：给定 speaker profile 逐帧
+        判断「目标说话人此刻在不在说」。这里用 CAM++ 逐窗口近似——粒度粗得多，
+        但同一个思路，而且不需要新模型。判据从「整段像不像」变成「多数窗口
+        像不像」：别人插一句不影响，别人说大半就拒。
+
+        短句切不出两个窗口时退回整段验证，行为与 `verify` 一致。
+        """
+        signal = as_float(audio)
+        if not self.profiles or signal.size < SR // 10:
+            return False, 0.0, 0.0
+        span = max(int(SR * window_ms / 1000.0), SR // 10)
+        windows = [signal[start:start + span] for start in range(0, signal.size, span)]
+        windows = [w for w in windows if w.size >= SR // 10]
+        if len(windows) < 2:                     # 太短：切不出对比，退回整段
+            ok, best = self.verify(signal)
+            return ok, best, 1.0 if ok else 0.0
+        scores = [max(cosine(self.embedder(w), profile) for profile in self.profiles.values())
+                  for w in windows]
+        best = max(scores)
+        ratio = sum(1 for score in scores if score >= self.threshold) / len(scores)
+        return (best >= self.threshold and ratio >= min_ratio,
+                round(float(best), 4), round(float(ratio), 3))
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

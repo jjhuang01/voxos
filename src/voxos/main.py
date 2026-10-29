@@ -105,6 +105,7 @@ class Runtime:
         self.executor = self._build()
         self.recent: deque[dict[str, object]] = deque(maxlen=8)
         self.started = time.time()
+        self._last_text = ""           # 上一句说的是什么（给「接续句」当上下文）
 
     def _build(self, lock: threading.Lock | None = None) -> core.Executor:
         executor = core.Executor(cfg=self.cfg, on_event=self.bus, confirm=self.gate.ask)
@@ -114,8 +115,47 @@ class Runtime:
         return executor
 
     def dispatch(self, text: str, context: dict[str, object] | None = None) -> core.DispatchResult:
-        return core.dispatch(text, executor=self.executor, cfg=self.cfg,
-                             context=context if context is not None else _context())
+        """派发一句话。**带上上一句**——端点判定会在停顿处切句，切完第二句就孤立了。
+
+        实测（端点消融）：停顿 600ms 且结尾不是未完词就会被切断，而人说话中途
+        停 600~800ms 很常见。切句本身不可怕，可怕的是切完之后「然后发个消息」
+        没有上文——快通道匹配不上，LLM 也不知道要发给谁。行业做法是两级端点
+        加语义判停模型（LiveKit 的 min/max_endpointing_delay、pipecat 的
+        smart-turn），模型我们暂时缺，先补一层上下文，让第二句至少能被读懂。
+        """
+        if self._is_withdrawal(text):          # 先判撤回：这句不需要任何上下文
+            return self._withdraw(text)
+        ctx: dict[str, object] = dict(context) if context is not None else _context()
+        if self._last_text:
+            ctx["previous"] = self._last_text
+        return core.dispatch(text, executor=self.executor, cfg=self.cfg, context=ctx)
+
+    def _is_withdrawal(self, text: str) -> bool:
+        """整句就是「算了 / 取消 / 不用了」，而且此刻没有播报可停。
+
+        有播报时由音频层直接停（`stop_speaking`），轮不到这里。能走到这里的
+        只有「答案早就念完了，人现在改主意」——以前这句会掉进「还没学会这句」
+        加一整段能力清单：用户想收回，收到的是一篇功能介绍。
+
+        先卡长度再导 dsp：dsp 会把 numpy 一起拖进来（实测 59ms），而
+        「算了」这种短句才可能是撤回，长句一律直接放行，不为它付这笔钱。
+        """
+        if len(text) > 12 or _TTS.get("owner") is not None:
+            return False
+        from . import dsp  # 局部导入：见上
+
+        return dsp.bare_interrupt(text)
+
+    def _withdraw(self, text: str) -> core.DispatchResult:
+        """撤回：挂着的确认当作**拒绝**（失败关闭），否则就应一声。
+
+        路由用 `chat` 而不是 `ignore`：`ignore` 那一支是不朗读的（常驻监听
+        下屋里闲聊太多，逐句念「还没学会这句」会变噪音），但「好」是回话，
+        用户需要听见一声确认；胶囊上也会显示「回话」而不是「没听懂」。
+        """
+        denied = self.gate.resolve(False)
+        return core.DispatchResult(route="chat", text=text,
+                                   reply="好，不做了" if denied else "好")
 
     def record(self, text: str, result: core.DispatchResult,
                utterance: object = None) -> None:
@@ -125,6 +165,7 @@ class Runtime:
         时间线是「昨天为什么没反应」的，必须落盘——用户问的正是后者。
         """
         _REJECT["voice"] = 0                   # 成功一次就重置连续拒绝计数
+        self._last_text = text                 # 下一句派发时当「上一句」用
         self.recent.appendleft({
             "ts": time.strftime("%H:%M:%S"), "text": text,
             "reply": result.reply or NO_ACTION,
@@ -623,7 +664,12 @@ def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[s
         cfg=cfg, stt=audio.make_stt(cfg, hotwords), lock=lock,
         vad=audio.make_vad(cfg), on_event=runtime.bus,
         on_partial=runtime.bus.emit_partial,
-        echo=dsp.EchoGate(decay_ms=float(cfg.get("audio.echo_decay_ms", 300))))
+        # 播报中被本人插话：立刻停念。判据是「人声持续 interrupt_ms + 声纹像本人」，
+        # 不是「用户喊了某个词」——后者要求用户先学会咒语，而真实场景里人说的是
+        # 「等一下，我说的是另一个」。对齐 LiveKit 的 min_interruption_duration。
+        on_barge_in=stop_speaking,
+        echo=dsp.EchoGate(decay_ms=float(cfg.get("audio.echo_decay_ms", 300)),
+                          interrupt_ms=float(cfg.get("audio.interrupt_ms", 500))))
     chunk = int(cfg.get("audio.chunk_size", 512))
     device = cfg.get("audio.input_device", "")
     source = audio.SelfHealingSource(lambda: audio.MicSource(chunk, device=device),

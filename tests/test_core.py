@@ -118,3 +118,101 @@ def test_dispatch_falls_back_when_llm_broken(cfg, executor):
     result = core.dispatch("我要写日志，模型挂了也要能记", executor=executor, cfg=broken)
     assert result.route == "fast"          # 快通道不受 LLM 影响
     assert "日志已记录" in result.reply
+
+
+def test_previous_utterance_reaches_the_llm_as_its_own_system_note(cfg):
+    """上一句要作为**独立的 system 说明**传下去，不能拼进这一句里。
+
+    端点判定会在停顿处切句（实测：停 600ms 且结尾不是未完词就切），切完第二句
+    就孤立了——「然后发个消息」没有上文，快通道匹配不上，LLM 也不知道发给谁。
+
+    但也不能把两句拼成一句派发：那样模型会把上一句的指令再执行一遍，
+    「帮我打开微信」+「然后发个消息」会开两次微信。所以这里必须是一条
+    明确写着「不要重复执行」的说明。
+    """
+    from voxos import core
+
+    messages = core._seed_messages(cfg, {"previous": "帮我打开微信"}, "然后发个消息")
+
+    notes = [m for m in messages if m["role"] == "system" and "帮我打开微信" in m["content"]]
+    assert len(notes) == 1, "上一句应当出现在一条 system 消息里"
+    assert "不要重复执行" in notes[0]["content"]
+    assert messages[-1] == {"role": "user", "content": "然后发个消息"}
+
+
+def test_no_previous_means_no_extra_message(cfg):
+    """没有上一句就别硬塞一条空说明——那会让模型每次都多读一段废话。"""
+    from voxos import core
+
+    plain = core._seed_messages(cfg, {}, "帮我打开微信")
+    with_previous = core._seed_messages(cfg, {"previous": "上一句"}, "帮我打开微信")
+
+    assert len(with_previous) == len(plain) + 1
+
+
+def test_runtime_carries_the_previous_sentence_into_the_next_dispatch(cfg):
+    """端到端：第一句记下来，第二句派发时它真的跟着进去了。
+
+    上一条只证明「给了 previous 就会用」。真正会坏的是**没人给**：
+    `Runtime.dispatch` 每句都是独立一次调用，没有任何地方记着上一句，
+    于是「我断断续续说」的第二句永远是孤立的。这里走
+    `record()` → `dispatch()` 两个真实入口，把接线钉住——
+    把 `_last_text` 那两行删掉，这条就会红。
+    """
+    from unittest.mock import patch
+
+    from voxos import core, ui
+    from voxos.main import Runtime
+
+    runtime = Runtime(cfg, ui.StatusBus())
+    seen: list[dict[str, object]] = []
+
+    def spy(text, **kwargs):
+        seen.append(dict(kwargs.get("context") or {}))
+        return core.DispatchResult(route="chat", text=text, reply="好的")
+
+    runtime.record("帮我打开微信", core.DispatchResult(route="fast", text="帮我打开微信",
+                                                     reply="已打开"))
+    with patch.object(core, "dispatch", spy):
+        runtime.dispatch("然后发个消息", context={})
+
+    assert seen[0].get("previous") == "帮我打开微信", "第二句派发时上一句必须跟着走"
+
+
+def test_withdrawal_gets_a_short_answer_not_a_capability_lecture(cfg):
+    """答案念完之后说「算了」，应该得到一声「好」，不是一篇功能介绍。
+
+    实测：`dispatch("算了")` 走的是 ignore 分支，回复是
+    「还没学会这句。能做的有：打开应用和文件、跑命令、发消息……」
+    ——用户想收回，收到的是一段他刚刚才听过的东西。
+    """
+    from voxos import ui
+    from voxos.main import Runtime
+
+    runtime = Runtime(cfg, ui.StatusBus())
+    result = runtime.dispatch("算了", context={})
+
+    assert result.reply == "好"
+    assert result.route == "chat", "回话要朗读；ignore 那一支是不朗读的"
+    assert "还没学会" not in result.reply
+
+
+def test_withdrawal_denies_a_pending_confirmation(cfg):
+    """确认框还挂着的时候说「不用了」，必须真的把它拒掉。
+
+    以前这句连确认框都碰不到：它被当成普通指令派发，确认框只能等超时，
+    用户说完「不用了」还得再点一下拒绝。语音能拒不能批——失败关闭。
+    """
+    import threading
+
+    from voxos import ui
+    from voxos.main import Runtime
+
+    runtime = Runtime(cfg, ui.StatusBus())
+    runtime.gate._waiters["req-1"] = threading.Event()
+    runtime.gate._current = "req-1"
+
+    result = runtime.dispatch("不用了", context={})
+
+    assert result.reply == "好，不做了"
+    assert runtime.gate.resolve(True, "req-1") is False, "已经拒过，就不能再批"

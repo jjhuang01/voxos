@@ -94,6 +94,19 @@ def test_echo_gate_blocks_during_tts_but_allows_shouting():
     assert gate.is_interrupt("算了") is True
 
 
+def test_bare_interrupt_is_a_whole_sentence_match():
+    """整句匹配，不是「句子里含这几个字」。
+
+    「我要把服务器停下来」里也有「停」，那是一条指令；按子串匹配会把它当成
+    「闭嘴」直接吞掉，用户下的命令就没了。标点先去掉，所以「算了。」也算。
+    """
+    for text in ("停", "停一下", "算了", "取消", "别说了", "不用了", "算了。", " 停！"):
+        assert dsp.bare_interrupt(text), text
+
+    for text in ("我要把服务器停下来", "取消明天的会", "别说了半天我还没说完重点", ""):
+        assert not dsp.bare_interrupt(text), text
+
+
 def test_echo_gate_releases_after_decay():
     gate = dsp.EchoGate(decay_ms=300)
     gate.tts_start()
@@ -191,3 +204,82 @@ def test_sentences_break_long_sentences_on_commas():
     chunks = dsp.sentences("前面还有很长一段铺垫，" + "然后才是重点" * 8, max_chars=20)
     assert chunks[0].endswith("，")
     assert all(len(c) <= 20 for c in chunks)
+
+
+def _voice_by_first_sample(audio):
+    """按第一个采样值决定音色方向：<0.5 是本人，>=0.5 是别人。
+
+    这样能把「一句话里混了两个人的声音」构造得完全可控，不依赖真实音频。
+    """
+    vector = np.zeros(8, dtype=np.float32)
+    vector[0 if float(audio[0]) < 0.5 else 1] = 1.0
+    return vector
+
+
+def _owner_profile():
+    vector = np.zeros(8, dtype=np.float32)
+    vector[0] = 1.0
+    return {"normal": vector}
+
+
+def _mixed(owner_secs: float, other_secs: float, total: float = 4.0):
+    """一段「本人说前半、别人说后半」的音频。"""
+    own = np.full(int(dsp.SR * owner_secs), 0.1, dtype=np.float32)
+    other = np.full(int(dsp.SR * other_secs), 0.9, dtype=np.float32)
+    return np.concatenate([own, other])
+
+
+def test_segmented_verification_tolerates_one_other_speaker():
+    """旁边的人插一句，不该让整句话被拒——那正是「屋里多个人」最常见的形态。
+
+    整段一个嵌入会把两个人的音色平均成一个谁也不像的东西，本人被拒、指令丢掉。
+    分段看占比：多数窗口像本人就通过。
+    """
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=_voice_by_first_sample,
+                           profiles=_owner_profile())
+
+    ok, best, ratio = lock.verify_segments(_mixed(owner_secs=3.0, other_secs=1.0))
+
+    assert ok is True, "本人占多数时应当通过"
+    assert ratio >= 0.5
+
+
+def test_segmented_verification_rejects_when_others_dominate():
+    """别人说大半 → 拒。否则就是「屋里有人说话，Agent 却照做」。"""
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=_voice_by_first_sample,
+                           profiles=_owner_profile())
+
+    ok, best, ratio = lock.verify_segments(_mixed(owner_secs=1.0, other_secs=3.0))
+
+    assert ok is False
+    assert ratio < 0.5, "占比要能报出来，时间线才能说清是「别人在说」"
+
+
+def test_segmented_verification_boundary_follows_min_ratio():
+    """判决边界落在 `min_ratio` 上，不是一个魔法分数。
+
+    实测（1.5s 窗口、4s 音频、阈值 0.75）：别人占 0/25/38/50% → 通过
+    （本人窗口占 67%~100%），62/75/100% → 拒绝（33%~0%）。同一条 4s 音频，
+    把 `min_ratio` 从 0.5 提到 0.8 就该翻成拒绝——这证明卡的是
+    「多数窗口像本人」这条可解释的规则，而不是某个调出来的数字。
+    """
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=_voice_by_first_sample,
+                           profiles=_owner_profile())
+    clip = _mixed(owner_secs=2.5, other_secs=1.5)      # 本人 2/3 的窗口
+
+    ok, _, ratio = lock.verify_segments(clip, min_ratio=0.5)
+    assert ok is True
+    assert ratio == 0.667, "占比要如实报出来，时间线才能说清是谁在说"
+
+    assert lock.verify_segments(clip, min_ratio=0.8)[0] is False
+
+
+def test_segmented_verification_falls_back_for_short_audio():
+    """短句切不出两个窗口时退回整段验证，行为和 verify 一致。"""
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=_voice_by_first_sample,
+                           profiles=_owner_profile())
+
+    ok, best, ratio = lock.verify_segments(np.full(int(dsp.SR * 0.8), 0.1, dtype=np.float32))
+
+    assert ok is True
+    assert ratio == 1.0
