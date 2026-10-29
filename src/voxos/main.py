@@ -967,6 +967,7 @@ def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
         ("LLM", _llm_note(cfg)),
         ("语音合成", _tts_note(cfg)),
         ("识别后端", _hotword_note(cfg, [])),
+        ("判停", _turn_note(cfg)),
         ("输入设备", _mic_note(cfg)),
         ("VAD 后端", _vad_note(cfg)),
         ("资源根", str(cfg.root)),
@@ -1071,6 +1072,24 @@ def _tts_note(cfg: Config) -> str:
         return why
     last = core.tts_failure()
     return f"{why}（上次失败：{last}）" if last else why
+
+
+def _turn_note(cfg: Config) -> str:
+    """判停用的是哪条路：音频模型还是文本尾词。
+
+    这条必须单独报，因为两条路的**行为不一样**——音频判停看语调，文本判停只
+    认「然后」「比如」这类词。用户觉得「今天怎么老抢话」的时候，第一件事就是
+    确认跑的是哪条。`available()` 只查文件在不在，`make()` 才知道能不能真跑，
+    所以两个都问：分清「没下模型」和「下了但加载不了」。
+    """
+    from . import turn
+
+    ok, why = turn.available(cfg)
+    if not ok:
+        return f"文本判停（{why}）"
+    if turn.make(cfg) is None:
+        return "文本判停（模型加载失败，删掉重下：voxos models --force）"
+    return f"smart-turn v3.2（音频判停，阈值 {turn.threshold(cfg):g}）"
 
 
 def _hotword_note(cfg: Config, words: list[str]) -> str:

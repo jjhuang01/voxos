@@ -96,18 +96,46 @@ def test_absolute_paths_ignore_both_roots():
 
 
 def test_model_manifest_entries_are_complete():
-    """清单缺字段会在下载到一半才炸，不如现在炸。"""
+    """清单缺字段会在下载到一半才炸，不如现在炸。
+
+    `sha256` 允许缺席，但**必须写明为什么**：要么有摘要，要么有一句话交代
+    「算不出来」。否则「忘了填」和「故意不填」长得一模一样，而前者意味着
+    用户下到一个被中间人换过的模型还浑然不知。
+    """
     for name, spec in models.MODELS.items():
-        for key in ("url", "min_bytes", "desc", "sha256"):
+        for key in ("url", "min_bytes", "desc"):
             assert spec.get(key), f"{name} 缺 {key}"
         assert str(spec["url"]).startswith("https://"), f"{name} 不是 https"
-        assert len(str(spec["sha256"])) == 64, f"{name} 的 sha256 长度不对"
+        digest = spec.get("sha256")
+        if digest:
+            assert len(str(digest)) == 64, f"{name} 的 sha256 长度不对"
+        else:
+            assert spec.get("no_sha256_reason"), f"{name} 既没 sha256 也没写原因"
 
 
 @pytest.mark.parametrize("name", sorted(models.OPTIONAL))
 def test_optional_models_are_known(name: str):
     """OPTIONAL 里写的名字必须真的在清单里，否则 `--no-asr` 会静默不生效。"""
     assert name in models.MODELS
+
+
+def test_no_asr_still_fetches_the_turn_model(monkeypatch, tmp_path):
+    """`--no-asr` 是「跳过 239MB 的识别模型」，不是「跳过所有可选模型」。
+
+    判停模型也在 OPTIONAL 里，但它只有 8.7MB，而「先不下识别模型、先把判停跑
+    起来」是个正常需求。跟着一起跳掉的话，用户会得到一台「听得见但总抢话」的
+    机器，而且没有任何地方提示这是因为少下了一个 8.7MB 的文件。
+    """
+    wanted: list[str] = []
+
+    def fake_download(url, path, proxy, spec):
+        wanted.append(path.name)
+        return False
+
+    monkeypatch.setattr(models, "download", fake_download)
+    models.fetch(tmp_path, with_asr=False)
+    assert "smart-turn-v3.2-cpu.onnx" in wanted
+    assert "model.int8.onnx" not in wanted
 
 
 def test_models_command_actually_runs(monkeypatch, tmp_path):

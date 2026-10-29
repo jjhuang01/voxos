@@ -16,11 +16,11 @@ import sys
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Protocol
+from typing import Any, Callable, Iterable, Iterator, Protocol
 
 import numpy as np
 
-from . import dsp
+from . import dsp, turn
 from .config import Config
 
 __all__ = [
@@ -571,6 +571,7 @@ class AudioPipeline:
     on_event: Callable[[str, str, str], None] = lambda state, label, detail: None
     echo: dsp.EchoGate = field(default_factory=dsp.EchoGate)
     partial_interval_ms: float = 400.0
+    turn_detector: Any = None        # 显式注入（测试用）；None 时按配置造
     stats: dict[str, int] = field(default_factory=lambda: {"chunks": 0, "utterances": 0, "rejected": 0})
 
     def __post_init__(self) -> None:
@@ -584,6 +585,10 @@ class AudioPipeline:
         # 设成上面那个 `silence_ms`。不调的话，**第一句话**用的是 800 而不是配置值——
         # 这个 bug 靠读代码看不出来，是靠 `scripts/voice_bench.py` 量出来的。
         self._ep.reset()
+        # 判停器：有 smart-turn 模型就用音频判停，没有就退回文本判停。
+        # 这一步**不加载模型**（`turn.make` 里才建 session），所以构造管道仍然是毫秒级。
+        self.smart_turn = self.turn_detector if self.turn_detector is not None else turn.make(self.cfg)
+        self.turn_threshold = turn.threshold(self.cfg)
         self.mask_mode = self.cfg.flag("audio.mask_mode", False)
         self.prefix_ms = float(self.cfg.get("audio.prefix_padding_ms", 300))
         self.window_ms = float(self.cfg.get("audio.partial_window_ms", 3000))
@@ -667,10 +672,44 @@ class AudioPipeline:
         audio = np.concatenate(buffer) if buffer else np.zeros(0, dtype=np.float32)
         audio_ms = audio.size / dsp.SR * 1000.0
         if audio_ms - last_partial_ms < self.partial_interval_ms:
-            return None                            # 还没到复查点，省一次 STT
-        # 判「说完没」只看结尾，所以只解最后 `partial_window_ms`。整段重解是白花：
-        # 本机实测 SenseVoice 解码耗时随音频线性涨（0.5s→22ms，12s→283ms），
-        # 而 `should_end` 只关心末尾有没有「把」「然后」这类半截话。
+            return None                            # 还没到复查点，省一次推理
+        if self.smart_turn is not None:
+            decided, verdict = self._judge_by_audio(buffer, audio)
+            if decided:
+                return verdict
+            # 走到这里说明模型坏了：`_judge_by_audio` 已经把它摘掉，交给文本那条
+        return self._judge_by_text(buffer, audio, audio_ms)
+
+    def _judge_by_audio(self, buffer: list[np.ndarray],
+                        audio: np.ndarray) -> tuple[bool, Utterance | None]:
+        """音频判停。返回（是否给出了结论，结论）。模型出错时第一项为 False。
+
+        比文本那条强的地方不只是「更准」：它**不需要识别**，所以判停和识别之间
+        没有依赖了。这也是将来换流式识别的前提——否则每来一段候选音频，都得先把
+        识别器叫醒一次，流式识别省下来的那点延迟立刻被这一步吃掉。
+        """
+        prob = self.smart_turn.complete(audio)
+        if prob < 0:
+            # 模型坏了（文件截断、onnxruntime 版本不对、输入对不上）。摘掉它，
+            # 本轮起退回文本判停——一个坏模型不该把整条采集链一起带下去。
+            self.on_event("warn", "判停", "smart-turn 推理失败，本轮起退回文本判停")
+            self.smart_turn = None
+            return False, None
+        if prob >= self.turn_threshold:
+            return True, self._finalize(buffer)
+        if not self._ep.extended:
+            self._ep.extend()                      # 没说完：给 extended_ms 的宽限
+            return True, None
+        return True, self._finalize(buffer)        # 宽限也走完了，收尾
+
+    def _judge_by_text(self, buffer: list[np.ndarray], audio: np.ndarray,
+                       audio_ms: float) -> Utterance | None:
+        """文本判停：解最后 `partial_window_ms`，看结尾是不是半截话。
+
+        只解结尾是故意的：判「说完没」只看末尾有没有「把」「然后」这类词，整段
+        重解是白花。本机实测 SenseVoice 解码耗时随音频线性涨（0.5s→22ms，
+        12s→283ms），而这一步只关心最后 3 秒。
+        """
         tail = audio[-int(dsp.SR * self.window_ms / 1000):] if self.window_ms > 0 else audio
         if getattr(self.stt, "remote", False):
             # 远端识别会把音频上传。身份没确认之前，一个字节都不该离开本机。

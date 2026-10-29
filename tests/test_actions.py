@@ -215,7 +215,10 @@ def test_permission_errors_point_at_the_right_settings_page():
 
 def test_parse_at_accepts_the_three_ways_people_say_time():
     assert scheduler.parse_at("+600") > time.time() + 590
-    assert scheduler.parse_at("2026-10-29 09:00") > time.time()
+    # 日期不能写死：写死的那一天过了 09:00 就变成「过去」，这条测试会自己变红。
+    # 真踩过——2026-10-29 09:00 一直好好的，直到某天上午 10 点。
+    tomorrow = time.strftime("%Y-%m-%d 09:00", time.localtime(time.time() + 86400))
+    assert scheduler.parse_at(tomorrow) > time.time() + 3600
     later = scheduler.parse_at("09:30")
     assert later > time.time() and time.localtime(later).tm_hour == 9
     assert scheduler.parse_at("明天早上") == 0        # 认不出就说认不出

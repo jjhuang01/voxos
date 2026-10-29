@@ -148,7 +148,7 @@
 
 ### Task 1.8 工程化
 
-- [x] 337 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
+- [x] 354 项测试（`make test`），`scripts/verify.py` 19 项验收指标（`make verify`），
       `scripts/audit_ui.py` 12 项界面回归（`make audit-ui`），`scripts/soak.py` 长稳（`make soak`）。
 - [x] 全模块单函数 ≤ 40 行（最长 40 行，`core.dispatch`）、核心五模块共 8 个类、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README。
@@ -331,23 +331,53 @@
 
 ### 语音质量（0.1.25 审计出来的，按优先级排；依据见 `docs/VOICE.md`）
 
-- [ ] **Task 2.9 换 audio-native 判停模型（P1，最划算的一条）**。
-      用 **Pipecat smart-turn v3**：Whisper Tiny + 线性头，~8M 参数，int8 后 **8MB**，
+- [~] **Task 2.9 换 audio-native 判停模型（0.1.29 代码已接上，等模型 + 标定）**。
+      用 **Pipecat smart-turn v3.2**：Whisper Tiny + 线性头，~8M 参数，int8 后 **8.7MB**，
       10–65ms，**直接吃 16kHz PCM**，23 语言含中文，**BSD-2 可商用**。
       为什么不是 LiveKit turn-detector：它底座是 Qwen2.5-0.5B、**只能吃文本**，
       得先有 STT 结果才能判——等于没解决「为了判停先解码」这个问题。
-      做法：VAD 判出静音后，把整轮 PCM（≤8s，不够就在**前面**补零）喂进去；
-      用户又开口就**重跑整段**（它要上下文，不是只跑增量）。
+
+      **已做**（照上游抄，不是照论文想）：`src/voxos/mel.py` 是 Whisper log-mel 的移植
+      （pipecat `_whisper_features.py` → HF `transformers`，许可证兼容）；
+      `src/voxos/turn.py` 的会话选项、8 秒窗口、**前补零**、`input_features` 全照
+      `local_smart_turn_v3.py`；`AudioPipeline._judge_by_audio` 在候选态接管，
+      `p ≥ turn_threshold` 立刻收尾，否则 `EndpointDetector.extend()` 再等 2.5s。
+      三条降级路都安静退回文本判停，`doctor` 的「判停」那行会说是哪一条。
+
+      **还差三步**（必须在能联网的机器上做，写清单的机器连不上 HuggingFace）：
+      ① `voxos models` 下 8.7MB 模型（已进 `models.MODELS`，暂缺 sha256 且写明了原因）；
+      ② 用带标注的「说完 / 没说完」中文语料量 TPR/TNR，补进 `scripts/voice_bench.py`；
+      ③ TNR 达标后把 `silence_duration_ms` 从 500 降到 300。
       收益（按 §4.1 实测推算）：砍掉长句那次纯浪费的尾部解码 ~96ms；
       有语义判停兜底后静音可从 500ms 再降到 300ms，再省 ~200ms。
       **短句 616 → ~420ms，长句 920 → ~620ms**——唯一能追平而不只是接近的一条。
       验收：判停 TPR > 98% / TNR > 85%（中文语料）；端点白等 p50 < 350ms。
 
-- [ ] **Task 2.10 流式 ASR（P1）**。
-      用 sherpa-onnx **streaming** zipformer / paraformer，SenseVoice 留作兜底。
+- [ ] **Task 2.10 流式 ASR（P1，判停做完才轮到它）**。
       解决两件事：**没有实时字幕**（离线非流式根本做不出首字反馈）、
       **长句解码线性变慢**（0.5s→22ms，12s→283ms，实测见 `docs/VOICE.md §3.2`）。
-      验收：首字 < 300ms；胶囊有实时字幕；12s 长句解码不再线性。
+
+      为什么必须排在 2.9 之后：文本判停要「先解一遍再判」，流式识别一上来
+      每个候选点都得叫醒识别器，省下的延迟当场被吃掉。2.9 把这条依赖断了，
+      这里才能动。
+
+      具体做法（四步，每步都能单独验收）：
+
+      1. **模型**：sherpa-onnx **streaming** zipformer 中英双语（或 streaming
+         paraformer），加进 `models.MODELS`，和 SenseVoice 并存。
+      2. **契约**：`StreamingStt` 加 `feed(chunk) -> str` / `finish() -> str` /
+         `reset()` 三个方法。**流式识别是有状态的**，一句一 `reset()`，否则上一句
+         会渗到下一句开头——这个 bug 听起来像「它自己乱说话」。
+      3. **partial 不等于 final**。流式识别会**改写前面已经出过的字**（先给
+         「打开微」，再改成「打开微信」），所以 `partial_equals_final` 必须是
+         `False`，终稿只能取 `finish()` 的结果。0.1.25 加的那个契约正好挡住
+         这个坑——它当初是为了防「同一句反复派发」，这里顺手救了第二次。
+      4. **接线**：`AudioPipeline` 加 `on_partial(text)`，在 `speech` 态每块喂一次；
+         `main` 把它推成胶囊的「识别中」状态。**只在 `speech` 态喂**：`idle` 态
+         喂静音等于让识别器对着空气解码。
+
+      验收：首字 < 300ms（从 VAD 判出人声算）；胶囊有实时字幕；12s 长句的单块
+      解码耗时**不随长度增长**（这是流式的定义，不是优化）。
 
 - [~] **Task 2.11 TTS 流式 + 首字节降级（P1，客户端已就绪，等 API Key）**。
       **0.1.27 已写好 `src/voxos/tts.py`**，接口形状照官方文档抄（《HTTP Chunked/SSE
@@ -397,18 +427,56 @@
       `test_stop_speaking_works_between_sentences` 钉住空档打断。
 
 - [ ] **Task 2.13 DeepFilterNet3 降噪（P2）**。
-      单帧 <10ms、模型 ~2.5MB，有 Python 包；RNNoise（30ms 帧，48 维特征 + LSTM）作更轻的备选。
-      **顺序是先 AEC 再 NS**，两者不能互相替代。
-      验收：噪声语料 WER 明显下降；VAD 假阳性下降。
+      **顺序是先 AEC 再 NS**，两者不能互相替代：AEC 去掉的是「我们自己的声音」，
+      NS 去掉的是「环境里别人的声音」。反过来做，NS 会把回声削成奇怪的非线性残留，
+      AEC 拿它当参考就彻底失灵了。
+
+      具体做法：
+
+      1. **唯一插入点**是 `AudioPipeline._preprocess`——所有进来的音频都过这里，
+         在一处加等于全链路生效。放在 `dsp.agc` **之前**（先降噪再归一化增益，
+         否则噪声被一起放大）。
+      2. **采样率要核**：DeepFilterNet3 是 48kHz/10ms 帧，我们是 16kHz/32ms（512）。
+         要么升采样（多一次重采样 + 4 倍算力），要么用 16kHz 的 RNNoise
+         （480 样本 = 30ms，48 维特征 + LSTM，模型几百 KB）。**先量再选**，
+         不要因为「DFN3 效果好」就直接上——它的效果是在 48k 上测的。
+      3. **必须在音频线程里 <3ms**，否则 32ms 的块间隔会被吃掉，采集开始丢帧。
+         `scripts/voice_bench.py` 加一项 `denoise` 专测这个。
+      4. 配置：`audio.denoise = "auto" | "off" | "dfn3" | "rnnoise"`，默认 `auto`
+         （有模型就开），`audio.denoise_atten_db` 控制最大抑制量（默认 12dB，
+         别设 20dB 以上——过度抑制会把轻声字一起削掉，和 `min_speech_ms` 打架）。
+
+      验收：噪声语料 WER 下降；VAD 假阳性下降；**干净语音的 WER 不能变差**
+      （一个只帮噪声、伤干净语音的降噪器是净亏，而这条最容易被漏测）。
 
 - [ ] **Task 2.14 AEC3 + 真双工（P2，工作量最大）**。
       现在的 `EchoGate` 是「TTS 期间把麦克风当静音」——**半双工**，用时间换正确性，
-      代价是用户说话时我们在装聋。真双工必须上 **WebRTC AEC3**（10ms 帧，内部 64 样本块，
-      专门处理双讲）。难点不在算法在**时钟对齐**：要拿到「实际播放出去的采样」当参考信号，
-      macOS 上得换 `AVAudioEngine` 的 voice-processing IO 或 `kAudioUnitSubType_VoiceProcessingIO`，
-      会同时牵动采集、播放、TTS 三条路。
-      **为什么排 P2**：它最贵，且要在还要大改的管线上做——等判停和流式 ASR 都落地了再动。
-      验收：TTS 播放中注入人声，停播延迟 < 200ms。
+      代价是用户说话时我们在装聋。
+
+      **真正的难点不是算法，是参考信号。** AEC 要拿「实际播出去的采样」当参考，
+      而我们现在用 `say` 出声——那些采样我们一个都拿不到。所以第一步不是接 AEC，
+      是**换掉播放路径**：`tts.py` 已经能把云端合成结果以 PCM 流交回来，用它
+      （或系统 `say -o out.aiff` 落盘再读）喂 `sounddevice.OutputStream`，
+      播放回调里顺手写一份到环形缓冲当参考。**这一步是 `tts.py` 返回 PCM
+      的真正原因**，不只是为了「少解一层码」。
+
+      三条可选路线，从便宜到贵：
+
+      | 路线 | 代价 | 风险 |
+      | :--- | :--- | :--- |
+      | `AVAudioEngine.setVoiceProcessingEnabled(true)` | 最小，Apple 帮你做 AEC + 波束成形 | 强制 48k、会改变输入增益，可能触发系统「语音处理」指示 |
+      | `kAudioUnitSubType_VoiceProcessingIO` | 小，同上但更底层可控 | 要写 CoreAudio 回调，Python 里得走 `PyObjC` |
+      | `webrtc-audio-processing` 的 AEC3 | 中，10ms 帧、内部 64 样本块，双讲处理好 | 要自己管时钟对齐，参考信号延迟错一个块就完全失效 |
+
+      **时钟对齐**是真正会让人卡一周的地方：参考信号必须是**已经播出去的**，
+      不是「打算播的」；输出回调里写的环形缓冲、输入回调里读的位置，两者差一个
+      缓冲长度，AEC 就会把回声当成新语音。
+
+      **为什么排 P2**：它最贵，且要在还要大改的管线上做——等判停和流式 ASR
+      都落地了再动。现在动，等于在一个还要重写两遍的管线上做最贵的改动。
+
+      验收：TTS 播放中注入人声，停播延迟 < 200ms；连续 30 秒播报期间**不自激**
+      （不把自己念的字识别成用户的话）。
 
 - [ ] **Task 2.15 补齐 `voice_bench.py` 的后四项（P2）**。
       现在只测了「端点延迟」，还差：判停 TPR/TNR、起手字保留率、打断延迟、8h 长跑。
@@ -428,7 +496,7 @@
 
 | 缺口 | 影响 | 下一步 |
 | :--- | :--- | :--- |
-| **判停质量不可量化**（只有后缀词表） | 「说完了没」靠一张中文连接词表猜，没有 TPR/TNR，改好改坏都不知道。长句还为此多付一次纯浪费的解码（实测 ~96ms） | Task 2.9：smart-turn v3（8MB，audio-native，BSD-2） |
+| **判停质量不可量化**（0.1.29 已接 smart-turn v3.2，仍缺 TPR/TNR 标定） | 「说完了没」以前靠一张中文连接词表猜，改好改坏都不知道。现在由音频模型判，但**还没量过准确率**，所以静音阈值仍停在保守的 500ms | Task 2.9 剩下三步：下模型 → 标定 → 静音降到 300 |
 | **非流式 ASR，没有实时字幕** | 用户开口到看见文字之间什么都没有；长句解码线性变慢（0.5s→22ms，12s→283ms） | Task 2.10：sherpa-onnx streaming |
 | **半双工，插不进话** | `EchoGate` 是「TTS 期间把麦克风当静音」，用时间换正确性；用户说话时我们在装聋 | Task 2.14：AEC3（要换音频 IO，工作量最大） |
 | **TTS 不是流式** | 大模型路径「说完到出声」3.2–7.2s，等一整个来回 | Task 2.11：豆包语音合成 2.0 流式 + 首字节降级 |

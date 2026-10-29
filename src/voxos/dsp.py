@@ -143,6 +143,15 @@ class EndpointDetector:
             return "force_end"
         return "candidate" if self.silence_ms_now >= self.deadline_ms else "speech"
 
+    def extend(self) -> None:
+        """「没说完」：把等待窗口拉长到 `extended_ms`，只拉一次。
+
+        单独成一个方法是因为现在有两条判停路径（文本尾词 / 音频模型），
+        「拉长窗口」这件事两边都要做，而且必须做成一模一样——否则换个判停
+        后端，用户感受到的「断断续续说」容忍度就变了。
+        """
+        self.deadline_ms, self.extended = self.extended_ms, True
+
     def should_end(self, text: str) -> bool:
         """候选端点处用转写文本二次判断：半截话继续等，说完才切。"""
         if self.total_ms >= self.max_ms:
@@ -150,7 +159,7 @@ class EndpointDetector:
         if self.speech_ms < self.min_speech_ms:
             return False
         if not self.extended and text.strip().endswith(UNFINISHED_TAILS):
-            self.deadline_ms, self.extended = self.extended_ms, True
+            self.extend()
             return False
         return self.silence_ms_now >= self.deadline_ms
 

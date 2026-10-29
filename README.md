@@ -146,10 +146,10 @@ App 用的是 ad-hoc 签名，不是公证过的分发包：第一次启动 macO
 cd voxos
 make setup                                   # 建 .venv 并装依赖（只需一次）
 make doctor                                  # 环境自检
-python scripts/fetch_models.py               # 三个模型一次下齐（约 267MB）
-python scripts/fetch_models.py --no-asr      # 只要声纹 + VAD（28MB，先跑起来再说）
+python scripts/fetch_models.py               # 四个模型一次下齐（约 276MB）
+python scripts/fetch_models.py --no-asr      # 跳过 239MB 识别模型（37MB：声纹 + VAD + 判停）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 337 项测试
+make test                                    # 354 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
@@ -308,6 +308,8 @@ voxos/
 │   ├── tts.py              # 云端语音合成（豆包 2.0 单向流式）：文本 → PCM 流，不碰播放
 │   ├── messaging.py        # 发消息：微信没有 AppleScript 字典，只能生成按键脚本
 │   ├── dsp.py              # 纯函数：AGC / 高架滤波 / VAD / 端点 / 回声门 / 声纹
+│   ├── mel.py              # Whisper log-mel（80×800），移植自 pipecat/transformers
+│   ├── turn.py             # 语义判停：smart-turn v3.2 吃音频不吃文本，缺模型退回词表
 │   ├── audio.py            # 设备源、自愈重连、Silero/Sherpa 适配、STT、管道
 │   ├── ui.py               # 状态总线 + SSE 服务 + Earcon 合成
 │   ├── corpus.py           # 验收语料生成（say 合成 / 合成音降级）
@@ -327,7 +329,7 @@ voxos/
 │   ├── install_launchd.sh  # 装成开机自启的 launchd 守护（含 TCC 授权提醒）
 │   ├── build_ubm.py        # 生成降级声纹背景模型
 │   └── enroll_voice.py     # 声纹录入（显式版）
-└── tests/                  # 337 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/语音合成/命令沙箱/定时/文档自洽
+└── tests/                  # 354 项：内核/安全/工具/DSP/管道/UI/设置/路由/打断/STT/端到端/大模型/语音合成/命令沙箱/定时/文档自洽
 ```
 
 ## 四条关键设计决策

@@ -6,6 +6,65 @@ CI 的 release job 用它当 `gh release create --notes-file`。所以**发版�
 
 格式约定：`## [x.y.z] - YYYY-MM-DD`，一个版本一段，从新到旧。
 
+## [0.1.29] - 2026-10-30
+
+语义判停：判「说完了没」不再需要先解码成文本。这是 `docs/VOICE.md` 路线图里
+唯一能追平豆包/ChatGPT 的一条，也是**唯一一条代码可以照抄、不用自己想**的。
+
+### 新增
+
+- **`src/voxos/turn.py`**：smart-turn v3.2（Pipecat/Daily，BSD-2-Clause）。
+  Whisper Tiny 编码器 + 线性头，int8 8.7MB，10–65ms，23 语言含中文，吃 16kHz PCM。
+  会话选项（`ORT_SEQUENTIAL` / `inter_op=1` / 图优化全开）、8 秒窗口、
+  **前补零**、`input_features` 张量名——全部照上游 `local_smart_turn_v3.py`，
+  一个数字都没改。
+- **`src/voxos/mel.py`**：Whisper log-mel（80×800）的 numpy 移植，来自 pipecat
+  `_whisper_features.py`，它又移植自 HF `transformers`。不引 `transformers`：
+  那一条会拖进 2GB 的 torch，只为一个 1.9ms 的特征提取器。
+- `AudioPipeline._judge_by_audio`：候选态由音频模型接管。`p ≥ turn_threshold`
+  立刻收尾，否则 `EndpointDetector.extend()` 再等 2.5s。
+- `EndpointDetector.extend()`：把「拉长等待窗口」从 `should_end` 里提出来。
+  两条判停路径（文本 / 音频）必须做成一模一样，否则换个后端，用户感受到的
+  「断断续续说」容忍度就变了。
+- `doctor` 多一行「判停」：`smart-turn v3.2（音频判停，阈值 0.5）` /
+  `文本判停（缺模型 …）` / `文本判停（模型加载失败 …）`。三种状态必须分得清。
+
+### 为什么值得换
+
+以前判停是「先解码成文本，再看结尾是不是『然后』『比如』」——为了决定要不要停，
+先花 82ms 解码，而解码本身是最贵的一步。换成吃音频的模型，这条依赖就断了：
+判停不再需要 STT，将来换流式识别也不会被它绊住。顺带能看到语调——人问
+「你是说……？」和陈述「你是说。」字面一样、静音一样长，词表判不出来。
+
+### 降级是默认行为
+
+模型没下、onnxruntime 没装、配置写 `text`、模型加载失败、推理中途抛异常——
+五条路都安静退回文本判停，行为与 0.1.28 完全一致。最后一条是当场退回
+（`_judge_by_audio` 把坏模型摘掉并留一条 warn），不是等到下次重启。
+
+### 修掉
+
+- **`--no-asr` 会连判停模型一起跳过。** 判停模型也在 `OPTIONAL` 里，而
+  `fetch()` 按 `OPTIONAL` 判断要不要跳——于是「先不下 239MB 识别模型」的人
+  会得到一台「听得见但总抢话」的机器，且没有任何提示。拆成 `ASR` 与 `OPTIONAL`
+  两个集合。
+- **`test_model_manifest_entries_are_complete` 逼着每条都写 sha256。**
+  smart-turn 的摘要我算不出来（这台机器连不上 HuggingFace），抄一个没算过的
+  摘要等于把校验变成摆设。改成「要么有摘要，要么写清为什么没有」，并给
+  `models.MODELS` 加 `no_sha256_reason` 字段。
+- **`test_parse_at_accepts_the_three_ways_people_say_time` 是个定时炸弹。**
+  它写死 `2026-10-29 09:00` 并断言「在未来」。这个断言在今天上午 9 点之后
+  就永远为假——一条测试自己坏了，而且坏的时候看起来像代码坏了。改成按
+  `time.time() + 86400` 算明天。
+
+### 还没做的（写进 `TODO_ROADMAP.md` Task 2.9，不藏）
+
+模型 8.7MB 要在能联网的机器上 `voxos models` 才下得到；TPR/TNR 要用带标注的
+中文语料量；量完才敢把 `silence_duration_ms` 从 500 降到 300。这三步没做完之前，
+**收益是 0**——代码只是把路铺好了。
+
+测试 354 项（352 passed + 2 skipped）。
+
 ## [0.1.28] - 2026-10-30
 
 一个只在构建时出现的 bug，影响 0.1.23 起的所有本地构建。

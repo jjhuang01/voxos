@@ -44,10 +44,22 @@ MODELS: dict[str, dict[str, object]] = {
         "desc": "SenseVoice 词表",
         "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
     },
+    "smart-turn-v3.2-cpu.onnx": {
+        "url": "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/"
+               "smart-turn-v3.2-cpu.onnx",
+        "min_bytes": 8_000_000,
+        "desc": "smart-turn v3.2 语义判停（int8 8.7MB，吃音频不吃文本，BSD-2）",
+        # 故意**没有** sha256：写这份清单的机器连不上 HuggingFace（沙箱只放行
+        # 业务域名），抄一个自己没算过的摘要等于把校验变成摆设。宁可只做大小 +
+        # 非全零这两项检查，也不填一个假的。有了能联网的机器就补上，然后删掉
+        # 下面这个字段——`test_model_manifest_entries_are_complete` 会盯着。
+        "no_sha256_reason": "清单作者所在环境无法访问 HuggingFace，没算过摘要",
+    },
 }
 
-# 装不上也不影响核心功能，只是识别会退回脚本回放。
-OPTIONAL = {"sense-voice/model.int8.onnx", "sense-voice/tokens.txt"}
+# 装不上也不影响核心功能，只是识别会退回脚本回放 / 判停会退回文本尾词。
+ASR = {"sense-voice/model.int8.onnx", "sense-voice/tokens.txt"}
+OPTIONAL = ASR | {"smart-turn-v3.2-cpu.onnx"}
 
 
 def default_dir() -> Path:
@@ -121,7 +133,9 @@ def fetch(target: Path | None = None, *, proxy: str | None = None,
     failed: list[str] = []
     skipped: list[str] = []
     for name, spec in MODELS.items():
-        if not with_asr and name in OPTIONAL:
+        # `--no-asr` 只跳过识别模型。判停模型也在 OPTIONAL 里，但它只有 8.7MB，
+        # 而且「没识别也要能判停」是个正常需求——按 OPTIONAL 跳会把两件事混一起。
+        if not with_asr and name in ASR:
             skipped.append(name)
             continue
         path = base / name
@@ -146,7 +160,7 @@ def _report(failed: list[str], skipped: list[str], base: Path, proxy: str | None
     """失败与跳过要分开说：一个能修，一个是设计如此。"""
     if skipped:
         print(f"\n· 可选模型未下载：{', '.join(skipped)}")
-        print("  不影响核心功能，但 stt.backend=sense_voice 时会退回脚本回放。")
+        print("  不影响核心功能：识别会退回脚本回放，判停会退回文本尾词。")
     if not failed:
         print(f"\n完成，模型在 {base}。下一步：voxos enroll --record 3 && voxos run")
         return
