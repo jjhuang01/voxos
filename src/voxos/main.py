@@ -22,7 +22,7 @@ import webbrowser
 from collections import deque
 from pathlib import Path
 
-from . import __version__, core, prompts, sandbox, scheduler, settings, tools, ui
+from . import __version__, core, lessons, prompts, sandbox, scheduler, settings, timeline, tools, ui
 # audio / corpus / dsp 不在顶层导入：它们把 numpy（实测 58ms）一起拖进来，
 # 而 `voxos text`、`voxos schedule`、`--version` 一条都用不到。谁用谁在里面导。
 from .config import Config, load
@@ -116,12 +116,35 @@ class Runtime:
         return core.dispatch(text, executor=self.executor, cfg=self.cfg,
                              context=context if context is not None else _context())
 
-    def record(self, text: str, result: core.DispatchResult) -> None:
+    def record(self, text: str, result: core.DispatchResult,
+               utterance: object = None) -> None:
+        """记一次回合：内存里的最近列表（给界面）+ 持久化时间线（给事后查）。
+
+        两份都要。内存那份是「刚才发生了什么」的即时视图，进程一退就没了；
+        时间线是「昨天为什么没反应」的，必须落盘——用户问的正是后者。
+        """
+        _REJECT["voice"] = 0                   # 成功一次就重置连续拒绝计数
         self.recent.appendleft({
             "ts": time.strftime("%H:%M:%S"), "text": text,
             "reply": result.reply or NO_ACTION,
             "route": result.route, "ms": round(result.latency_ms, 1),
         })
+        timeline.record(_turn_of(text, result, utterance), cfg=self.cfg)
+
+    def note_dropped(self, utterance: object) -> None:
+        """被音频层丢掉的句子也要留一条。
+
+        **这是最重要的一条记录，因为它以前完全不存在**：`_consume` 里一句
+        `if not utterance.accepted: continue` 把原因扔了，于是「我说了十句一句
+        都没执行」在两份日志里都是空白，用户只能猜「是不是软件坏了」。
+        """
+        timeline.record(timeline.Turn(
+            outcome="dropped",
+            text=str(getattr(utterance, "text", "") or ""),
+            score=float(getattr(utterance, "score", 0.0) or 0.0),
+            audio_ms=float(getattr(utterance, "audio_ms", 0.0) or 0.0),
+            reason=str(getattr(utterance, "reason", "")),
+        ), cfg=self.cfg)
 
     def reload(self, new_cfg: Config) -> None:
         lock = self.executor._lock
@@ -129,6 +152,55 @@ class Runtime:
         tools.configure(new_cfg)
         self.gate.timeout = float(new_cfg.get("workspace.confirm_timeout_s", 8))
         self.executor = self._build(lock=lock)
+
+
+_FAIL_WORDS = ("失败", "没能", "出错", "拒绝", "不允许", "不在允许")
+
+
+def _turn_of(text: str, result: core.DispatchResult, utterance: object = None) -> timeline.Turn:
+    """把派发结果翻译成一个回合。四种结局必须分清——混在一起就看不出问题在哪。
+
+    「没听懂」和「执行失败」在胶囊上都只显示一行字，但它们要修的地方完全不同：
+    前者是快通道正则的盲区，后者是工具或环境的问题。
+
+    判「闲聊」看的是 `tool` 空不空，不是 `route`：闲聊和带工具的回答**都走
+    `route="llm"`**，只看 route 会把「随便聊两句」记成「执行了某个动作」。
+    """
+    if result.route == "ignore":
+        outcome = "missed"
+    elif not result.tool and result.route in ("chat", "llm"):
+        outcome = "chatting"
+    elif any(word in result.reply for word in _FAIL_WORDS):
+        outcome = "failed"
+    else:
+        outcome = "acted"
+    return timeline.Turn(
+        outcome=outcome, text=text,
+        score=float(getattr(utterance, "score", 0.0) or 0.0),
+        audio_ms=float(getattr(utterance, "audio_ms", 0.0) or 0.0),
+        route=result.route, tool=result.tool, args=dict(result.args or {}),
+        ok=outcome != "failed", reply=result.reply, ms=result.latency_ms,
+    )
+
+
+_REJECT = {"voice": 0, "hinted": False}
+
+
+def _hint_rejection(runtime: Runtime, utterance: object) -> None:
+    """连续被声纹拒才提示一次。
+
+    单次拒绝是**正常行为**——屋里别人说话就该被拒，每句都弹提示会把胶囊变成
+    报警器。但连续 3 句都拒，多半是麦克风换了、或者声纹只录了 1 句（同人换句话
+    就可能掉到阈值以下），这时不提示，用户只能看到「一片安静」。
+    """
+    if "声纹" not in str(getattr(utterance, "reason", "")):
+        _REJECT["voice"] = 0
+        return
+    _REJECT["voice"] += 1
+    if _REJECT["voice"] >= 3 and not _REJECT["hinted"]:
+        _REJECT["hinted"] = True
+        runtime.bus.emit("warn", "声纹连续拒绝",
+                         "连续 3 句没通过声纹，可能是麦克风变了：voxos enroll --record 3")
 
 
 # ------------------------------------------------------------------ 隐式上下文
@@ -280,7 +352,9 @@ def _ui_context(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
         status=lambda: _status(runtime, lock),
         on_enroll=(lambda seconds: _enroll_now(runtime.cfg, lock, seconds, enrolled)) if lock else None,
         on_confirm=runtime.gate.resolve,
-        history=lambda: list(runtime.recent),
+        # 读**落盘的时间线**，不是内存里那 8 条：用户问「昨天为什么没反应」，
+        # 内存那份早就没了。而且时间线里有被丢弃的回合——那才是「没反应」的答案。
+        history=lambda: timeline.recent(cfg=runtime.cfg, limit=60),
         on_listen=lambda on: _set_listening(runtime, on),
     )
 
@@ -324,8 +398,10 @@ def _port_holder(port: int) -> str:
 # ------------------------------------------------------------------ 子命令
 
 def cmd_text(args: argparse.Namespace, cfg: Config) -> int:
+    """打字入口。**也进时间线**——不然「我刚才让它干了什么」只有语音那半有记录。"""
     runtime = Runtime(cfg, _bus(cfg))
     result = runtime.dispatch(args.text)
+    runtime.record(args.text, result)
     print(f"[{result.route}] {result.reply or NO_ACTION}  {result.latency_ms:.1f}ms")
     return 0 if result.route != "ignore" else 2
 
@@ -636,6 +712,10 @@ def _dispatch_loop(runtime: Runtime, pipeline: audio.AudioPipeline,
             return 1
         utterance = item
         if not utterance.accepted:  # type: ignore[attr-defined]
+            # 丢弃也要留痕。以前这里是裸的 `continue`：用户说完一句话，
+            # 胶囊上字幕闪一下，然后什么都没有——最容易被误判成「软件坏了」。
+            runtime.note_dropped(utterance)
+            _hint_rejection(runtime, utterance)
             continue
         if pipeline.echo.is_interrupt(utterance.text) and stop_speaking():
             runtime.bus.emit("idle", "已停止", utterance.text)
@@ -645,7 +725,7 @@ def _dispatch_loop(runtime: Runtime, pipeline: audio.AudioPipeline,
             ui.play(sounds["listen"])
         runtime.bus.emit("executing", "处理中…", utterance.text)
         result = runtime.dispatch(utterance.text)
-        runtime.record(utterance.text, result)
+        runtime.record(utterance.text, result, utterance)
         state, word = _RESULT_WORD.get(result.route, ("done", "完成"))
         runtime.bus.emit(state, word, result.reply)
         # 听不懂的时候只显示、不朗读：常驻监听会把屋里所有闲聊都收进来，
@@ -955,6 +1035,37 @@ def cmd_models(args: argparse.Namespace, cfg: Config) -> int:
     return fetch(target, proxy=args.proxy, force=args.force, with_asr=not args.no_asr)
 
 
+def cmd_log(args: argparse.Namespace, cfg: Config) -> int:
+    """会话时间线 + 诊断：「我说了什么、它做了什么、为什么没做」。
+
+    这个命令存在的理由只有一个：**「为什么没反应」要能一次答完**。
+    以前这个问题的答案在两份日志里都不存在——审计只记工具调用，状态只记
+    状态变化，而被丢弃的句子两边都没有。用户只能猜「是不是坏了」。
+    """
+    turns = timeline.recent(cfg=cfg, limit=int(args.limit))
+    if not turns:
+        print("还没有记录。说一句话试试（voxos run）。")
+        return 0
+    fields = timeline.Turn.__dataclass_fields__
+    print(f"{'时间':<9} {'结局':<4} {'音频':>7} {'声纹':>5} {'动作':<18} 详情")
+    print("-" * 92)
+    for row in reversed(turns):
+        turn = timeline.Turn(**{k: v for k, v in row.items() if k in fields})
+        print(turn.line())
+
+    findings = lessons.diagnose(turns, limit=3)
+    if findings:
+        print("\n当前最该修的：")
+        for finding in findings:
+            print("  " + finding.line().replace("\n", "\n  "))
+    blind = lessons.unmatched(turns, limit=8)
+    if blind:
+        print("\n没听懂的话（攒够几条就该加一条快通道正则）：")
+        for text in blind:
+            print(f"  · {text}")
+    return 0
+
+
 def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
     checks = [
         ("python", sys.version.split()[0]),
@@ -964,7 +1075,7 @@ def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
         ("tmux", shutil.which("tmux") or "缺失"),
         ("say/afplay", shutil.which("say") or "缺失"),
         ("声纹模型", str(cfg.path("audio.speaker_model", "")) if cfg.path("audio.speaker_model", "").exists() else "缺失（降级）"),
-        ("声纹档案", "已录入" if cfg.path("audio.voiceprint_profiles").exists() else "未录入"),
+        ("声纹档案", _voiceprint_note(cfg)),
         ("LLM", _llm_note(cfg)),
         ("语音合成", _tts_note(cfg)),
         ("识别后端", _hotword_note(cfg, [])),
@@ -1074,6 +1185,29 @@ def _tts_note(cfg: Config) -> str:
         return why
     last = core.tts_failure()
     return f"{why}（上次失败：{last}）" if last else why
+
+
+def _voiceprint_note(cfg: Config) -> str:
+    """声纹档案里有几个样本。
+
+    **只报「已录入」是不够的**：录 1 个样本和录 3 个样本取均值，是两种完全不同的
+    可靠性。配置注释里写着「只录 1 句时同人换句话只有 0.751」，而阈值默认 0.75——
+    差 0.001。于是现象是「有时能用有时不能用」，而用户看到的只有「已录入」。
+    """
+    path = cfg.path("audio.voiceprint_profiles")
+    if not path.exists():
+        return "未录入（voxos enroll --record 3）"
+    try:
+        import numpy as np  # noqa: PLC0415
+
+        data = np.load(str(path), allow_pickle=True)
+        counts = [1 if len(data[key].shape) == 1 else data[key].shape[0] for key in data.keys()]
+    except Exception as exc:                      # 文件损坏也要能报，不能崩
+        return f"已录入（读不出来：{exc}）"
+    low = min(counts) if counts else 0
+    if low < 2:
+        return f"已录入，但只有 {low} 个样本 ← 阈值边缘，建议重录：voxos enroll --record 3"
+    return f"已录入（{low} 个样本取均值）"
 
 
 def _turn_note(cfg: Config) -> str:
@@ -1243,6 +1377,10 @@ def _add_extra(sub: argparse._SubParsersAction) -> None:
     prompts = sub.add_parser("prompts", help="看当前生效的提示词与来源文件")
     prompts.add_argument("--role", default=None, help="临时换角色看效果（DEVELOPER/OPS/DOCTOR）")
     prompts.set_defaults(func=cmd_prompts)
+
+    log = sub.add_parser("log", help="会话时间线：说了什么、做了什么、为什么没做")
+    log.add_argument("--limit", type=int, default=30, help="显示最近多少条（默认 30）")
+    log.set_defaults(func=cmd_log)
 
     for name, hint, func in (("stop", "停掉在跑的 run", cmd_stop),
                              ("port", "打印界面端口", cmd_port),

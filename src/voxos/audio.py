@@ -844,5 +844,12 @@ class AudioPipeline:
         return Utterance(text, score, audio_ms, True)
 
     def _drop(self, audio_ms: float, score: float, reason: str) -> Utterance:
+        """丢弃一段话。**把已经识别出来的半句带上**。
+
+        以前这里返回的是空字符串，于是「我听到的是『请打开微信』，因为声纹不匹配
+        被丢掉了」这条信息在音频层就消失了——上层只能 `continue`，用户看到的
+        是胶囊上那句字幕闪一下、然后什么都没有。那是整个系统里最容易让人
+        以为「软件坏了」的空白。
+        """
         self.stats["rejected"] += 1
-        return Utterance("", score, audio_ms, False, reason=reason)
+        return Utterance(self._text, score, audio_ms, False, reason=reason)

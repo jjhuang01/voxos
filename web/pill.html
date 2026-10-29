@@ -192,6 +192,16 @@
   .tag.offline{background:rgba(255,255,255,.09);color:var(--muted)}
   .tag.ignore{background:rgba(255,159,10,.14);color:#FFB84D}
   .tag.chat{background:rgba(255,255,255,.1);color:#B9BFC9}
+  /* 结局标签：四种结局要一眼分得开。以前只有路由标签（fast/llm），
+     于是「没听懂」和「执行失败」长得一模一样——那正是用户看不出问题的时候。 */
+  .tag.dropped{background:rgba(255,69,58,.16);color:#FF7A70}
+  .tag.missed{background:rgba(255,159,10,.14);color:#FFB84D}
+  .tag.acted{background:rgba(48,209,88,.14);color:#5FDD7E}
+  .tag.failed{background:rgba(255,69,58,.16);color:#FF7A70}
+  .tag.chatting{background:rgba(255,255,255,.1);color:#B9BFC9}
+  /* 中间那行：走了哪条路、调了什么工具、花了多久 */
+  .row .m{color:var(--dim);font-size:10.5px;margin-top:2px;font-variant-numeric:tabular-nums;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .empty{color:var(--dim);font-size:12px;text-align:center;padding:26px 0}
 
   /* 设置 */
@@ -596,22 +606,43 @@ function setOnboard(on) {
     : '直接说话就行，不用点任何按钮。危险操作会在这里等你确认。';
 }
 
+/* 一行 = 一次完整回合：我说了什么 → 它想干什么 → 干了什么 → 结果。
+   以前只有「说了什么 + 回了什么」，于是「没听懂」和「执行失败」看起来一样，
+   而被丢弃的句子根本不出现——用户只能猜「是不是坏了」。 */
+const OUTCOME = {dropped:'丢弃', missed:'没懂', acted:'执行', failed:'失败', chatting:'回话'};
+
+function rowHtml(row) {
+  const outcome = row.outcome || 'acted';
+  const time = String(row.ts || '').slice(11, 19);
+  const said = row.text || '（没识别出字）';
+  /* 中间那行只放「能定位问题」的信息：调了哪个工具、识别花了多久、声纹多少。
+     声纹这项最有用——它掉到 0.7x 的时候用户才知道「不是它不听话，是没认出来」。 */
+  const bits = [];
+  if (row.tool) bits.push(row.tool);
+  else if (row.route) bits.push(row.route);
+  if (row.audio_ms) bits.push(Math.round(row.audio_ms) + 'ms 音频');
+  if (row.score) bits.push('声纹 ' + Number(row.score).toFixed(2));
+  if (row.ms) bits.push(Math.round(row.ms) + 'ms');
+  const result = row.reason || row.reply || '';
+  return `<div class="row">
+    <span class="t">${escapeHtml(time)}</span>
+    <div class="c">
+      <div class="q">
+        <span class="txt">${escapeHtml(said)}</span>
+        <span class="tag ${outcome}">${OUTCOME[outcome] || outcome}</span>
+      </div>
+      ${bits.length ? `<div class="m">${escapeHtml(bits.join(' · '))}</div>` : ''}
+      ${result ? `<div class="a">${escapeHtml(result)}</div>` : ''}
+    </div>
+  </div>`;
+}
+
 async function loadRecent() {
   const box = $('recent');
   try {
     const rows = await api('/api/history');
     if (!rows.length) { box.innerHTML = '<div class="empty">还没有记录。说一句话试试。</div>'; return; }
-    box.innerHTML = rows.map(row => `
-      <div class="row">
-        <span class="t">${row.ts || ''}</span>
-        <div class="c">
-          <div class="q">
-            <span class="txt">${escapeHtml(row.text || '')}</span>
-            <span class="tag ${row.route || ''}">${ROUTE[row.route] || row.route || ''}</span>
-          </div>
-          <div class="a">${escapeHtml(row.reply || '没听懂，什么也没做')}</div>
-        </div>
-      </div>`).join('');
+    box.innerHTML = rows.map(rowHtml).join('');
   } catch (error) { box.innerHTML = `<div class="empty">${error.message}</div>`; }
 }
 

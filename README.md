@@ -149,7 +149,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 四个模型一次下齐（约 276MB）
 python scripts/fetch_models.py --no-asr      # 跳过 239MB 识别模型（37MB：声纹 + VAD + 判停）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 375 项测试
+make test                                    # 385 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
@@ -311,6 +311,8 @@ voxos/
 │   ├── mel.py              # Whisper log-mel（80×800），移植自 pipecat/transformers
 │   ├── turn.py             # 语义判停：smart-turn v3.2 吃音频不吃文本，缺模型退回词表
 │   ├── stream.py           # 流式识别：窗口字幕（无需新模型）/ sherpa 真流式，首字 ~70ms
+│   ├── timeline.py         # 会话时间线：说→意图→动作→结果，含被丢弃的回合
+│   ├── lessons.py          # 抗体库：症状→修法、最该修的三件事、没听懂的话
 │   ├── audio.py            # 设备源、自愈重连、Silero/Sherpa 适配、STT、管道
 │   ├── ui.py               # 状态总线 + SSE 服务 + Earcon 合成
 │   ├── corpus.py           # 验收语料生成（say 合成 / 合成音降级）
