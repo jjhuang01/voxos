@@ -261,6 +261,18 @@ def cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / denominator) if denominator > _EPS else 0.0
 
 
+def mean_vector(vectors: list[np.ndarray]) -> np.ndarray:
+    """归一化后取均值，再归一化——声纹模板的标准做法。
+
+    先逐条归一化再平均，而不是直接平均：否则音量大的那段会主导模板，而音量
+    与「是谁」无关。抽成公共函数是因为录入和留出验证必须用**同一个**模板算法，
+    否则报出来的分数和实际用的档案不是一个东西。
+    """
+    stacked = np.stack([v / (np.linalg.norm(v) + _EPS) for v in vectors])
+    mean = stacked.mean(axis=0)
+    return (mean / (np.linalg.norm(mean) + _EPS)).astype(np.float32)
+
+
 @dataclass
 class SpeakerLock:
     """双模声纹锁：normal / mask 两组嵌入，校验取最大相似度。
@@ -278,8 +290,7 @@ class SpeakerLock:
         if not vectors:
             raise ValueError("有效音频不足（每段至少 0.1 秒）")
         stacked = np.stack([v / (np.linalg.norm(v) + _EPS) for v in vectors])
-        mean = stacked.mean(axis=0)
-        mean = (mean / (np.linalg.norm(mean) + _EPS)).astype(np.float32)
+        mean = mean_vector(vectors)
         self.profiles[mode] = mean
         if len(vectors) > 1:
             return float(np.mean([cosine(v, mean) for v in stacked]))

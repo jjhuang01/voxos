@@ -272,6 +272,7 @@ def test_enroll_warns_when_only_one_sentence_was_captured(monkeypatch):
 
     class FakeLock:
         profiles: dict = {}
+        threshold = 0.75
 
         def enroll(self, samples):
             self.profiles["normal"] = np.ones(192, dtype="float32")
