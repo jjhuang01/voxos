@@ -26,12 +26,20 @@
   `--version` 报 0.1.38；`doctor` 说得清配置在哪；首次启动 seed 出用户配置；
   资源根与数据根分家；`make_stt` 的相对 `model_dir` 按数据根解析；
   改配置后重启仍在，且安装目录那份一个字节没动；
-- `pipx install --force` → `voxos 0.1.38`（Python 3.14.7），`voxos --version` 一致；
+- 装机器上先犯了一次错：直接用 `pipx install --force <whl>`，版本号对了、`--version` 也对，
+  但 `voxos run` 一开就 `ModuleNotFoundError: sherpa_onnx` 退出——**force 重装把上次
+  inject 进去的 sherpa-onnx / sounddevice / onnxruntime 一起清掉了**（`scripts/install.sh`
+  的注释里就写着这个坑，我没读）。改走 `bash scripts/install.sh <whl>` 后 `doctor`
+  恢复为「判停 smart-turn v3.2 / VAD SileroVad / 输入设备 MacBook Pro麦克风」；
 - `bash scripts/build_app.sh --install` → `/Applications/VoxOS.app`，
   `Info.plist` 的 `CFBundleShortVersionString` = 0.1.38；
-- `voxos cue "…"` 真的落进 `~/.voxos/cues/` 并被取走（自检文件已清理）。
-- 装好的 CLI 里 `onnxruntime` / `sounddevice` 缺失、判停退回文本判停、输入设备不可用——
-  这是 pipx 只装基础依赖的既有状态，不是本版回归；要麦克风仍按 `doctor` 提示 inject。
+- 重启守护进程后实测：`/api/status` 报 `version=0.1.38`、`dialogue=assistant`、
+  `listening=true`；页面含 `id="modes"` 三档控件；
+- `voxos cue "…"` 投递后 6 秒内投递箱被取空（守护进程轮询确实在跑）。
+  **未验证**：是否真的从扬声器出声（无录音回采，不做主观听感结论）。
+- **抓到的缺口**：`install_smoke.sh` 6/6 覆盖不到「装完能不能 `voxos run`」，
+  所以上面那次依赖丢失它是绿灯。要么补一条「装完起一次 run 并等端口」，
+  要么把 `doctor` 的缺依赖从「提示」升级成安装失败——记入待办，本版没改。
 
 独立无清理验证：
 - 插话 5 项内存断言通过；smart-turn 无效输入/输出 2 项通过。
