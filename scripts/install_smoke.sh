@@ -96,7 +96,7 @@ from voxos.config import load
 seen = []
 
 class Recorder:
-    def __init__(self, model_dir, num_threads=2):
+    def __init__(self, model_dir, num_threads=2, language="auto"):
         seen.append(Path(model_dir))
 
 audio.SenseVoiceStt = Recorder
