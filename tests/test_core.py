@@ -227,8 +227,8 @@ def test_a_very_old_utterance_is_skipped_instead_of_executed(cfg):
     """
     import queue
     import threading
-    import time as _time
     import types
+    from unittest.mock import patch
 
     from voxos import ui
     from voxos.main import _dispatch_loop
@@ -242,11 +242,13 @@ def test_a_very_old_utterance_is_skipped_instead_of_executed(cfg):
 
     pipeline = types.SimpleNamespace(echo=types.SimpleNamespace(is_interrupt=lambda t: False))
     box: queue.Queue = queue.Queue()
+    # 时钟钉死：`time.monotonic()` 在容器里可能只有 1 秒，直接减 30 会得到负数
     box.put(types.SimpleNamespace(text="打开微信", score=0.9, audio_ms=1200,
-                                  accepted=True, at=_time.monotonic() - 30))
+                                  accepted=True, at=970.0))
     box.put(None)
 
-    assert _dispatch_loop(runtime, pipeline, box, {}, threading.Event()) == 0
+    with patch("voxos.main.time.monotonic", return_value=1000.0):
+        assert _dispatch_loop(runtime, pipeline, box, {}, threading.Event()) == 0
     assert executed == [], "过期的话不该被执行"
     assert any("秒前说的" in detail for _, _, detail in shown), "要说明为什么跳过"
 
@@ -255,8 +257,8 @@ def test_a_fresh_utterance_still_runs(cfg):
     """刚说完的话当然要执行——过期判断不能把正常的一句也吞掉。"""
     import queue
     import threading
-    import time as _time
     import types
+    from unittest.mock import patch
 
     from voxos import ui
     from voxos.main import Runtime, _dispatch_loop
@@ -275,10 +277,11 @@ def test_a_fresh_utterance_still_runs(cfg):
     pipeline = types.SimpleNamespace(echo=types.SimpleNamespace(is_interrupt=lambda t: False))
     box: queue.Queue = queue.Queue()
     box.put(types.SimpleNamespace(text="记一下日志", score=0.9, audio_ms=1200,
-                                  accepted=True, at=_time.monotonic()))
+                                  accepted=True, at=999.0))
     box.put(None)
 
-    _dispatch_loop(runtime, pipeline, box, {}, threading.Event())
+    with patch("voxos.main.time.monotonic", return_value=1000.0):
+        _dispatch_loop(runtime, pipeline, box, {}, threading.Event())
     assert executed == ["记一下日志"]
 
 
