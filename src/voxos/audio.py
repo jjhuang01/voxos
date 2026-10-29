@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -558,6 +559,7 @@ class Utterance:
     audio_ms: float
     accepted: bool
     reason: str = ""
+    at: float = 0.0        # 这句话收尾的时刻（monotonic）。0 表示不知道，不参与过期判断
 
 
 @dataclass
@@ -573,6 +575,7 @@ class AudioPipeline:
     on_barge_in: Callable[[], None] | None = None
     echo: dsp.EchoGate = field(default_factory=dsp.EchoGate)
     partial_interval_ms: float = 400.0
+    carry_ttl_ms: float = 2000.0      # 打断时攒下的音频最多等这么久，过时作废
     turn_detector: Any = None        # 显式注入（测试用）；None 时按配置造
     stats: dict[str, int] = field(default_factory=lambda: {"chunks": 0, "utterances": 0, "rejected": 0})
 
@@ -607,11 +610,17 @@ class AudioPipeline:
         self._shown = ""           # 上次推给界面的字幕，重复的不推
         self._barge: list[np.ndarray] = []   # TTS 期间攒下的「可能是插话」的音频
         self._barge_ms = 0.0
+        # 判定为插话后，那 500ms **不是可疑音频，是用户这句话的前半句**。
+        # 丢掉它，转写出来就是「…我说的是另一个」，开头没了；留着并在下一句
+        # 起手时补回去，用户就不用把整句重说一遍。
+        self._carry: list[np.ndarray] = []
+        self._carry_at = 0.0                 # 攒下它的时刻（monotonic），过久就作废
 
     def reset(self) -> None:
         """设备断流后清掉句级状态：旧缓冲、端点状态和 VAD 上下文都不能跨断流。"""
         self._ep.reset()
         self._prefix, self._prefix_ms = [], 0.0
+        self._carry = []
         self._clear_sentence()
         reset = getattr(self.vad, "reset", None)
         if callable(reset):
@@ -658,9 +667,7 @@ class AudioPipeline:
                 self._keep_prefix(chunk)
                 continue
             if not started:
-                buffer.extend(self._prefix)     # 起手那 300ms 补回去
-                self._begin_sentence()
-                self._prefix, self._prefix_ms = [], 0.0
+                self._start_sentence(buffer)
                 started = True
             buffer.append(chunk)
             self._absorb(chunk)
@@ -692,16 +699,31 @@ class AudioPipeline:
             self.streamer.push(chunk)
             self._maybe_subtitle()
 
-    def _begin_sentence(self) -> None:
-        """一句话开始：清句级状态，并把补回来的起手 300ms 也喂给流式识别器。
+    def _start_sentence(self, buffer: list[np.ndarray]) -> None:
+        """一句话开始：把该补的音频补回开头，再清句级状态。
+
+        两段来源，时间上先 `carry`（打断时攒下的前半句）后 `prefix`（起手
+        300ms）——顺序反了，转写出来的字序就是乱的。
+        """
+        carry = self._take_carry()
+        buffer.extend(carry)
+        buffer.extend(self._prefix)
+        self._begin_sentence(carry)
+        self._prefix, self._prefix_ms = [], 0.0
+
+    def _begin_sentence(self, carry: list[np.ndarray] | None = None) -> None:
+        """一句话开始：清句级状态，并把补回来的音频也喂给流式识别器。
 
         漏了最后这一步，字幕的开头会永远少一个字——用户说「帮我把」，字幕显示
         「我把」。原因和 `prefix_padding_ms` 那个 bug 一模一样：VAD 判出人声时，
         第一个音素已经在上一块里了。
+
+        `carry` 是打断时攒下的那 500ms（见 `_keep_carry`），比 `_prefix` 更早，
+        所以先喂它。
         """
         self._clear_sentence()
         if self.streamer is not None:
-            for item in self._prefix:
+            for item in (*(carry or []), *self._prefix):
                 self.streamer.push(item)
                 self._buf_ms += item.size / dsp.SR * 1000.0
 
@@ -783,14 +805,20 @@ class AudioPipeline:
         音频送去识别**——转写出来会是「TTS 内容 + 用户的话」粘在一起。但
         「用户想打断」这件事必须被听见，所以先攒着判一次。
 
-        攒下来的这 500ms 不塞回缓冲：塞回去要伪造 VAD 状态，出错时更难查。
-        代价是用户插话后得把话说完整一遍——但比「说了完全没反应」好得多。
+        判定为插话的那 500ms **不丢**：交给 `_keep_carry`，等下一句起手时补回
+        开头（见 `_keep_carry`）。不补的话，用户插话后的转写会是「…说的是另一个」，
+        前半句没了，得整句重说一遍。
         """
-        if dsp.dbfs(chunk) > self.echo.gate_dbfs:
-            self._barge.append(chunk)
-            self._barge_ms += chunk.size / dsp.SR * 1000.0
-            if self._barge_ms >= self.echo.interrupt_ms:
-                self._fire_barge_in()
+        if dsp.dbfs(chunk) <= self.echo.gate_dbfs:
+            return np.zeros_like(chunk)
+        if not self.echo.speaking:                 # 已经打断过，还在混响期
+            if self._carry:
+                self._carry.append(chunk)          # 同一句话的延续，接着攒
+            return np.zeros_like(chunk)
+        self._barge.append(chunk)
+        self._barge_ms += chunk.size / dsp.SR * 1000.0
+        if self._barge_ms >= self.echo.interrupt_ms:
+            self._fire_barge_in()
         return np.zeros_like(chunk)
 
     def _fire_barge_in(self) -> None:
@@ -808,9 +836,29 @@ class AudioPipeline:
         if not ok:
             return                              # 自己的回声：继续播报
         self.echo.tts_end()
+        self._keep_carry(audio)
         self.on_event("warn", "打断", f"检测到插话（声纹 {score:.2f}），已停止播报")
         if self.on_barge_in is not None:
             self.on_barge_in()
+
+    def _keep_carry(self, audio: np.ndarray) -> None:
+        """把判定为插话的音频留下来，下一句起手时补回开头。
+
+        超过 `carry_ttl_ms` 还没等到下一句就作废：用户只说了半句「等一下」
+        就走了，那半句不该在十秒后粘到另一句话前面。
+        """
+        span = int(dsp.SR * self.carry_ttl_ms / 1000.0)
+        self._carry = [audio] if audio.size and span > 0 else []
+        self._carry_at = time.monotonic()
+
+    def _take_carry(self) -> list[np.ndarray]:
+        """取走待补的音频；过期了就丢掉并返回空。"""
+        if not self._carry:
+            return []
+        carry, self._carry = self._carry, []
+        if (time.monotonic() - self._carry_at) * 1000.0 > self.carry_ttl_ms:
+            return []
+        return carry
 
     def _maybe_finalize(self, buffer: list[np.ndarray], state: str,
                         last_partial_ms: float) -> Utterance | None:
@@ -912,7 +960,7 @@ class AudioPipeline:
         # detail 放最终文本而不是「1800ms 声纹 0.82」：胶囊会把这一行显示出来，
         # 用户最想看的是「它到底听到的是哪句话」——那是唯一能纠正误识别的反馈。
         self.on_event("listening", "聆听中", text)
-        return Utterance(text, score, audio_ms, True)
+        return Utterance(text, score, audio_ms, True, at=time.monotonic())
 
     def _drop(self, audio_ms: float, score: float, reason: str) -> Utterance:
         """丢弃一段话。**把已经识别出来的半句带上**。
@@ -923,4 +971,5 @@ class AudioPipeline:
         以为「软件坏了」的空白。
         """
         self.stats["rejected"] += 1
-        return Utterance(self._text, score, audio_ms, False, reason=reason)
+        return Utterance(self._text, score, audio_ms, False, reason=reason,
+                         at=time.monotonic())

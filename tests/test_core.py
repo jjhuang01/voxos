@@ -216,3 +216,114 @@ def test_withdrawal_denies_a_pending_confirmation(cfg):
 
     assert result.reply == "好，不做了"
     assert runtime.gate.resolve(True, "req-1") is False, "已经拒过，就不能再批"
+
+
+def test_a_very_old_utterance_is_skipped_instead_of_executed(cfg):
+    """排队排过一整个回合的话，不要再执行——它已经是「过去的意思」了。
+
+    派发是单线程顺序的：一句在跑（实测一次 LLM 回合 4.8 秒），后面说的话只能
+    排队。十秒前说的「打开微信」现在才执行，用户早忘了自己说过；而且他刚才
+    可能已经改主意了。跳过并说明原因，比默默执行安全。
+    """
+    import queue
+    import threading
+    import time as _time
+    import types
+
+    from voxos import ui
+    from voxos.main import _dispatch_loop
+    from voxos.main import Runtime
+
+    runtime = Runtime(cfg, ui.StatusBus())
+    shown: list[tuple[str, str, str]] = []
+    runtime.bus.emit = lambda state, label, detail="": shown.append((state, label, detail))
+    executed: list[str] = []
+    runtime.dispatch = lambda text, context=None: executed.append(text)
+
+    pipeline = types.SimpleNamespace(echo=types.SimpleNamespace(is_interrupt=lambda t: False))
+    box: queue.Queue = queue.Queue()
+    box.put(types.SimpleNamespace(text="打开微信", score=0.9, audio_ms=1200,
+                                  accepted=True, at=_time.monotonic() - 30))
+    box.put(None)
+
+    assert _dispatch_loop(runtime, pipeline, box, {}, threading.Event()) == 0
+    assert executed == [], "过期的话不该被执行"
+    assert any("秒前说的" in detail for _, _, detail in shown), "要说明为什么跳过"
+
+
+def test_a_fresh_utterance_still_runs(cfg):
+    """刚说完的话当然要执行——过期判断不能把正常的一句也吞掉。"""
+    import queue
+    import threading
+    import time as _time
+    import types
+
+    from voxos import ui
+    from voxos.main import Runtime, _dispatch_loop
+
+    runtime = Runtime(cfg, ui.StatusBus())
+    runtime.bus.emit = lambda state, label, detail="": None
+    executed: list[str] = []
+
+    def fake_dispatch(text, context=None):
+        executed.append(text)
+        return core.DispatchResult(route="fast", text=text, reply="日志已记录")
+
+    runtime.dispatch = fake_dispatch
+    runtime.cfg.data["ui"] = {"earcons": False, "speak": False}
+
+    pipeline = types.SimpleNamespace(echo=types.SimpleNamespace(is_interrupt=lambda t: False))
+    box: queue.Queue = queue.Queue()
+    box.put(types.SimpleNamespace(text="记一下日志", score=0.9, audio_ms=1200,
+                                  accepted=True, at=_time.monotonic()))
+    box.put(None)
+
+    _dispatch_loop(runtime, pipeline, box, {}, threading.Event())
+    assert executed == ["记一下日志"]
+
+
+def test_the_voiceprint_hint_only_appears_after_three_rejections(cfg):
+    """单次拒绝是正常行为（屋里别人说话就该拒），连续 3 句才提示一次。
+
+    每句都弹提示会把胶囊变成报警器；一次都不弹，用户只能看到「一片安静」。
+    """
+    import types
+
+    from voxos import ui
+    from voxos.main import Runtime, _hint_rejection, _REJECT
+
+    _REJECT.update(voice=0, hinted=False)
+    runtime = Runtime(cfg, ui.StatusBus())
+    shown: list[str] = []
+    runtime.bus.emit = lambda state, label, detail="": shown.append(label)
+
+    rejected = types.SimpleNamespace(reason="声纹不匹配，已丢弃")
+    for _ in range(2):
+        _hint_rejection(runtime, rejected)
+    assert shown == [], "只拒了 2 句，还不该提示"
+
+    _hint_rejection(runtime, rejected)
+    assert shown == ["声纹连续拒绝"]
+
+    _hint_rejection(runtime, rejected)
+    assert shown == ["声纹连续拒绝"], "同一次故障只提示一次，不要反复弹"
+
+
+def test_an_unrelated_rejection_resets_the_streak(cfg):
+    """「太短」「空转写」这些不是声纹问题，不能算进连续拒绝里。"""
+    import types
+
+    from voxos import ui
+    from voxos.main import Runtime, _hint_rejection, _REJECT
+
+    _REJECT.update(voice=0, hinted=False)
+    runtime = Runtime(cfg, ui.StatusBus())
+    shown: list[str] = []
+    runtime.bus.emit = lambda state, label, detail="": shown.append(label)
+
+    for _ in range(2):
+        _hint_rejection(runtime, types.SimpleNamespace(reason="声纹不匹配，已丢弃"))
+    _hint_rejection(runtime, types.SimpleNamespace(reason="太短，已丢弃"))
+    _hint_rejection(runtime, types.SimpleNamespace(reason="声纹不匹配，已丢弃"))
+
+    assert shown == [], "中间夹了一条非声纹的，连续计数要断掉"

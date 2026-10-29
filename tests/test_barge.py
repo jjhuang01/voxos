@@ -144,6 +144,55 @@ def test_the_threshold_really_comes_from_the_config(cfg):
     assert _fires(cfg, 900, interrupt_ms=1200.0) is False
 
 
+def _barge_then_continue() -> np.ndarray:
+    """先说 700ms（打断），停 300ms（混响期），再说 600ms（接着往下说）。"""
+    gap = np.zeros(int(SR * 0.3), dtype=np.float32)
+    return np.concatenate([_loud(ms=700), gap, _loud(ms=600)])
+
+
+def _utterance_after_barge(cfg, carry_ttl_ms: float = 2000.0) -> float:
+    """跑一遍「打断 → 接着说」，返回最后那句的时长（毫秒）。"""
+    pipeline = audio.AudioPipeline(
+        cfg=cfg, stt=_StopStt(), lock=_AlwaysOn(), vad=dsp.EnergyVad(),
+        echo=dsp.EchoGate(), carry_ttl_ms=carry_ttl_ms)
+    pipeline.echo.tts_start()
+    spoken = list(pipeline.run(audio.ArraySource(_barge_then_continue())))
+    assert spoken, "打断之后接着说，应该产出一句话"
+    return spoken[-1].audio_ms
+
+
+def test_the_interrupt_audio_becomes_the_start_of_the_next_sentence(cfg):
+    """判定为插话的那 500ms 不能丢——它就是用户这句话的前半句。
+
+    丢了的话转写出来是「…说的是另一个」，开头没了，用户得整句重说一遍；
+    而他刚才明明已经说过了。所以攒下的音频要接回下一句的开头。
+
+    同一段音频，只改 `carry_ttl_ms` 就是一次消融：留着比丢掉多出的那截，
+    正是被打断的那段音频（实测 704ms = 判定的 512ms + 混响期继续攒的 192ms）。
+    """
+    kept = _utterance_after_barge(cfg)
+    dropped = _utterance_after_barge(cfg, carry_ttl_ms=0.0)
+
+    extra = kept - dropped
+    assert extra >= 400, f"插话那截没接回去（只多出 {extra:.0f}ms）"
+    assert 650 <= extra <= 780, f"接回去的量不对：{extra:.0f}ms，应当≈700ms"
+
+
+def test_carry_expires_so_an_old_phrase_does_not_glue_onto_a_new_one(cfg):
+    """只说了半句「等一下」就走开，那半句不该在十秒后粘到另一句话前面。
+
+    没有这个期限，攒下的音频会一直等着——用户过一会儿随口说一句「打开微信」，
+    转写出来就是「等一下打开微信」，两个不相干的意图粘在一起。
+    """
+    pipeline = _pipeline(cfg)
+    pipeline._keep_carry(np.ones(512, dtype=np.float32))
+    assert pipeline._take_carry(), "刚攒下的时候应该取得到"
+
+    pipeline._keep_carry(np.ones(512, dtype=np.float32))
+    pipeline._carry_at -= 3.0                      # 假装过了 3 秒（TTL 是 2 秒）
+    assert pipeline._take_carry() == [], "过期的音频要丢掉，不能粘到新句子上"
+
+
 def test_is_interrupt_matches_common_phrasings():
     gate = dsp.EchoGate()
     for text in ("停", "停一下", "别说了", "算了", "取消", "不用了"):

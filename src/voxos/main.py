@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import webbrowser
 from collections import deque
 from pathlib import Path
@@ -245,8 +246,32 @@ def _hint_rejection(runtime: Runtime, utterance: object) -> None:
                          "连续 3 句没通过声纹，可能是麦克风变了：voxos enroll（10 秒说 2~3 句）")
 
 
-# ------------------------------------------------------------------ 隐式上下文
+# ------------------------------------------------------------------ 过期的话
 
+# 派发是**单线程顺序**的：一句话在跑（模型、确认、工具），后面说的话只能排队。
+# 实测一次 LLM 回合 4.8 秒（`voxos text` 量的），排过一整个回合，那句就已经是
+# 「过去的意思」了——十秒前说的「打开微信」现在才执行，用户早忘了自己说过。
+# 所以超过这个时长就跳过并说明原因。留的是一个完整回合加余量。
+_STALE_S = 10.0
+
+
+def _stale_age(utterance: object) -> float:
+    """这句话在队列里等了多久（秒）。`at` 为 0 表示不知道，不判过期。"""
+    at = float(getattr(utterance, "at", 0.0) or 0.0)
+    return 0.0 if at <= 0 else time.monotonic() - at
+
+
+def _stale_note(utterance: object, age: float) -> types.SimpleNamespace:
+    """把「排队排到过期」写成一条丢弃记录，好让它进时间线。"""
+    return types.SimpleNamespace(
+        text=str(getattr(utterance, "text", "") or ""),
+        score=float(getattr(utterance, "score", 0.0) or 0.0),
+        audio_ms=float(getattr(utterance, "audio_ms", 0.0) or 0.0),
+        reason=f"排队 {age:.0f} 秒，已过期（上一条还在跑）",
+    )
+
+
+# ------------------------------------------------------------------ 隐式上下文
 _CTX = {"window": "unknown", "at": 0.0, "busy": False}
 _CTX_TTL = 3.0
 _CTX_LOCK = threading.Lock()
@@ -769,6 +794,12 @@ def _dispatch_loop(runtime: Runtime, pipeline: audio.AudioPipeline,
             # 胶囊上字幕闪一下，然后什么都没有——最容易被误判成「软件坏了」。
             runtime.note_dropped(utterance)
             _hint_rejection(runtime, utterance)
+            continue
+        age = _stale_age(utterance)
+        if age > _STALE_S:
+            runtime.bus.emit("warn", "已跳过",
+                             f"{utterance.text}（{age:.0f} 秒前说的，不做了）")
+            runtime.note_dropped(_stale_note(utterance, age))
             continue
         if pipeline.echo.is_interrupt(utterance.text) and stop_speaking():
             runtime.bus.emit("idle", "已停止", utterance.text)

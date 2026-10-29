@@ -149,7 +149,7 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 四个模型一次下齐（约 276MB）
 python scripts/fetch_models.py --no-asr      # 跳过 239MB 识别模型（37MB：声纹 + VAD + 判停）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 412 项测试
+make test                                    # 418 项测试
 make verify                                  # 工程验收（18 通过 + 1 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
