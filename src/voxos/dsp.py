@@ -144,11 +144,15 @@ class EndpointDetector:
         return "candidate" if self.silence_ms_now >= self.deadline_ms else "speech"
 
     def extend(self) -> None:
-        """「没说完」：把等待窗口拉长到 `extended_ms`，只拉一次。
+        """「没说完」：把等待窗口拉到 `extended_ms`，只拉一次。
 
         单独成一个方法是因为现在有两条判停路径（文本尾词 / 音频模型），
         「拉长窗口」这件事两边都要做，而且必须做成一模一样——否则换个判停
         后端，用户感受到的「断断续续说」容忍度就变了。
+
+        `extended_ms` 是**总时长**，不是增量：这里直接把 `deadline_ms` 设成它。
+        所以 2500 的意思是「最多等到 2500ms 静音」，不是「基础静音再加 2500」。
+        这个区别实测差 500ms，而且两种写法都能让「继续等」看起来是对的。
         """
         self.deadline_ms, self.extended = self.extended_ms, True
 

@@ -210,15 +210,22 @@ def test_audio_turn_detector_finalises_without_a_partial_decode(cfg, bus, make_v
 
 
 def test_incomplete_verdict_waits_out_the_extended_window(cfg, bus, make_voice):
-    """模型说「没说完」→ 继续等 `endpoint_extend_ms`，别抢话。"""
-    stt = _CountingStt()
-    pipeline = audio.AudioPipeline(cfg=cfg, stt=stt, lock=_PassLock(), on_event=bus,
-                                   turn_detector=_FixedTurn(0.1))
-    utterances = [u for u in pipeline.run(audio.ArraySource(_stream(make_voice(118, 1.2), 4000)))
-                  if u.accepted]
-    assert len(utterances) == 1
-    # 800（基础静音，conftest 里的值）+ 2500（宽限）= 3300ms 静音之后才收尾
-    assert utterances[0].audio_ms > 3300
+    """模型说「没说完」→ 继续等到 `endpoint_extend_ms`，别抢话。
+
+    `endpoint_extend_ms` 是**总时长**，不是「在基础静音之上再加」：`deadline_ms`
+    被直接设成它。所以差别是 `extended_ms - silence_ms`（这里 2500 - 800 = 1700ms），
+    不是 `extended_ms`。写成加法也能让「继续等」看起来是对的，但会多等 800ms，
+    而且只有量出来才发现——所以这条断言测的是**两个配置值的差**，不是绝对值。
+    """
+    def waited(prob: float) -> float:
+        pipeline = audio.AudioPipeline(cfg=cfg, stt=_CountingStt(), lock=_PassLock(),
+                                       on_event=bus, turn_detector=_FixedTurn(prob))
+        stream = audio.ArraySource(_stream(make_voice(118, 1.2), 4000))
+        return [u.audio_ms for u in pipeline.run(stream) if u.accepted][0]
+
+    extended = cfg.get("audio.endpoint_extend_ms", 2500)
+    silence = cfg.get("audio.silence_duration_ms", 500)
+    assert waited(0.1) - waited(0.9) == pytest.approx(extended - silence, abs=120)
 
 
 def test_broken_model_falls_back_to_text_mid_stream(cfg, bus, make_voice):

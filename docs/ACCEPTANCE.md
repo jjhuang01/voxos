@@ -145,7 +145,7 @@ FRR = FAR = 0 的点，说明后端分得开，差的只是「一个阈值服务
 | `ui.py` | 474 | 状态总线 / SSE / Earcon / 本地接口 |
 | `settings.py` | 368 | 字段模式 / 范围校验 / 保留注释的 TOML 写回 / 撤销 |
 | `safety.py` | 351 | 红线网关 / 快照 / 执行器 / 审计 |
-| `dsp.py` | 333 | 纯函数信号处理（零 I/O，可离线测） |
+| `dsp.py` | 337 | 纯函数信号处理（零 I/O，可离线测） |
 | `mel.py` | 129 | Whisper log-mel 特征（80×800），移植自 pipecat/transformers，给 smart-turn 喂输入 |
 | `turn.py` | 122 | 语义判停：smart-turn v3.2 音频判停，缺模型时退回文本尾词 |
 | `config.py` | 229 | TOML + 环境变量 + 资源根/数据根分离 + 密钥文件 |
@@ -158,7 +158,7 @@ FRR = FAR = 0 的点，说明后端分得开，差的只是「一个阈值服务
 | `tts.py` | 178 | 云端语音合成（豆包 2.0 单向流式）：文本 → PCM 流，不碰播放设备 |
 | `messaging.py` | 91 | 发消息：微信没有 AppleScript 字典，只能生成 System Events 按键脚本 |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **6510** | 18 个工具 / 10 条快通道 / 354 项测试 |
+| **合计** | **6514** | 18 个工具 / 10 条快通道 / 354 项测试 |
 
 - 最长函数 **40 行**（`src/voxos/core.py:dispatch`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；
