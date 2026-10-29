@@ -82,7 +82,7 @@ def test_relative_model_dir_resolves_against_data_root(tmp_path: Path, monkeypat
     seen: list[str] = []
 
     class Recorder:
-        def __init__(self, model_dir, num_threads=2):  # noqa: ANN001
+        def __init__(self, model_dir, num_threads=2, language="auto"):  # noqa: ANN001
             seen.append(str(model_dir))
 
     monkeypatch.setattr(audio, "SenseVoiceStt", Recorder)

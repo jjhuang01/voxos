@@ -148,10 +148,10 @@
 
 ### Task 1.8 工程化
 
-- [~] 当前收集 556 项测试（`make test`），全量受环境清理确认保护阻断；历史已发布基线见验收表。
+- [~] 当前收集 561 项测试（`make test`），全量受环境清理确认保护阻断；历史已发布基线见验收表。
       `scripts/verify.py` 19 项验收指标（`make verify`），
       `scripts/audit_ui.py` 12 项界面回归（`make audit-ui`），`scripts/soak.py` 长稳（`make soak`）。
-- [x] 全模块单函数 ≤ 40 行（最长 39 行，`scripts/verify.py` 的 `measure_stt`）、核心五模块共 8 个类、核心零第三方依赖。
+- [x] 全模块单函数 ≤ 40 行（最长 40 行，`src/voxos/audio.py` 的 `__post_init__`）、核心五模块共 8 个类、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README。
       （`BUSINESS.md` 是商业文档，只留在本地，不进仓库。）
 

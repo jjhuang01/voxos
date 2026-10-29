@@ -13,7 +13,7 @@ class _StopStt:
     """桩 STT：无论听到什么都返回「停」，用来验证打断链路。"""
 
     def transcribe(self, audio_chunk: np.ndarray, final: bool = False) -> str:
-        return "停" if final else ""
+        return "停"
 
 
 def _loud(ms: float = 900, amplitude: float = 0.6) -> np.ndarray:
@@ -298,3 +298,62 @@ def test_backchannel_during_tts_does_not_interrupt_or_call_llm(monkeypatch, cfg)
     assert not dispatched, "反馈音不应当进入 LLM 派发"
     assert not stopped, "反馈音不应当主动请求停止播报"
     assert any(item[0] == "idle" and item[1] == "反馈音" for item in events)
+
+
+class _SaysStt:
+    """桩 STT：固定听成某句话，用来区分附和与插话。"""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def transcribe(self, audio_chunk: np.ndarray, final: bool = False) -> str:
+        return self.text
+
+
+def _fired_with(cfg, text: str, ms: float) -> bool:
+    gate = dsp.EchoGate()
+    fired: list[bool] = []
+    pipeline = audio.AudioPipeline(cfg=cfg, stt=_SaysStt(text), lock=_AlwaysOn(),
+                                   vad=dsp.EnergyVad(), echo=gate,
+                                   on_barge_in=lambda: fired.append(True))
+    gate.tts_start()
+    list(pipeline.run(audio.ArraySource(_loud(ms=ms))))
+    return bool(fired)
+
+
+def test_backchannel_during_tts_does_not_stop_playback(cfg):
+    """播报中本人说「嗯」：声纹过了也不能停播——以前 250ms 一到就停，附和判定来得太晚。"""
+    assert _fired_with(cfg, "嗯", 500) is False
+    assert _fired_with(cfg, "对对", 600) is False
+
+
+def test_real_interrupt_still_fires_before_the_backchannel_cap(cfg):
+    """真插话一认出字就打断，不用等到 backchannel_ms。"""
+    assert _fired_with(cfg, "等一下", 400) is True
+
+
+def test_long_hum_past_the_cap_counts_as_interrupt(cfg):
+    """一直「嗯——」超过 backchannel_ms 仍在说，就当作要插话。"""
+    assert _fired_with(cfg, "嗯", 1000) is True
+
+
+def test_partial_backchannel_is_not_judged_too_early():
+    """250ms 的半截转写不稳：「对的」「嗯。」还算附和，「等于」「现」才算插话的开头。"""
+    for partial in ("", "嗯。", "对的", "对对", "好"):
+        assert dsp.maybe_backchannel(partial), partial
+    for partial in ("等于", "现", "等一下", "好的帮我打开微信"):
+        assert not dsp.maybe_backchannel(partial), partial
+
+
+def test_sense_voice_gets_the_configured_language(monkeypatch):
+    """语种没传下去时默认 auto，短句「嗯」会被认成日文「う」。"""
+    seen: dict = {}
+
+    class _Fake:
+        def __init__(self, model_dir, num_threads=2, language="auto"):
+            seen["language"] = language
+
+    monkeypatch.setattr(audio, "SenseVoiceStt", _Fake)
+    from voxos.config import Config
+    audio.make_stt(Config({"stt": {"backend": "sense_voice", "language": "zh"}}))
+    assert seen["language"] == "zh"

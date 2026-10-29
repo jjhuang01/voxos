@@ -509,7 +509,9 @@ def make_stt(cfg: Config, hotwords: list[str] | None = None) -> SttEngine:
         # 必须走 cfg.path：model_dir 是相对路径，相对的是数据根，不是当前工作目录。
         # 写成 cfg.get 会让「在 /tmp 下跑」和「在仓库根跑」解析出两个不同的目录。
         model_dir = cfg.path("stt.model_dir", ".voxos/models/sense-voice")
-        return SenseVoiceStt(str(model_dir), int(cfg.get("stt.num_threads", 2)))
+        # 语种必须传下去：默认 auto 时短句「嗯」会被认成日文「う」，附和判定和识别一起错
+        return SenseVoiceStt(str(model_dir), int(cfg.get("stt.num_threads", 2)),
+                             language=str(cfg.get("stt.language", "auto")))
     return ScriptedStt([])
 
 
@@ -612,6 +614,7 @@ class AudioPipeline:
         self._shown = ""           # 上次推给界面的字幕，重复的不推
         self._barge: list[np.ndarray] = []   # TTS 期间攒下的「可能是插话」的音频
         self._barge_ms = 0.0
+        self._bc_seen = (-1.0, False)            # 上次判附和时攒到多长、结论是什么
         self._during_tts = False
         # 声纹不是分离器：重叠音频仍含回声，不能作为可执行指令回灌。
         self._await_restart = False
@@ -823,16 +826,33 @@ class AudioPipeline:
     def _during_playback(self, chunk: np.ndarray) -> list[np.ndarray]:
         """连续越过能量门才做声纹验证；打断确认后释放已攒音频继续收音。"""
         if not self.echo.speaking or dsp.dbfs(chunk) <= self.echo.gate_dbfs:
-            self._barge, self._barge_ms = [], 0.0
+            self._barge, self._barge_ms, self._bc_seen = [], 0.0, (-1.0, False)
             return [np.zeros_like(chunk)]
         self._barge.append(chunk)
         self._barge_ms += chunk.size / dsp.SR * 1000.0
-        if self._barge_ms >= self.echo.interrupt_ms:
+        if self._barge_ms >= self.echo.interrupt_ms and not self._just_backchannel():
             if self._fire_barge_in():
                 released = list(self._barge)
                 self._barge, self._barge_ms = [], 0.0
                 return released
         return [np.zeros_like(chunk)]
+
+    def _just_backchannel(self) -> bool:
+        """播报中说「嗯/对」不能打断：先听清攒下的这段，像附和就再等等。
+
+        250ms 只够判「是不是本人」，不够判「是不是在插话」。附和词或还认不出字时
+        继续攒，直到 `backchannel_ms` 仍在说才算插话；真插话的头一个字一认出就打断。
+        """
+        limit = float(getattr(self.echo, "backchannel_ms", 0.0))
+        if self._barge_ms >= limit:
+            return False
+        at, verdict = self._bc_seen
+        if at <= self._barge_ms < at + 120.0:      # 音频线程上每块都解码太重，120ms 听一次
+            return verdict
+        text = self.stt.transcribe(np.concatenate(self._barge), final=False).strip()
+        verdict = dsp.maybe_backchannel(text)
+        self._bc_seen = (self._barge_ms, verdict)
+        return verdict
 
     def _fire_barge_in(self) -> bool:
         """声纹确认是本人打断：停播报并标记状态，保留已攒音频送入本句开头。"""

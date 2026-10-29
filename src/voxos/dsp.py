@@ -38,6 +38,16 @@ def is_backchannel(text: str, words: tuple[str, ...] = BACKCHANNEL_WORDS) -> boo
     return re.sub(r"[\s，。！？、,.!?~～]", "", text or "") in words
 
 
+def maybe_backchannel(text: str, words: tuple[str, ...] = BACKCHANNEL_WORDS) -> bool:
+    """说到一半的部分转写还可能是附和：空、已是附和词，或 ≤2 字且以附和字开头。
+
+    实测 SenseVoice 在 250ms 时常把「对对」解成「对的」、「嗯嗯」解成「嗯。」——
+    这时还不能下「是插话」的结论，再听一会儿就清楚了。整句判定仍用 `is_backchannel`。
+    """
+    bare = re.sub(r"[\s，。！？、,.!?~～]", "", text or "")
+    return not bare or bare in words or (len(bare) <= 2 and bare[0] in "".join(words))
+
+
 # 语义未完结尾词（PROMPTS_AND_ROUTING.md §6）
 UNFINISHED_TAILS = (
     "我要", "我要写", "写代码", "改代码", "加个", "做个", "修复", "重构", "然后", "接着",
@@ -211,6 +221,8 @@ class EchoGate:
     decay_ms: float = 300.0
     gate_dbfs: float = -25.0
     interrupt_ms: float = 250.0
+    # 「嗯/对」这类附和词最长能拖多久：250ms 声纹过了还认不出是不是附和，就再听到这里
+    backchannel_ms: float = 700.0
     interrupt_words: tuple[str, ...] = INTERRUPT_WORDS
     speaking: bool = False
     _decay_left: float = 0.0

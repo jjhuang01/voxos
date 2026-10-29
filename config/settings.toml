@@ -51,6 +51,7 @@ echo_decay_ms = 300           # TTS 结束后的混响消退期
 interrupt_ms = 250            # 播报中「人声持续多久」才算打断（默认 250ms，对齐豆包/ChatGPT
                               # 交互体验）。不要求用户喊特定词，打断触发后已攒音频作为
                               # 本句开头继续收音并送入识别，无需重说。
+backchannel_ms = 700          # 播报中说「嗯/对」：声纹过了先听清，附和词在这个时长内不打断，超过仍在说才算插话
 restart_silence_dbfs = -42.0  # 打断后安静到此能量并保持 silence_duration_ms 才恢复接收
 hotwords_path = "config/hotwords.txt"
 hotwords_generated = "config/hotwords.txt.generated"

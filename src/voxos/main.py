@@ -791,7 +791,8 @@ def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[s
         # 「等一下，我说的是另一个」。对齐 LiveKit 的 min_interruption_duration。
         on_barge_in=stop_speaking,
         echo=dsp.EchoGate(decay_ms=float(cfg.get("audio.echo_decay_ms", 300)),
-                          interrupt_ms=float(cfg.get("audio.interrupt_ms", 250))))
+                          interrupt_ms=float(cfg.get("audio.interrupt_ms", 250)),
+                          backchannel_ms=float(cfg.get("audio.backchannel_ms", 700))))
     chunk = int(cfg.get("audio.chunk_size", 512))
     device = cfg.get("audio.input_device", "")
     source = audio.SelfHealingSource(lambda: audio.MicSource(chunk, device=device),
