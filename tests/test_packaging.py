@@ -138,6 +138,28 @@ def test_no_asr_still_fetches_the_turn_model(monkeypatch, tmp_path):
     assert "model.int8.onnx" not in wanted
 
 
+def test_huggingface_files_get_a_mirror_on_the_same_route_first():
+    """HuggingFace 原站在国内常常不通，镜像要排在**同一条通路**上的原站之后。
+
+    实测（这台机器）：原站经代理立刻 502，直连却要等满超时。如果把所有直连
+    排在所有代理之前，镜像就被挡在两次超时后面——用户看到的只是「卡了两分钟
+    然后失败」。
+    """
+    spec = {"url": "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/x.onnx"}
+    attempts = models._attempts(spec, "http://127.0.0.1:1")
+
+    assert [via for _, via in attempts] == ["http://127.0.0.1:1"] * 2 + [None] * 2
+    assert attempts[0][0] == spec["url"]
+    assert attempts[1][0] == "https://hf-mirror.com/pipecat-ai/smart-turn-v3/resolve/main/x.onnx"
+
+
+def test_a_non_huggingface_url_gets_no_mirror():
+    """GitHub 上的模型没有镜像，硬拼一个 hf-mirror 地址只会多一次 404。"""
+    spec = {"url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/x.onnx"}
+    assert models._mirrors(spec["url"]) == []
+    assert models._attempts(spec, None) == [(spec["url"], None)]
+
+
 def test_models_command_actually_runs(monkeypatch, tmp_path):
     """`voxos models` 曾经能解析但一调就 NameError（main.py 里没有 import os）。
 

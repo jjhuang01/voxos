@@ -228,6 +228,25 @@ def test_incomplete_verdict_waits_out_the_extended_window(cfg, bus, make_voice):
     assert waited(0.1) - waited(0.9) == pytest.approx(extended - silence, abs=120)
 
 
+def test_the_unsure_band_behaves_exactly_like_having_no_model(cfg, bus, make_voice):
+    """概率落在 `[turn_veto, turn_threshold)` 之间时，交给文本判据。
+
+    实测「把刚才那段话翻译成英文」只有 0.42——低于上游的 0.5，但它是一句完整
+    指令。二态的话这句会白等 2.5 秒；三态把这段中间地带退回文本判据（结尾不是
+    未完词就收尾），于是它和一个没装模型的管道表现一致。
+    """
+    def waited(prob: float) -> float:
+        pipeline = audio.AudioPipeline(cfg=cfg, stt=_CountingStt(), lock=_PassLock(),
+                                       on_event=bus, turn_detector=_FixedTurn(prob))
+        stream = audio.ArraySource(_stream(make_voice(118, 1.2), 4000))
+        return [u.audio_ms for u in pipeline.run(stream) if u.accepted][0]
+
+    veto = float(cfg.get("audio.turn_veto", 0.2))
+    assert veto < 0.42 < cfg.get("audio.turn_threshold", 0.5)
+    assert waited(0.42) == pytest.approx(waited(0.9), abs=60), "中间地带不该多等"
+    assert waited(0.42) < waited(veto / 2), "低置信仍然要等"
+
+
 def test_broken_model_falls_back_to_text_mid_stream(cfg, bus, make_voice):
     """模型坏了要能当场退回文本判停，而不是这一整轮都判不出来。"""
     stt = _CountingStt("我要写日志")

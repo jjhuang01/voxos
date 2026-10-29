@@ -594,6 +594,8 @@ class AudioPipeline:
         # 这一步**不加载模型**（`turn.make` 里才建 session），所以构造管道仍然是毫秒级。
         self.smart_turn = self.turn_detector if self.turn_detector is not None else turn.make(self.cfg)
         self.turn_threshold = turn.threshold(self.cfg)
+        # 只否决、不拍板的门槛。见 `_audio_says_unfinished`：低于它才推迟收尾。
+        self.turn_veto = float(self.cfg.get("audio.turn_veto", 0.2))
         self.mask_mode = self.cfg.flag("audio.mask_mode", False)
         self.prefix_ms = float(self.cfg.get("audio.prefix_padding_ms", 300))
         self.window_ms = float(self.cfg.get("audio.partial_window_ms", 3000))
@@ -870,18 +872,33 @@ class AudioPipeline:
         if audio_ms - last_partial_ms < self.partial_interval_ms:
             return None                            # 还没到复查点，省一次推理
         if self.smart_turn is not None:
-            decided, verdict = self._judge_by_audio(buffer, audio)
-            if decided:
-                return verdict
-            # 走到这里说明模型坏了：`_judge_by_audio` 已经把它摘掉，交给文本那条
+            verdict = self._judge_by_audio(audio)
+            if verdict == "end":
+                return self._finalize(buffer)
+            if verdict == "wait":
+                if self._ep.extended:              # 宽限也走完了，不再等
+                    return self._finalize(buffer)
+                self._ep.extend()
+                return None
+            # "unsure"：模型没把握，交给文本判据
         return self._judge_by_text(buffer, audio, audio_ms)
-    def _judge_by_audio(self, buffer: list[np.ndarray],
-                        audio: np.ndarray) -> tuple[bool, Utterance | None]:
-        """音频判停。返回（是否给出了结论，结论）。模型出错时第一项为 False。
 
-        比文本那条强的地方不只是「更准」：它**不需要识别**，所以判停和识别之间
-        没有依赖了。这也是将来换流式识别的前提——否则每来一段候选音频，都得先把
-        识别器叫醒一次，流式识别省下来的那点延迟立刻被这一步吃掉。
+    def _judge_by_audio(self, audio: np.ndarray) -> str:
+        """音频判停：返回 `end` / `wait` / `unsure` 三态之一。
+
+        上游是两态（`prob >= 0.5` 收尾，否则等）。三态的理由是**中文上的置信度
+        不均匀**：实测 6 句完整指令里 4 句落在 0.94–0.99，2 句只有 0.27 和 0.42
+        （「今天下午三点提醒我开会」「把刚才那段话翻译成英文」）。二态的话这两句
+        会白等 2.5 秒；三态把中间那段交给文本判据，两边都不吃亏。
+
+        | 概率 | 结论 | 为什么 |
+        | :--- | :--- | :--- |
+        | ≥ `turn_threshold` | `end` | 高置信，直接收尾，**不需要识别** |
+        | < `turn_veto` | `wait` | 高置信没说完（「我想说的是那个」0.008），给宽限 |
+        | 中间 | `unsure` | 模型自己都没把握，别替文本判据做主 |
+
+        注意 `end` 这一支仍然保住了「判停不需要识别」这个架构收益——只是把
+        不确定的那部分退回去了。
         """
         prob = self.smart_turn.complete(audio)
         if prob < 0:
@@ -889,13 +906,10 @@ class AudioPipeline:
             # 本轮起退回文本判停——一个坏模型不该把整条采集链一起带下去。
             self.on_event("warn", "判停", "smart-turn 推理失败，本轮起退回文本判停")
             self.smart_turn = None
-            return False, None
+            return "unsure"
         if prob >= self.turn_threshold:
-            return True, self._finalize(buffer)
-        if not self._ep.extended:
-            self._ep.extend()                      # 没说完：给 extended_ms 的宽限
-            return True, None
-        return True, self._finalize(buffer)        # 宽限也走完了，收尾
+            return "end"
+        return "wait" if prob < self.turn_veto else "unsure"
 
     def _judge_by_text(self, buffer: list[np.ndarray], audio: np.ndarray,
                        audio_ms: float) -> Utterance | None:

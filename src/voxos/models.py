@@ -16,6 +16,9 @@ import subprocess
 import urllib.request
 from pathlib import Path
 
+# HuggingFace 的国内镜像。见 `_mirrors()`：它只是另一条通路，内容仍要过校验。
+_HF_MIRROR = "https://hf-mirror.com/"
+
 MODELS: dict[str, dict[str, object]] = {
     "campplus.onnx": {
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
@@ -49,11 +52,11 @@ MODELS: dict[str, dict[str, object]] = {
                "smart-turn-v3.2-cpu.onnx",
         "min_bytes": 8_000_000,
         "desc": "smart-turn v3.2 语义判停（int8 8.7MB，吃音频不吃文本，BSD-2）",
-        # 故意**没有** sha256：写这份清单的机器连不上 HuggingFace（沙箱只放行
-        # 业务域名），抄一个自己没算过的摘要等于把校验变成摆设。宁可只做大小 +
-        # 非全零这两项检查，也不填一个假的。有了能联网的机器就补上，然后删掉
-        # 下面这个字段——`test_model_manifest_entries_are_complete` 会盯着。
-        "no_sha256_reason": "清单作者所在环境无法访问 HuggingFace，没算过摘要",
+        # 摘要是**从镜像 hf-mirror.com 下的那个文件**算的（原站在这台机器上
+        # 不通）。它钉不住「上游作者换没换文件」，但能钉住「以后每次下到的都是
+        # 同一份」——镜像被替换或传输截断都会在这里失败。功能上也验过：
+        # 一句完整的话 +400ms 静音 → 0.94，半截话 → 0.008。
+        "sha256": "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f",
     },
     # 真流式识别（zipformer 中英双语，transducer）。四个文件是一组，缺一个就
     # 加载不了——但缺了不影响使用：`stream.make_streamer` 会自动退回窗口字幕。
@@ -127,6 +130,34 @@ def verify(path: Path, spec: dict) -> bool:
     return True
 
 
+def _mirrors(url: str) -> list[str]:
+    """HuggingFace 原站在国内网络常常直接不通，给一个等价镜像。
+
+    实测（这台机器）：`huggingface.co` 经沙箱代理 502、直连 15 秒超时；
+    `hf-mirror.com` 同一条代理 200，取同一个文件返回 206 和合法的 ONNX 头。
+    镜像只是**另一条取文件的通路**，内容仍要过 `verify()`——有 sha256 的按
+    sha256 比，没有的至少过大小和非全零。
+    """
+    prefix = "https://huggingface.co/"
+    if url.startswith(prefix):
+        return [_HF_MIRROR + url[len(prefix):]]
+    return []
+
+
+def _attempts(spec: dict, proxy: str | None) -> list[tuple[str, str | None]]:
+    """按「先代理后直连、先原站后镜像」排队。
+
+    镜像排在同一条通路上的原站之后，而不是所有通路之后：原站经代理是**立刻**
+    502，直连却要等满超时——先试直连等于把镜像挡在两次超时后面。
+    """
+    urls = [str(spec["url"]), *_mirrors(str(spec["url"]))]
+    order: list[tuple[str, str | None]] = []
+    if proxy:
+        order.extend((url, proxy) for url in urls)
+    order.extend((url, None) for url in urls)
+    return order
+
+
 def download(url: str, target: Path, proxy: str | None, spec: dict) -> bool:
     """先写 `.part`，校验通过再原子替换；失败不破坏已有好模型。"""
     part = target.with_name(target.name + ".part")
@@ -181,8 +212,11 @@ def fetch(target: Path | None = None, *, proxy: str | None = None,
             print(f"✓ {name} 已存在（{path.stat().st_size / 1e6:.1f}MB）")
             continue
         print(f"↓ {name}：{spec['desc']}")
-        ok = (download(str(spec["url"]), path, proxy, spec)
-              or download(str(spec["url"]), path, None, spec))
+        ok = False
+        for url, via in _attempts(spec, proxy):
+            if download(url, path, via, spec):
+                ok = True
+                break
         if ok and verify(path, spec):
             print(f"✓ {name}（{path.stat().st_size / 1e6:.1f}MB）")
         else:
@@ -207,3 +241,4 @@ def _report(failed: list[str], skipped: list[str], base: Path, proxy: str | None
     if proxy:
         print(f"  当前用的代理是 {proxy}（来自 --proxy 或环境变量），换成能连 GitHub 的再试：")
     print("  voxos models --proxy http://127.0.0.1:7890")
+    print("  HuggingFace 上的那几个还会自动试镜像 hf-mirror.com；两边都不通才需要手动下。")

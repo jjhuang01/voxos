@@ -33,7 +33,13 @@ max_utterance_ms = 12000      # 单句硬上限，防止一直说不停
 min_speech_ms = 200           # 真实人声短于此视为噪音（按人声时长算，不含 prefix padding）
 turn_backend = "auto"         # auto | smart | text。auto：有模型用 smart-turn，否则文本判停
 turn_model = ".voxos/models/smart-turn-v3.2-cpu.onnx"   # 8.7MB int8，`voxos models` 下载
-turn_threshold = 0.5          # 「说完了」的门槛，上游默认值。没量过 TPR/TNR 之前别动
+turn_threshold = 0.5          # 上游的「说完了」门槛。我们**没有**拿它当主判据，见下一行
+turn_veto = 0.2               # 只否决、不拍板：概率低于它才推迟收尾，其余交给文本判据。
+                              # 为什么不用 0.5 当主判据：6 句完整的中文指令里有 4 句低于
+                              # 0.5（「今天下午三点提醒我开会」0.27、「把刚才那段话翻译成
+                              # 英文」0.42），照抄会让三分之一的正常指令多等 2.5 秒。
+                              # 那批音频是系统 TTS 合成的，不代表真人语调——所以既不下结论
+                              # 说模型不行，也不拿它去赌。真人录音量出 TPR/TNR 之后再动。
 turn_threads = 1              # 模型推理线程数；10–65ms 的任务，1 个线程够，多了抢 VAD 的核
 voiceprint_threshold = 0.75   # 实测标定：录 3 句取均值后，真麦克风同人最低 0.786 / 异人最高 0.715
                               # 旧值 0.82 的问题：只录 1 句时同人换句话只有 0.751，等于录完就被自己拒
