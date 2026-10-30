@@ -29,11 +29,11 @@ SCRIPT: tuple[str, ...] = (
 )
 
 MIN_SEGMENTS = 3          # 少于 3 段算不出留出分数，模板也不稳
-MIN_SPEECH_S = 1.2        # 一段至少 1.2 秒人声；碎片算出来的嵌入不准
+MIN_SPEECH_S = 1.2        # 本项目注册时的人声时长门槛，不是模型可靠性的保证
 MIN_PEAK = 0.02           # 低于此值基本是没说话 / 设备选错
 MAX_PEAK = 0.995          # 接近 1 就是削波，波形被削平后嵌入会飘
 OUTLIER_COS = 0.45        # 与已有均值的余弦低于此值：这句不像同一个人
-USABLE_MARGIN = 0.04      # 留出分数要比阈值高这么多才算「换句话也能过」
+USABLE_MARGIN = 0.04      # 本项目注册质量余量，未来录音仍需独立验证
 
 
 @dataclass
@@ -86,11 +86,9 @@ def outlier(vector: np.ndarray, previous: list[np.ndarray]) -> str:
 
 
 def holdout(vectors: list[np.ndarray]) -> float | None:
-    """留一验证：每段都和「其余各段的均值」比，取平均。
+    """每段与其余段的模板比较，取最差留一分数，避免坏段被平均掩盖。
 
-    比「留最后一段」稳：只留最后一段时，那一段要是正好录得差，分数就被它
-    一个人决定；留一法每一段都当过一次考生，报出来的才是「本人换句话大概
-    能拿多少分」。
+    这是注册样本的内部质量检查，不保证未来录音的误拒率或误受率。
     """
     if len(vectors) < MIN_SEGMENTS:
         return None
@@ -98,20 +96,20 @@ def holdout(vectors: list[np.ndarray]) -> float | None:
     for index, vector in enumerate(vectors):
         others = [item for position, item in enumerate(vectors) if position != index]
         scores.append(dsp.cosine(vector, dsp.mean_vector(others)))
-    return sum(scores) / len(scores)
+    return min(scores)
 
 
 def verdict(score: float, threshold: float, segments: int) -> tuple[bool, str]:
     """这次录入能不能用。返回 (可用, 一行结论)。"""
     if segments < MIN_SEGMENTS:
-        return False, (f"⚠️  只录到 {segments} 段：模板不稳，可能被自己拒之门外。"
-                       f"重录时说满 {MIN_SEGMENTS} 句")
+        return False, (f"⚠️  这次录入不可用：只录到 {segments} 段，至少需要 {MIN_SEGMENTS} 句。"
+                       f"重录：voxos enroll，三句都读完")
     margin = score - threshold
     if margin >= USABLE_MARGIN:
-        return True, (f"✅ 可用：留出验证 {score:.3f}，阈值 {threshold:.2f}，"
-                      f"高 {margin:.3f}——本人换句话也能过")
-    return False, (f"⚠️  这次录入不可用：留出验证 {score:.3f}，阈值 {threshold:.2f}，"
-                   f"只高 {margin:+.3f}。本人说话也会被拒。\n"
+        return True, (f"✅ 可用：最差留出验证 {score:.3f}，阈值 {threshold:.2f}，"
+                      f"高 {margin:.3f}——本次注册余量合格，未来录音仍需实测")
+    return False, (f"⚠️  这次录入不可用：最差留出验证 {score:.3f}，阈值 {threshold:.2f}，"
+                   f"只高 {margin:+.3f}，可能出现本人说话也会被拒。\n"
                    f"   重录：voxos enroll —— 三句都读完，每句 2~3 秒，句间停半秒")
 
 

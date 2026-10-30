@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from voxos import audio, dsp, main
 
@@ -357,3 +358,61 @@ def test_sense_voice_gets_the_configured_language(monkeypatch):
     from voxos.config import Config
     audio.make_stt(Config({"stt": {"backend": "sense_voice", "language": "zh"}}))
     assert seen["language"] == "zh"
+
+
+@pytest.mark.parametrize("score", [0.31, 0.90], ids=["stranger", "owner"])
+@pytest.mark.parametrize("text", ["停", "嗯"], ids=["interrupt", "backchannel"])
+def test_remote_barge_in_checks_identity_before_any_transcription(cfg, score, text):
+    """播报打断的真实管道：远端转写之前必须验证相同音频，非本人不上传。"""
+    calls = []
+    verified = []
+    fired = []
+
+    def embedding(signal):
+        verified.append(signal.copy())
+        return np.array([score, np.sqrt(1 - score ** 2)], dtype=np.float32)
+
+    class Remote:
+        remote = True
+
+        def transcribe(self, signal, final=False):
+            calls.append((signal.copy(), final, any(np.array_equal(signal, checked)
+                                                    for checked in verified)))
+            return text
+
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=embedding,
+                           profiles={"normal": np.array([1.0, 0.0], dtype=np.float32)})
+    pipeline = audio.AudioPipeline(cfg=cfg, stt=Remote(), lock=lock,
+                                   on_barge_in=lambda: fired.append(True))
+    pipeline.echo.tts_start()
+    list(pipeline.run(audio.ArraySource(_loud(256), tail_silence_ms=0)))
+
+    assert all(was_verified for _, _, was_verified in calls), "上传发生在身份校验之前"
+    if score < lock.threshold:
+        assert calls == [] and fired == [] and pipeline.echo.speaking
+    else:
+        assert calls and any(not final for _, final, _ in calls)
+        assert bool(fired) == (text == "停")
+        assert pipeline.echo.speaking == (text == "嗯")
+
+
+@pytest.mark.parametrize("profiles", [{}, {"normal": np.array([1.0, 0.0], dtype=np.float32)}],
+                         ids=["unenrolled", "stranger"])
+def test_remote_barge_in_stays_closed_past_the_backchannel_cap(cfg, profiles):
+    """附和等待上限不是身份豁免；未注册/非本人长响声仍不上传或停播。"""
+    heard = []
+
+    class Remote:
+        remote = True
+
+        def transcribe(self, signal, final=False):
+            heard.append(signal)
+            return "停"
+
+    lock = dsp.SpeakerLock(threshold=0.75,
+                           embedder=lambda signal: np.array([0.31, 0.95], dtype=np.float32),
+                           profiles=profiles)
+    pipeline = audio.AudioPipeline(cfg=cfg, stt=Remote(), lock=lock)
+    pipeline.echo.tts_start()
+    list(pipeline.run(audio.ArraySource(_loud(1200), tail_silence_ms=0)))
+    assert not heard and pipeline.echo.speaking

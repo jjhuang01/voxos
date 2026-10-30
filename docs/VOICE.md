@@ -3,6 +3,10 @@
 这份文档回答三个问题：**别人是怎么做到「丝滑」的**、**我们现在差在哪（有实测数据）**、
 **要买什么、怎么改**。每一条都尽量给出来源，能抄的直接写「抄自哪」。
 
+> **2026-10-30 声纹复核**：运行时的 1.5 秒固定窗把两段整句已过阈值的录音额外拒绝；
+> 录入还存在坏句被平均分掩盖的问题。修复与一手来源见 [§11](#11-声纹复核固定窗不是整句验证)。
+> 下方延迟与选型记录保留其原版本范围，不代表当前版本的全部运行状态。
+>
 > 一句话结论：**我们缺的不是「更好的 VAD」，是三层东西——流式识别、语义判停、回声消除。**
 > 端点静音从 800ms 降到 500ms、省掉一次重复解码，这些是当天就能拿到的 **228–320ms**（已实测）；
 > 再往下必须换架构，靠调参调不出来。
@@ -639,3 +643,77 @@ AEC 的工程难点不在算法，在**时钟对齐**：必须拿到「实际播
 - WebRTC 架构文档（AEC / NS / AGC 的分工）；WebRTC AEC3 的 10ms 帧 / 64 样本块实现说明。
 - DeepFilterNet、RNNoise 的帧长与模型规模（见各自仓库与论文）。
 - sherpa-onnx 文档（流式与非流式 ASR、VAD、声纹、TTS 的本地推理）。
+
+## 11. 声纹复核：固定窗不是整句验证
+
+**0.1.46 恢复整句声纹判据，不降低 0.75 阈值，也不重写已有身份档案。**
+本节面向维护录入和音频管道的开发者：区分已复现的程序缺陷、模型的真实契约与尚未标定的产品指标。
+关联任务：TASK-141。
+
+### 11.1 录音复现与本次修复
+
+2026-10-30 用 MacBook Pro 麦克风采集 45 秒，按 VAD（语音活动检测）切成六段，
+用同一份现有档案、真实 CAM++ 模型和 0.75 阈值对照。录音仅保留在本机忽略目录 `.voxos/`，不提交或上传。
+
+| 固定录音 | 整句余弦 | 旧短窗最高分 | 新管道结果 |
+| :--- | ---: | ---: | :--- |
+| 5.472 秒 | 0.7617 | 约 0.709 | 接受，转写非空 |
+| 4.544 秒 | 0.7878 | 约 0.708 | 接受，转写非空 |
+
+旧实现把上述两段全部拒绝。改成 3 秒窗仍不能通过；裁边静音也没有稳定收益。
+因此本次删除固定窗投票，运行、`voxos enroll --check` 与远端 STT（语音转写）的上传门禁均调用整段 `SpeakerLock.verify()`。
+另外四段仍低于阈值而被拒，没有强行放行。
+
+注册质量也有可重复反例：一条与其余两条的余弦只有 0.680，但平均留一分数为 0.838，
+只留最后一条时为 0.917，旧 UI（界面）和 CLI（命令行）都会报可用。
+现在两条入口共用**最差留一分数**：每条与其余条目的模板比较，取最小值；仍要求至少三句，
+最差分比实际阈值高至少 0.04。该余量是本项目质量策略，不是论文给出的安全阈值。
+
+所有录入入口提交前检查逐句人声时长和峰值，静音不能充当足够的人声；`--wav`、批量录音和显式脚本也不例外。
+`scripts/enroll_voice.py` 复用 CLI 门禁，不再维护独立注册策略。不可用录入不保存：首次失败不创建身份档案，重录失败保留原内存身份、`.npz` 和 `.json`。
+声纹在副本上注册，同目录临时文件完整写入后原子替换，成功后才发布运行态；中途写入或替换失败不截断旧档案。
+播报打断的远端附和判断也先对同一段音频验证身份，拒绝时不上传；附和等待上限不豁免声纹。
+新元数据记录 `holdout_method = "leave_one_out_min"`。旧档案没有原始注册录音，继续使用但标明旧分数未逐句复核，不能冒充新算法结果。
+
+候选回放已使用真实 CAM++、Silero 与本地 SenseVoice 跑 `AudioPipeline`：两段接受，六条合成非本人控制和
+四条顺序拼接控制均拒绝，原声纹与元数据字节不变。顺序拼接覆盖 3+1、3+3、1+3、0+4 秒；不等于重叠双讲或真人他人验收。
+录音未独立标注身份，因此**不能计算真人 FRR（本人误拒率）或 FAR（他人误受率）**，也不能据此宣布产品的 <2% / <1% 目标达标。
+
+### 11.2 一手实现实际支持什么
+
+- **整句验证**：[3D-Speaker `infer_sv.py`](https://github.com/modelscope/3D-Speaker/blob/065629c313eaf1a01c65c640c46d77e61e9607b4/speakerlab/bin/infer_sv.py#L265-L317)
+  对输入录音提取嵌入，再计算余弦相似度；没有把多数短窗通过当作整句执行授权。
+- **注册均值**：[CAM++ 论文](https://arxiv.org/html/2303.00332v3)《CAM++: A Fast and Efficient Network for Speaker Verification Using Context-Aware Masking》
+  使用注册嵌入平均。[sherpa 示例](https://github.com/k2-fsa/sherpa-onnx/blob/935e5ded3d949a8b557ac44ef4dad03a7d2038e7/python-api-examples/speaker-identification.py#L158-L180)
+  与其 manager 有直接平均再归一化的实现；VoxOS 保留逐条 L2（单位长度）归一化再等权平均，
+  录入与留一检查共用 `mean_vector()`。不能把嵌入模长解释成录音音量，也不能将某一种平均方式称为唯一标准。
+- **短音频的边界**：CAM++ 论文中的 CN-Celeb 训练将短录音拼至至少 6 秒，再随机截取 3 秒；
+  这不是 3 秒验证硬门槛，更没有承诺 250 毫秒、500 毫秒或 1.2 秒能可靠认人。
+  [sherpa VAD 示例](https://github.com/k2-fsa/sherpa-onnx/blob/935e5ded3d949a8b557ac44ef4dad03a7d2038e7/python-api-examples/speaker-identification-with-vad.py#L217-L265)
+  的语音检测时长与后续跳过过短片段是两回事；特征就绪不等于身份可信。
+- **窗口用途**：[WeSpeaker 的 `diarize()`](https://github.com/wenet-e2e/wespeaker/blob/9fecd6cb4f47475d01761d87c826298dff4ef18c/wespeaker/cli/speaker.py#L218-L270)
+  使用窗口嵌入做聚类与说话人时间标注；不能照搬成多数票授权。
+  [WeSpeaker 论文](https://arxiv.org/html/2210.17016v2)描述的是说话人嵌入工具链。
+  [作者 Shuai Wang 主页](https://shuaiwang-nju.github.io/)也将 WeSpeaker 与分离工具 WeSep 分列；
+  本次未取得额外相关作者博客的实测依据，不以博客补造授权结论。
+- **模型不是分离器**：CAM++ 的 context-aware masking（上下文注意力掩码）作用于特征，
+  [模型层](https://github.com/modelscope/3D-Speaker/blob/065629c313eaf1a01c65c640c46d77e61e9607b4/speakerlab/models/campplus/layers.py#L26-L110)
+  没有接收注册者档案来提取其独占音频。高分不能证明整句每个词都来自本人。
+
+### 11.3 分数标度与阈值不能混用
+
+VoxOS、3D-Speaker 和 [WeSpeaker 试验评分](https://github.com/wenet-e2e/wespeaker/blob/9fecd6cb4f47475d01761d87c826298dff4ef18c/wespeaker/bin/score.py#L38-L65)
+使用原始余弦，理论范围为 [-1, 1]。
+[WeSpeaker CLI 显示](https://github.com/wenet-e2e/wespeaker/blob/9fecd6cb4f47475d01761d87c826298dff4ef18c/wespeaker/cli/speaker.py#L180-L207)
+使用 `(cosine_score + 1.0) / 2`，所以其显示 0.75 对应原始余弦 0.50，不能直接与 VoxOS 0.75 比较。
+
+[ModelScope CAM++ pipeline](https://github.com/modelscope/modelscope/blob/4be706e2eb91fc59b884d6360c62d61988320c81/modelscope/pipelines/audio/speaker_verification_light_pipeline.py#L44-L161)
+的 0.31 也是原始余弦，不是另一套标度；即使标度相同，模型导出版本、注册方式、语料和录音设备不同也不能照搬阈值。
+本项目中文模型的 [官方配置](https://modelscope.cn/api/v1/models/iic/speech_campplus_sv_zh-cn_16k-common/repo?Revision=v1.0.0&FilePath=configuration.json)
+为 16kHz、192 维，旧适配器注释中的 512 维已纠正。
+
+[WeSpeaker AS-norm（自适应对称分数归一化）](https://github.com/wenet-e2e/wespeaker/blob/9fecd6cb4f47475d01761d87c826298dff4ef18c/wespeaker/bin/score_norm.py#L26-L107)
+需要背景说话人 cohort（参照群体），再对注册侧与验证侧分数统计归一化。
+本人三句不是背景 cohort；归一化分数也不是原始余弦，需要重新标定阈值。
+本次不引入没有背景数据的 AS-norm，不更换模型，不增设多模板或分离子系统。
+保留 0.75 是为了控制变量、消除已经证实的程序缺陷，**不是已证明该阈值安全**。

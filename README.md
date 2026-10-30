@@ -141,8 +141,10 @@ App 用的是 ad-hoc 签名，不是公证过的分发包：第一次启动 macO
 - **输入设备**：`audio.input_device` 可以写索引或名字片段（如 `MacBook Pro麦克风`）。
   系统默认输入如果是一个没插东西的音频接口，录得到帧、峰值恒为 0.0000——
   一切"正常"，就是听不见人说话。doctor 会把设备名和实测峰值打出来。
-- **声纹录入要说 2~3 句**：只录一句时模板不稳，实测同一个人的另一句话相似度只有
-  0.75，容易被自己拒之门外。默认录 10 秒，VAD 自动按句切段取均值。
+- **声纹录入要读完 3 句**：界面和交互式 CLI 都逐句录入，取等权嵌入均值。
+  每句检查人声时长和峰值，最差留一分数须比实际阈值高至少 0.04；文件、批量和显式脚本入口也共用门禁。
+  不合格不保存；完整写入后才原子替换，写盘失败保留原声纹。
+  运行时校验整句，不做固定短窗投票；这不是混音分离，也不保证真人误拒率或误受率。详见 [声纹复核](docs/VOICE.md#11-声纹复核固定窗不是整句验证)。
 
 **数据落在哪**：模型、声纹、日志、快照、状态都在 `~/.voxos/`
 （`VOXOS_HOME` 换的是**家目录**，默认 `$HOME`，设成 `/data/u` 就落到 `/data/u/.voxos/`），
@@ -164,11 +166,11 @@ make doctor                                  # 环境自检
 python scripts/fetch_models.py               # 四个模型一次下齐（约 276MB）
 python scripts/fetch_models.py --no-asr      # 跳过 239MB 识别模型（37MB：声纹 + VAD + 判停）
 make demo                                    # 无需麦克风/网络/API Key 的端到端演示
-make test                                    # 568 项测试（当前源码全量待验收，见 docs/ACCEPTANCE.md）
-make verify                                  # 工程验收（18 通过 + 1 项未达标）
+make test                                    # 650 项测试（649 passed + 1 skipped，见 docs/ACCEPTANCE.md）
+make verify                                  # 工程验收（17 通过 + 2 项未达标）
 make verify-release                          # 发布门禁（未达标项走显式豁免，见 Makefile）
 make audit-ui                                # 界面回归 12 条（需先 voxos serve）
-make install-smoke                           # 装一遍再验（源码跑永远看不到的那 6 项）
+make install-smoke                           # 装一遍再验（源码跑永远看不到的那 7 项）
 ```
 
 > `make` 会自动优先使用 `.venv/bin/python`；已有自己的环境就 `PY=/path/to/python make test`。

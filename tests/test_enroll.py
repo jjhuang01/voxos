@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from voxos import dsp
 from voxos.main import _enroll_verdict
@@ -79,7 +80,7 @@ def test_holdout_score_reveals_a_segment_that_does_not_match_the_rest():
     """留出分数必须来自「没参与建模」的那一段。
 
     用全部段建模板、再拿其中一段去验证，分数永远好看——那一段就在均值里。
-    留出最后一段才看得出「这个人这次录的第三句和前两句不像」。
+    逐段留一才看得出「某句与其余两句不像」，不能只挑最后一段。
     """
     from voxos.main import _holdout_score
 
@@ -102,7 +103,7 @@ def test_holdout_score_gives_up_when_there_is_nothing_to_hold_out():
 
 
 def test_verdict_prefers_the_holdout_score_over_consistency(capsys):
-    """两个数字不一致时，用留出分数判断——它才是「本人换句话能拿多少分」。
+    """两个数字不一致时，用未参与该模板的留出段检查注册质量。
 
     一致性 0.80 看着漂亮，但留出只有 0.74，说明模板被某一段带偏了。
     """
@@ -177,3 +178,289 @@ def test_guided_samples_runs_end_to_end(monkeypatch):
     lock = dsp.SpeakerLock(threshold=0.75, embedder=lambda x: np.ones(4, dtype=np.float32))
     samples, name = main._guided_samples(Config({}), lock)
     assert name == "测试麦" and len(samples) == len(main.enroll.SCRIPT)
+
+
+def _quality_embedder(audio):
+    """模型边界替身：首句余弦 0.68，其余两句同向；不替换质量或保存逻辑。"""
+    if float(audio[0]) < 0.15:
+        return np.array([0.68, np.sqrt(1 - 0.68 ** 2)], dtype=np.float32)
+    return np.array([1.0, 0.0], dtype=np.float32)
+
+
+def _quality_samples(values=(0.1, 0.2, 0.2)):
+    return [np.full(2 * dsp.SR, value, dtype=np.float32) for value in values]
+
+
+@pytest.mark.parametrize("bad_index", [0, 1, 2])
+def test_holdout_rejects_the_worst_sentence_regardless_of_position(bad_index):
+    """平均 0.838 会掩盖一条 0.680；只有最差留一分数能拦住这份模板。"""
+    from voxos import enroll
+
+    vectors = [np.array([1.0, 0.0], dtype=np.float32) for _ in range(3)]
+    vectors[bad_index] = np.array([0.68, np.sqrt(1 - 0.68 ** 2)], dtype=np.float32)
+    score = enroll.holdout(vectors)
+    assert score == pytest.approx(0.68)
+    assert enroll.verdict(score, 0.75, 3)[0] is False
+
+
+def test_ui_holdout_catches_a_bad_first_sentence():
+    """只留最后一条会得到 0.917，把第一条不匹配的录入误报为可用。"""
+    from voxos.main import _holdout_score
+
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=_quality_embedder)
+    assert _holdout_score(lock, _quality_samples()) == pytest.approx(0.68)
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_ui_verdict_rejects_too_few_consistent_sentences(count, capsys):
+    """自身一致性为 1 也不能让不足三句的首次录入变成成功。"""
+    warning = _enroll_verdict(_segments(count, 2.0), 1.0, 0.75)
+    assert warning and "不可用" in warning
+    assert "重录" in capsys.readouterr().out
+
+
+def _wav_files(samples, folder):
+    """真实文件入口使用独立目录，不能混进身份档案字节比较。"""
+    import wave
+
+    folder.mkdir()
+    files = []
+    for index, signal in enumerate(samples):
+        path = folder / f"input-{index}.wav"
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(dsp.SR)
+            handle.writeframes((signal * 32767).astype(np.int16).tobytes())
+        files.append(str(path))
+    return files
+
+
+def _script_enroll(cfg, files, embedder, monkeypatch):
+    """真实显式脚本，仅替换配置读取与模型边界，注册/质量/写盘保持真实。"""
+    import importlib.util
+    from pathlib import Path
+    from voxos import audio
+
+    script = Path(__file__).resolve().parents[1] / "scripts/enroll_voice.py"
+    spec = importlib.util.spec_from_file_location("enroll_voice", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "load", lambda: cfg)
+    monkeypatch.setattr(audio, "make_embedder", lambda config: (embedder, 0.75, "test"))
+    monkeypatch.setattr(module.sys, "argv", [str(script), "--mode", "normal"]
+                        + [arg for file in files for arg in ("--wav", file)])
+    return module.main()
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "ui", "script"])
+@pytest.mark.parametrize("existing", [False, True], ids=["first-enroll", "reenroll"])
+@pytest.mark.parametrize("values", [(0.1, 0.2, 0.2), (0.2,), (0.2, 0.2)],
+                         ids=["bad-first-sentence", "one-sentence", "two-sentences"])
+def test_unusable_enrollment_never_commits_identity(tmp_path, monkeypatch, entrypoint, existing, values):
+    """真实 npz/json 副作用：失败返回非成功，内存和磁盘都保留先前身份。"""
+    from voxos import main
+    from voxos.config import Config
+
+    folder = tmp_path / "identity"
+    folder.mkdir()
+    path = folder / "vp.npz"
+    cfg = Config({"audio": {"voiceprint_profiles": str(path), "vad_backend": "energy"}},
+                 data_root=tmp_path)
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=_quality_embedder)
+    previous = np.array([0.0, 1.0], dtype=np.float32)
+    original = {}
+    if existing:
+        lock.profiles = {"normal": previous}
+        lock.save(path)
+        path.with_suffix(".json").write_text('{"usable": true, "holdout": 0.8676}')
+        original = {item.name: item.read_bytes() for item in folder.iterdir()}
+    samples = _quality_samples(values)
+    if entrypoint == "cli":
+        assert main._commit_enroll(cfg, lock, samples) == 2
+    elif entrypoint == "script":
+        files = _wav_files(samples, tmp_path / "inputs")
+        assert _script_enroll(cfg, files, lock.embedder, monkeypatch) == 2
+    else:
+        result = main._enroll_now(cfg, lock, 0.0, capture=lambda: samples)
+        assert result["ok"] is False
+    assert {item.name: item.read_bytes() for item in folder.iterdir()} == original
+    if existing:
+        assert lock.profiles["normal"] is previous
+    else:
+        assert lock.profiles == {}
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "ui", "script"])
+def test_good_enrollment_commits_the_new_score_method(tmp_path, monkeypatch, entrypoint):
+    """合格的三句仍能落盘；新元数据必须与旧版平均/最后一条分数区分。"""
+    import json
+    from voxos import main
+    from voxos.config import Config
+
+    path = tmp_path / "vp.npz"
+    cfg = Config({"audio": {"voiceprint_profiles": str(path), "vad_backend": "energy"}},
+                 data_root=tmp_path)
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=_quality_embedder)
+    samples = _quality_samples((0.2, 0.2, 0.2))
+    if entrypoint == "cli":
+        assert main._commit_enroll(cfg, lock, samples) == 0
+    elif entrypoint == "script":
+        files = _wav_files(samples, tmp_path / "inputs")
+        assert _script_enroll(cfg, files, lock.embedder, monkeypatch) == 0
+    else:
+        result = main._enroll_now(cfg, lock, 0.0, capture=lambda: samples)
+        assert result["ok"] is True and result["usable"] is True
+    with np.load(path) as profiles:
+        np.testing.assert_allclose(profiles["normal"], [1.0, 0.0], atol=1e-6)
+    meta = json.loads(path.with_suffix(".json").read_text())
+    assert meta.get("holdout_method") == "leave_one_out_min"
+    assert meta["holdout"] == 1.0 and meta["usable"] is True
+    state = main._voiceprint_state(cfg, dsp.SpeakerLock().load(path))
+    assert state.get("holdout_method") == "leave_one_out_min"
+
+
+def test_legacy_holdout_is_not_relabelled_as_worst_leave_one_out():
+    """旧档案没有原始录音，不能升级标签后声称已逐句复核。"""
+    from voxos.main import _meta_note
+
+    note = _meta_note({"segments": 3, "holdout": 0.8676, "threshold": 0.75,
+                       "usable": True})
+    assert "旧版" in note and "未复核各段" in note
+    assert "最差留一" not in note
+
+
+@pytest.mark.parametrize("entrypoint", ["wav", "batch", "ui", "script"])
+@pytest.mark.parametrize("existing", [False, True], ids=["first-enroll", "reenroll"])
+@pytest.mark.parametrize("seconds, amplitude, speech_seconds", [
+    (0.2, 0.2, 0.2), (1.0, 0.2, 1.0), (2.0, 0.001, 2.0),
+    (2.0, 1.0, 2.0), (2.0, 0.2, 0.2),
+], ids=["tiny", "short-speech", "too-quiet", "clipped", "silence-padding"])
+def test_bad_waveform_never_commits_even_with_perfect_embeddings(
+        tmp_path, monkeypatch, entrypoint, existing, seconds, amplitude, speech_seconds):
+    """三句嵌入全同向也不能掩盖时长/峰值不合格；真实 CLI 和 UI 都须保留身份。"""
+    import argparse
+    import threading
+    from voxos import main
+    from voxos.config import Config
+
+    folder = tmp_path / "identity"
+    folder.mkdir()
+    path = folder / "vp.npz"
+    cfg = Config({"audio": {"voiceprint_profiles": str(path), "vad_backend": "energy"}},
+                 data_root=tmp_path)
+    previous = np.array([0.0, 1.0], dtype=np.float32)
+    lock = dsp.SpeakerLock(threshold=0.75,
+                           embedder=lambda signal: np.array([1.0, 0.0], dtype=np.float32))
+    if existing:
+        lock.profiles = {"normal": previous}
+        lock.save(path)
+        path.with_suffix(".json").write_text('{"usable": true, "holdout": 0.8676}')
+    original = {item.name: item.read_bytes() for item in folder.iterdir()}
+    bad = np.zeros(int(seconds * dsp.SR), dtype=np.float32)
+    bad[:int(speech_seconds * dsp.SR)] = amplitude
+    samples = _quality_samples((0.2, 0.2, 0.2))
+    samples[1] = bad
+    done = threading.Event()
+    if entrypoint == "ui":
+        result = main._enroll_now(cfg, lock, 0.0, done=done, capture=lambda: samples)
+        assert result["ok"] is False and "不可用" in result["error"]
+        assert not done.is_set()
+    elif entrypoint == "script":
+        files = _wav_files(samples, tmp_path / "inputs")
+        assert _script_enroll(cfg, files, lock.embedder, monkeypatch) == 2
+    else:
+        monkeypatch.setattr(main, "_lock", lambda config: lock)
+        files = _wav_files(samples, tmp_path / "inputs") if entrypoint == "wav" else []
+        if entrypoint == "batch":
+            monkeypatch.setattr(main, "_record_segments", lambda *args: samples)
+        args = argparse.Namespace(script=False, wav=files, check=False, batch=True,
+                                  record=10.0, mode="normal")
+        assert main.cmd_enroll(args, cfg) == 2
+    assert {item.name: item.read_bytes() for item in folder.iterdir()} == original
+    if existing:
+        assert lock.profiles["normal"] is previous
+    else:
+        assert lock.profiles == {}
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "ui"])
+@pytest.mark.parametrize("existing", [False, True], ids=["first-enroll", "reenroll"])
+@pytest.mark.parametrize("failure", ["write", "replace"])
+def test_failed_profile_write_preserves_identity_and_removes_only_its_tempfile(
+        tmp_path, monkeypatch, entrypoint, existing, failure):
+    """真实 np.savez 中途磁盘满或替换失败：原 npz/json 完整，运行态和完成事件不变。"""
+    import errno
+    import os
+    import threading
+    from voxos import main
+    from voxos.config import Config
+
+    path = tmp_path / "vp.npz"
+    cfg = Config({"audio": {"voiceprint_profiles": str(path), "vad_backend": "energy"}},
+                 data_root=tmp_path)
+    previous = np.array([0.0, 1.0], dtype=np.float32)
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=_quality_embedder)
+    if existing:
+        lock.profiles = {"normal": previous}
+        lock.save(path)
+        path.with_suffix(".json").write_text('{"usable": true, "holdout": 0.8676}')
+    (tmp_path / "unrelated.tmp").write_text("must stay")
+    original = {item.name: item.read_bytes() for item in tmp_path.iterdir()}
+
+    def write_failure(handle, *args, **kwargs):
+        handle.write(b"partial new array")
+        raise OSError(errno.ENOSPC, "injected disk full")
+
+    def replace_failure(*args):
+        raise OSError(errno.EACCES, "injected replace failure")
+
+    if failure == "write":
+        monkeypatch.setattr(np.lib.format, "write_array", write_failure)
+    else:
+        monkeypatch.setattr(os, "replace", replace_failure)
+    samples = _quality_samples((0.2, 0.2, 0.2))
+    done = threading.Event()
+    if entrypoint == "cli":
+        assert main._commit_enroll(cfg, lock, samples) == 2
+    else:
+        result = main._enroll_now(cfg, lock, 0.0, done=done, capture=lambda: samples)
+        assert result["ok"] is False and "保存失败" in result["error"]
+    assert not done.is_set()
+    assert {item.name: item.read_bytes() for item in tmp_path.iterdir()} == original
+    if existing:
+        assert lock.profiles["normal"] is previous
+        np.testing.assert_array_equal(dsp.SpeakerLock().load(path).profiles["normal"], previous)
+    else:
+        assert lock.profiles == {}
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "ui"])
+def test_live_identity_is_published_only_after_profile_save(tmp_path, monkeypatch, entrypoint):
+    """写盘进行中运行态仍是旧身份，成功后才一次替换为新模板。"""
+    from voxos import main
+    from voxos.config import Config
+
+    path = tmp_path / "vp.npz"
+    cfg = Config({"audio": {"voiceprint_profiles": str(path), "vad_backend": "energy"}},
+                 data_root=tmp_path)
+    previous = np.array([0.0, 1.0], dtype=np.float32)
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=_quality_embedder,
+                           profiles={"normal": previous})
+    lock.save(path)
+    original = path.read_bytes()
+    write_array = np.lib.format.write_array
+
+    def observe_save(handle, *args, **kwargs):
+        assert lock.profiles["normal"] is previous
+        assert path.read_bytes() == original
+        return write_array(handle, *args, **kwargs)
+
+    monkeypatch.setattr(np.lib.format, "write_array", observe_save)
+    samples = _quality_samples((0.2, 0.2, 0.2))
+    if entrypoint == "cli":
+        assert main._commit_enroll(cfg, lock, samples) == 0
+    else:
+        assert main._enroll_now(cfg, lock, 0.0, capture=lambda: samples)["ok"] is True
+    np.testing.assert_allclose(lock.profiles["normal"], [1.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(dsp.SpeakerLock().load(path).profiles["normal"], [1.0, 0.0], atol=1e-6)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -299,12 +301,12 @@ def test_broken_model_falls_back_to_text_mid_stream(cfg, bus, make_voice):
 
 # ------------------------------------------------------------------ 真模型
 
-def test_real_model_speaks_probability_if_it_is_downloaded(cfg):
+def test_real_model_speaks_probability_if_it_is_downloaded():
     """本机下了模型就跑一次真的：输出必须是 0–1 之间的一个数。
 
     没下就跳过——CI 上永远跳过，这是**故意的**：模型 8.7MB，不该进 CI 缓存。
     """
-    path = cfg.path("audio.turn_model", turn.DEFAULT_MODEL)
+    path = Path(__file__).resolve().parents[1] / turn.DEFAULT_MODEL
     if not path.exists():
         pytest.skip("没下 smart-turn 模型（voxos models）")
     detector = turn.SmartTurn(path)

@@ -7,6 +7,7 @@ import wave
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from voxos import audio, dsp
 
@@ -33,6 +34,27 @@ def test_pipeline_accepts_owner_and_rejects_stranger(cfg, bus, make_voice, stub_
     assert "声纹" in rejected[0].reason
     assert pipeline.stats["utterances"] == 1
     assert pipeline.stats["rejected"] == 1
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["local-stt", "remote-stt"])
+def test_pipeline_does_not_reject_a_whole_sentence_that_matches_the_profile(cfg, remote):
+    """整句余弦 0.78、短窗 0.68：切窗门禁曾在 STT 之前额外丢弃这条指令。"""
+    def embedding(signal):
+        score = 0.78 if signal.size >= 3 * dsp.SR else 0.68
+        return np.array([score, np.sqrt(1 - score ** 2)], dtype=np.float32)
+
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=embedding,
+                           profiles={"normal": np.array([1.0, 0.0], dtype=np.float32)})
+    stt = audio.ScriptedStt(["打开微信"])
+    stt.remote = remote
+    pipeline = audio.AudioPipeline(cfg=cfg, stt=stt, lock=lock, on_event=lambda *a: None)
+    signal = np.full(4 * dsp.SR, 0.2, dtype=np.float32)
+    utterances = list(pipeline.run(audio.ArraySource(signal)))
+
+    assert len(utterances) == 1 and utterances[0].accepted
+    assert utterances[0].text == "打开微信"
+    assert utterances[0].score == pytest.approx(0.78)
+    assert pipeline.stats["rejected"] == 0
 
 
 def test_pipeline_merges_unfinished_sentence(cfg, bus, make_voice, stub_embedder, silence):

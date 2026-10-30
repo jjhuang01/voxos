@@ -589,30 +589,18 @@ def test_busy_port_says_who_holds_it_instead_of_a_traceback(monkeypatch):
     assert "Python" in message, "没说清楚是谁占着"
 
 
-def test_enroll_warns_when_only_one_sentence_was_captured(monkeypatch):
-    """只切出 1 句时模板不稳，必须当场说，而不是等用户被自己拒之门外。
-
-    实测：单句模板下同人跨句子只有 0.751，阈值 0.82 时 100% 误拒。
-    """
+def test_enroll_rejects_when_only_one_sentence_was_captured(tmp_path):
+    """只有一句时必须拒绝首次录入，不能只带 warning 保存不可用身份。"""
     import numpy as np
+    from voxos import dsp
 
-    monkeypatch.setattr(main, "_record_segments", lambda *a, **k: [np.zeros(3200, dtype="float32")])
-
-    class FakeLock:
-        profiles: dict = {}
-        threshold = 0.75
-
-        def enroll(self, samples):
-            self.profiles["normal"] = np.ones(192, dtype="float32")
-            return 1.0
-
-        def save(self, path):
-            return None
-
-    result = main._enroll_now(config.Config({"audio": {}}), FakeLock(), 10.0)  # type: ignore[arg-type]
-    assert result["ok"] is True
-    assert result["samples"] == 1
-    assert "再说 2 句" in str(result["warning"]), result
+    path = tmp_path / "vp.npz"
+    cfg = config.Config({"audio": {"voiceprint_profiles": str(path)}}, data_root=tmp_path)
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=lambda signal: np.ones(4, dtype=np.float32))
+    result = main._enroll_now(cfg, lock, 0.0,
+                              capture=lambda: [np.full(3200, 0.2, dtype=np.float32)])
+    assert result["ok"] is False and "不可用" in str(result["error"]), result
+    assert not path.exists() and lock.profiles == {}
 
 
 def test_bad_reenroll_keeps_the_old_voiceprint(monkeypatch):

@@ -23,6 +23,7 @@ import time
 import types
 import webbrowser
 from collections import deque
+from copy import copy
 from pathlib import Path
 
 from . import (__version__, core, cue, cuebox, dialogue, enroll, lessons, prompts, sandbox,
@@ -379,11 +380,7 @@ def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]
 def _enroll_now(cfg: Config, lock: dsp.SpeakerLock, seconds: float,
                 done: threading.Event | None = None,
                 capture: Callable[[], list[object]] | None = None) -> dict[str, object]:
-    """从麦克风录一段并写盘。失败也要给出人能看懂的原因。
-
-    先把新声纹算在副本上，保存成功后才提交到运行态；保存失败不能出现
-    「内存里已经是新身份、重启后又变回旧身份」的分裂。
-    """
+    """检查录音与最差留一质量，在副本上注册，保存成功后才发布运行态身份。"""
     if capture is None and (not isinstance(seconds, (int, float)) or not math.isfinite(seconds)
                             or not 1 <= seconds <= 15):
         return {"ok": False, "error": "录音时长需在 1~15 秒之间"}
@@ -395,27 +392,28 @@ def _enroll_now(cfg: Config, lock: dsp.SpeakerLock, seconds: float,
     if not samples:
         return {"ok": False, "error": "没有采集到音频"}
     previous = dict(lock.profiles)
-    holdout = _holdout_score(lock, samples)
+    candidate = copy(lock)
+    candidate.profiles = dict(previous)
     try:
-        consistency = lock.enroll(samples)         # type: ignore[arg-type]
+        warning = _enroll_quality(cfg, samples)
+        if warning:
+            return _commit_voiceprint(cfg, candidate, previous, warning)
+        holdout = _holdout_score(candidate, samples)
+        consistency = candidate.enroll(samples)    # type: ignore[arg-type]
     except Exception as exc:
-        lock.profiles = previous
         return {"ok": False, "error": f"声纹录入失败：{exc}"}
-    # 胶囊这边以前只看「段数 ≥ 2」就说成功：10 秒切 5 段、一致性 0.755、阈值
-    # 0.75 也照样弹「录入完成」，用户以为好了，然后每句话都被自己拒之门外。
     warning = _enroll_verdict(samples, float(consistency), lock.threshold, holdout)
-    if not warning and len(samples) < 2:
-        warning = "只切出 1 句：模板不稳，建议再说 2 句（句间停半秒），否则可能被自己拒之门外"
-    failed = _commit_voiceprint(cfg, lock, previous, warning)
+    failed = _commit_voiceprint(cfg, candidate, previous, warning)
     if failed:
         return failed
+    lock.profiles = candidate.profiles
     if done is not None:
         done.set()
     _save_enroll_meta(cfg, samples, float(consistency), holdout, lock.threshold,
-                      device=str(cfg.get("audio.input_device", "")), usable=not warning)
+                      device=str(cfg.get("audio.input_device", "")), usable=True)
     return {"ok": True, "consistency": round(float(consistency), 3),
             "holdout": None if holdout is None else round(holdout, 3),
-            "usable": not warning, "samples": len(samples), "warning": warning}
+            "usable": True, "samples": len(samples), "warning": ""}
 
 
 def _enroll_from_ui(runtime: Runtime, lock: dsp.SpeakerLock,
@@ -472,10 +470,11 @@ def _ui_samples(runtime: Runtime, lock: dsp.SpeakerLock) -> list[object]:
 def _commit_voiceprint(cfg: Config, lock: dsp.SpeakerLock, previous: dict[str, object],
                        warning: str) -> dict[str, object] | None:
     """写盘新声纹；失败或读坏时回滚到旧档案，返回错误结果，成功返回 None。"""
-    if warning and previous:
-        # 重录读坏了不能把能用的旧声纹冲掉：界面上随时能点「重录」，误触一次不该锁死自己
+    if warning:
+        # 首次录入也不能保存坏模板；重录失败则保留原身份。
         lock.profiles = previous            # type: ignore[assignment]
-        return {"ok": False, "error": f"{warning}（已保留原声纹）"}
+        kept = "（已保留原声纹）" if previous else "（未保存声纹）"
+        return {"ok": False, "error": f"{warning}{kept}"}
     try:
         lock.save(cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
     except Exception as exc:
@@ -1355,21 +1354,33 @@ def _capture_one(cfg: Config, device: object, max_s: float = 6.0) -> tuple[objec
 
 def _commit_enroll(cfg: Config, lock: dsp.SpeakerLock, samples: list[object],
                    mode: str = "normal", device: str = "") -> int:
-    """先算留出分数，再建模板、落盘、给结论。顺序不能反。"""
-    from . import dsp
-
-    if not samples:
-        print("没有可用音频，录入失败")
+    """先检查注册质量；不可用的新录入不修改内存身份或磁盘档案。"""
+    previous = dict(lock.profiles)
+    candidate = copy(lock)
+    candidate.profiles = dict(previous)
+    try:
+        warning = _enroll_quality(cfg, samples)
+        if warning:
+            print(warning)
+            return 2
+        holdout = _holdout_score(candidate, samples)
+        usable, line = enroll.verdict(holdout if holdout is not None else 0.0,
+                                      lock.threshold, len(samples))
+        print(line)
+        if not usable:
+            return 2
+        consistency = candidate.enroll(samples, mode)  # type: ignore[arg-type]
+    except Exception as exc:
+        print(f"声纹录入失败：{exc}")
         return 2
-    holdout = enroll.holdout([lock.embedder(dsp.as_float(item)) for item in samples])
-    consistency = lock.enroll(samples, mode)  # type: ignore[arg-type]
-    lock.save(cfg.path("audio.voiceprint_profiles", ".voxos/voiceprint_profiles.npz"))
-    usable, line = enroll.verdict(holdout if holdout is not None else float(consistency),
-                                  lock.threshold, len(samples))
-    print(line)
+    failed = _commit_voiceprint(cfg, candidate, previous, "")
+    if failed:
+        print(failed["error"])
+        return 2
+    lock.profiles = candidate.profiles
     print(f"已写入 {cfg.path('audio.voiceprint_profiles')}（{len(samples)} 段，{mode}）")
     _save_enroll_meta(cfg, samples, float(consistency), holdout, lock.threshold,
-                      device=device, usable=usable)
+                      device=device, usable=True)
     return 0
 
 
@@ -1396,51 +1407,56 @@ def _check_voice(cfg: Config, lock: dsp.SpeakerLock) -> int:
     return 0 if ok else 1
 
 
-def _holdout_score(lock: object, samples: list[object]) -> float | None:
-    """留一段做验证：本人换句话大概能拿多少分。
+def _enroll_quality(cfg: Config, samples: list[object]) -> str:
+    """所有录入入口提交前复用逐句质量门，静音不能充当足够的人声时长。"""
+    from . import audio, dsp
 
-    用全部段建模板、再拿其中一段去验证，分数必然偏高——那一段参与了均值。
-    留出最后一段，得到的才是新句子的真实分数。段数少于 3 时返回 None。
-    """
+    if len(samples) < enroll.MIN_SEGMENTS:
+        return enroll.verdict(0.0, 0.0, len(samples))[1].removeprefix("⚠️  ")
+    vad = audio.make_vad(cfg)
+    for index, sample in enumerate(samples, 1):
+        signal = dsp.as_float(sample)               # type: ignore[arg-type]
+        why = enroll.check(signal, signal.size / dsp.SR)
+        if not why:
+            vad.reset()                           # type: ignore[attr-defined]
+            speech = sum(frame.size for start in range(0, signal.size, 512)
+                         if vad.is_speech(frame := signal[start:start + 512]))
+            why = enroll.check(signal, speech / dsp.SR)
+        if why:
+            return f"这次录入不可用：第 {index} 句：{why}"
+    return ""
+
+
+def _holdout_score(lock: object, samples: list[object]) -> float | None:
+    """UI 和 CLI 共用最差留一分数；不足三段时不伪造质量分数。"""
     from . import dsp
 
-    if not hasattr(lock, "embedder") or len(samples) < 3:
+    if not hasattr(lock, "embedder") or len(samples) < enroll.MIN_SEGMENTS:
         return None
     vectors = [lock.embedder(dsp.as_float(s)) for s in samples]  # type: ignore[attr-defined]
-    return dsp.cosine(vectors[-1], dsp.mean_vector(vectors[:-1]))
+    return enroll.holdout(vectors)
 
 
 def _enroll_verdict(samples: list[object], consistency: float, threshold: float,
                     holdout: float | None = None) -> str:
-    """这次录入到底能不能用。**返回一行结论**（给接口当 warning），细节打印给终端。
-
-    判据是**比实际阈值高多少**，不是一个写死的魔法数。而且优先用**留出分数**：
-    一致性是「每段和均值有多像」，留出分数才是「本人换句话能拿多少分」——
-    后者才是真正决定会不会被拒的那个数。
-
-    实测踩过两次：只录 1 句时一致性 0.751、阈值 0.75，用户时通时不通；录 10 秒
-    切成 5 段时 0.755，还是同一个坑。**不报清楚，用户会以为「已经录好了」。**
-    """
+    """UI 与 CLI 共用注册质量门槛；失败时补充录音长度，返回可展示的原因。"""
     from . import dsp
 
-    spans = [dsp.as_float(s).size / dsp.SR for s in samples]  # type: ignore[arg-type]
     score = holdout if holdout is not None else consistency
-    label = "留出验证" if holdout is not None else "一致性"
-    margin = score - threshold
-    if margin >= 0.04:
-        print(f"✅ 可用：{label} {score:.3f} 比阈值 {threshold:.2f} 高 {margin:.3f}，"
-              f"本人换句话也能过")
+    usable, line = enroll.verdict(score, threshold, len(samples))
+    if holdout is None:
+        line = line.replace("留出验证", "一致性")
+    print(line)
+    if usable:
         return ""
-    average = sum(spans) / len(spans)
-    print(f"⚠️  这次录入**不可用**：{label} {score:.3f}，阈值 {threshold:.2f}，"
-          f"只高 {margin:+.3f}——本人说话也会被拒。")
-    print(f"   切出 {len(spans)} 段，平均 {average:.1f}s，最短 {min(spans):.1f}s")
-    short = [span for span in spans if span < 1.0]
-    if short:
-        print(f"   其中 {len(short)} 段短于 1 秒：碎片的声纹不准，是拉低分数的元凶")
-    print("   重录：voxos enroll  —— 说 3 句完整的话，每句 2~3 秒，句间停半秒")
-    return (f"这次录入不可用：{label} {score:.3f}，阈值 {threshold:.2f}，"
-            f"本人说话也会被拒。重录时说 3 句完整的话，每句 2~3 秒")
+    spans = [dsp.as_float(s).size / dsp.SR for s in samples]  # type: ignore[arg-type]
+    if spans:
+        average = sum(spans) / len(spans)
+        print(f"   切出 {len(spans)} 段，平均 {average:.1f}s，最短 {min(spans):.1f}s")
+        short = [span for span in spans if span < 1.0]
+        if short:
+            print(f"   其中 {len(short)} 段短于 1 秒：先读完完整句子，再检查留出分数")
+    return line.removeprefix("⚠️  ")
 
 
 def _record_segments(cfg: Config, seconds: float, device: object = None) -> list[object]:
@@ -1820,6 +1836,7 @@ def _save_enroll_meta(cfg: Config, samples: list[object], consistency: float,
             "segments": len(samples),
             "consistency": round(float(consistency), 4),
             "holdout": None if holdout is None else round(float(holdout), 4),
+            "holdout_method": "leave_one_out_min" if holdout is not None else None,
             "threshold": float(threshold),
             "device": device,
             "usable": bool(usable),
@@ -1848,14 +1865,19 @@ def _meta_note(meta: dict[str, object]) -> str:
     """把录入元数据翻成一句能判断「能不能用」的话。"""
     segments = meta.get("segments") or 0
     threshold = float(meta.get("threshold") or 0.75)
-    score, label = meta.get("holdout"), "留出验证"
+    score, label = meta.get("holdout"), "最差留一验证"
+    legacy = score is not None and meta.get("holdout_method") != "leave_one_out_min"
+    if legacy:
+        label = "旧版留出验证（未复核各段）"
     if score is None:
         score, label = meta.get("consistency"), "一致性"
     where = f"，{meta.get('device')}" if meta.get("device") else ""
     if score is None:
         return f"已录入（{segments} 段均值{where}，质量未记录）"
     margin = float(score) - threshold
-    verdict = "可用" if margin >= 0.04 else "← 会被自己拒，重录：voxos enroll"
+    verdict = "可用" if margin >= enroll.USABLE_MARGIN else "← 会被自己拒，重录：voxos enroll"
+    if legacy and margin >= enroll.USABLE_MARGIN:
+        verdict = "旧版判为可用，不代表逐句复核"
     return (f"已录入（{segments} 段均值{where}，{label} {float(score):.3f} / "
             f"阈值 {threshold:.2f}，{verdict}）")
 
@@ -1874,6 +1896,7 @@ def _voiceprint_state(cfg: Config, lock: dsp.SpeakerLock | None) -> dict[str, ob
         "known": True,
         "segments": meta.get("segments"),
         "holdout": meta.get("holdout"),
+        "holdout_method": meta.get("holdout_method"),
         "device": meta.get("device") or "",
         "usable": bool(meta.get("usable", True)),
         "at": meta.get("at"),

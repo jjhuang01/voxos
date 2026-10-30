@@ -323,7 +323,7 @@ def make_vad(cfg: Config) -> object:
 # ------------------------------------------------------------------ 声纹
 
 class SherpaEmbedder:
-    """生产路径：sherpa-onnx + CAM++/WeSpeaker，512 维说话人嵌入。"""
+    """生产路径：sherpa-onnx 提取整段嵌入；本项目 CAM++ 模型为 192 维。"""
 
     def __init__(self, model_path: str | Path, num_threads: int = 2) -> None:
         import sherpa_onnx  # noqa: PLC0415
@@ -833,37 +833,16 @@ class AudioPipeline:
             self._shown = text
             self.on_partial(text)
 
-    def _verify(self, audio: np.ndarray) -> tuple[bool, float, float]:
-        """声纹验证，返回 (是否本人, 最高相似度, 像本人的窗口占比)。
-
-        **分段而不是整段**：整段一个嵌入会把「我说 + 别人插一句」平均成一个谁也
-        不像的音色，结果是本人被拒、指令丢掉。判据换成「多数窗口像不像」。
-
-        `SpeakerLock` 没实现 `verify_segments` 时（测试替身、将来的别的后端）
-        退回整段验证，占比按「通过=1.0 / 拒绝=0.0」处理，语义保持一致。
-        """
-        segmented = getattr(self.lock, "verify_segments", None)
-        if callable(segmented):
-            return segmented(audio)
-        ok, score = self.lock.verify(audio)
-        return ok, score, 1.0 if ok else 0.0
-
     def _verify_owner(self, audio: np.ndarray, audio_ms: float) -> tuple[Utterance | None, float]:
-        """声纹校验。返回 (被拒的那条记录 或 None, 相似度)。
+        """用整句校验，与录入检查和远端 STT 门禁保持同一判据。
 
-        相似度要一起返回：后面几处丢弃（识别失败、空转写、回声门）都要把它带进
-        时间线，否则「为什么没反应」又少一个维度。
-
-        拒绝原因要能区分「不是本人」和「混了别人的话」：后者多半是屋里有人
-        插嘴，用户的重试方式完全不同（重说 vs 让别人先说完）。
+        固定短窗会改变 CAM++ 的统计池化，曾把整句过阈值的录音额外拒绝。
+        分数只表示整句与档案的相似度，不能据此断言每个词都来自本人。
         """
-        ok, score, ratio = self._verify(audio)
+        ok, score = self.lock.verify(audio)
         if ok:
             return None, score
-        reason = "声纹不匹配，已丢弃"
-        if 0.0 < ratio < 0.5:
-            reason = f"声纹不匹配（只有 {ratio:.0%} 的片段像本人，可能混进了别人的话）"
-        return self._drop(audio_ms, score, reason), score
+        return self._drop(audio_ms, score, "声纹不匹配，已丢弃"), score
 
     def _preprocess(self, chunk: np.ndarray) -> np.ndarray:
         audio = dsp.as_float(chunk)
@@ -924,8 +903,8 @@ class AudioPipeline:
     def _just_backchannel(self) -> bool:
         """播报中说「嗯/对」不能打断：先听清攒下的这段，像附和就再等等。
 
-        250ms 只够判「是不是本人」，不够判「是不是在插话」。附和词或还认不出字时
-        继续攒，直到 `backchannel_ms` 仍在说才算插话；真插话的头一个字一认出就打断。
+        `interrupt_ms` 是开始尝试打断的时长，不保证短音频能可靠确认身份。
+        附和词或还认不出字时继续攒，直到 `backchannel_ms` 仍在说才尝试打断。
         """
         limit = float(getattr(self.echo, "backchannel_ms", 0.0))
         if self._barge_ms >= limit:
@@ -933,7 +912,10 @@ class AudioPipeline:
         at, verdict = self._bc_seen
         if at <= self._barge_ms < at + 120.0:      # 音频线程上每块都解码太重，120ms 听一次
             return verdict
-        text = self.stt.transcribe(np.concatenate(self._barge), final=False).strip()
+        audio = np.concatenate(self._barge)
+        if getattr(self.stt, "remote", False) and not self.lock.verify(audio)[0]:
+            return True                             # 身份未通过，只继续攒音频，不上传
+        text = self.stt.transcribe(audio, final=False).strip()
         verdict = dsp.maybe_backchannel(text)
         self._bc_seen = (self._barge_ms, verdict)
         return verdict

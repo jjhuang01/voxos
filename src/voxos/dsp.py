@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -322,11 +324,9 @@ def cosine(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def mean_vector(vectors: list[np.ndarray]) -> np.ndarray:
-    """归一化后取均值，再归一化——声纹模板的标准做法。
+    """逐条 L2 归一化后等权平均，再归一化；录入与留一验证共用同一算法。
 
-    先逐条归一化再平均，而不是直接平均：否则音量大的那段会主导模板，而音量
-    与「是谁」无关。抽成公共函数是因为录入和留出验证必须用**同一个**模板算法，
-    否则报出来的分数和实际用的档案不是一个东西。
+    等权针对嵌入方向，不把向量模长当成质量或录音音量；上游也有直接平均方案。
     """
     stacked = np.stack([v / (np.linalg.norm(v) + _EPS) for v in vectors])
     mean = stacked.mean(axis=0)
@@ -366,40 +366,21 @@ class SpeakerLock:
         best = max(cosine(current, profile) for profile in self.profiles.values())
         return best >= self.threshold, round(best, 4)
 
-    def verify_segments(self, audio: np.ndarray, window_ms: float = 1500.0,
-                        min_ratio: float = 0.5) -> tuple[bool, float, float]:
-        """分段验证：返回 (是否本人, 最高相似度, 像本人的窗口占比)。
-
-        **为什么整段一个嵌入不够**：旁边有人插一句，整段的嵌入会变成「两个人
-        的音色平均」，谁也不像——结果本人被拒，指令丢掉。反过来，如果别人的
-        话占多数，又可能误过。
-
-        学术上的对应做法是 TS-VAD / Personal VAD：给定 speaker profile 逐帧
-        判断「目标说话人此刻在不在说」。这里用 CAM++ 逐窗口近似——粒度粗得多，
-        但同一个思路，而且不需要新模型。判据从「整段像不像」变成「多数窗口
-        像不像」：别人插一句不影响，别人说大半就拒。
-
-        短句切不出两个窗口时退回整段验证，行为与 `verify` 一致。
-        """
-        signal = as_float(audio)
-        if not self.profiles or signal.size < SR // 10:
-            return False, 0.0, 0.0
-        span = max(int(SR * window_ms / 1000.0), SR // 10)
-        windows = [signal[start:start + span] for start in range(0, signal.size, span)]
-        windows = [w for w in windows if w.size >= SR // 10]
-        if len(windows) < 2:                     # 太短：切不出对比，退回整段
-            ok, best = self.verify(signal)
-            return ok, best, 1.0 if ok else 0.0
-        scores = [max(cosine(self.embedder(w), profile) for profile in self.profiles.values())
-                  for w in windows]
-        best = max(scores)
-        ratio = sum(1 for score in scores if score >= self.threshold) / len(scores)
-        return (best >= self.threshold and ratio >= min_ratio,
-                round(float(best), 4), round(float(ratio), 3))
-
     def save(self, path: Path) -> None:
+        """同目录完整写入临时档案后原子替换，失败不截断已有声纹。"""
         path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(path, **{k: v for k, v in self.profiles.items()})
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.",
+                                              suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                np.savez(handle, **self.profiles)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def load(self, path: Path) -> "SpeakerLock":
         if path.exists():
