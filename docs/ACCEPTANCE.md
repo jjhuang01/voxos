@@ -5,7 +5,7 @@
 
 ## 0.1.38 源码（2026-10-29）
 
-**当前收集：561 项测试。当前全量结果：BLOCKED（单进程 `make test`）；按文件隔离复跑：559 passed / 2 skipped / 0 failed。**
+**当前收集：562 项测试。当前全量结果：BLOCKED（单进程 `make test`）；按文件隔离复跑：560 passed / 2 skipped / 0 failed。**
 阻断原因：运行时就绪脚本给每个 shell 调用装了一条「安全删除」通道，同一次调用内累计第 50 次
 删除就会触发 `SAFE_DELETE_BULK_CONFIRM_REQUIRED` 并 `SystemExit(1)`——被杀的是**当时正在删文件的
 那个进程**，其后夹具连带报错（不是用例断言失败）。用户确认后仍被拦截，未绕过。
@@ -199,7 +199,7 @@ FRR = FAR = 0 的点，说明后端分得开，差的只是「一个阈值服务
 
 | 模块 | 行数 | 职责 |
 | :--- | ---: | :--- |
-| `main.py` | 2016 | CLI 编排 / 守护循环 / 确认闸门 / 监听总开关 / 胶囊窗口 / 定时任务线程 / 慢动作确认 / 提示投递 / `llm`·`prompts`·`schedule`·`cue` 子命令 |
+| `main.py` | 2070 | CLI 编排 / 守护循环 / 确认闸门 / 监听总开关 / 胶囊窗口 / 定时任务线程 / 慢动作确认 / 提示投递 / `llm`·`prompts`·`schedule`·`cue` 子命令 |
 | `audio.py` | 1005 | 设备源 / 自愈重连 / VAD·声纹·STT 适配（含 SenseVoice） / 管道 |
 | `core.py` | 777 | 快慢双通道路由 / 多意图切分 / 闲聊 / LLM 客户端（网关信封·渠道私有字段） |
 | `tools.py` | 581 | 18 个原子工具（含 `run_command` / `open_path` / `send_message` / `schedule_task`） |
@@ -226,7 +226,7 @@ FRR = FAR = 0 的点，说明后端分得开，差的只是「一个阈值服务
 | `cuebox.py` | 88 | 提示的文件投递箱：原子写入 / 取过即删 / 过期丢弃，给脚本一条不碰令牌的入口 |
 | `messaging.py` | 91 | 发消息：微信没有 AppleScript 字典，只能生成 System Events 按键脚本 |
 | `__init__.py` | 7 | 版本 |
-| **合计** | **9132** | 18 个工具 / 10 条快通道 / 561 项测试（全量受阻） |
+| **合计** | **9186** | 18 个工具 / 10 条快通道 / 562 项测试（全量受阻） |
 
 - 最长函数 **40 行**（`src/voxos/audio.py:__post_init__`），预算 40 行，无超限函数。
 - 核心五模块（`registry` / `safety` / `core` / `config` / `settings`）共 **8 个类**；

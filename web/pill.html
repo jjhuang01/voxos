@@ -870,7 +870,7 @@ $('ask').addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 $('enroll').addEventListener('click', async () => {
   const button = $('enroll');
   button.disabled = true;
-  button.textContent = '正在录：照念上面 3 句…';
+  button.textContent = '正在录：看顶部提示，一句一句念';
   try {
     const result = await api('/api/enroll', {method:'POST', body: JSON.stringify({seconds: 10})});
     toast(result.warning || `录入完成：${result.samples} 句，一致性 ${result.consistency}`);

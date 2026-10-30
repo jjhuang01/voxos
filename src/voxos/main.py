@@ -377,17 +377,20 @@ def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]
 
 
 def _enroll_now(cfg: Config, lock: dsp.SpeakerLock, seconds: float,
-                done: threading.Event | None = None) -> dict[str, object]:
+                done: threading.Event | None = None,
+                capture: Callable[[], list[object]] | None = None) -> dict[str, object]:
     """从麦克风录一段并写盘。失败也要给出人能看懂的原因。
 
     先把新声纹算在副本上，保存成功后才提交到运行态；保存失败不能出现
     「内存里已经是新身份、重启后又变回旧身份」的分裂。
     """
-    if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 1 <= seconds <= 15:
+    if capture is None and (not isinstance(seconds, (int, float)) or not math.isfinite(seconds)
+                            or not 1 <= seconds <= 15):
         return {"ok": False, "error": "录音时长需在 1~15 秒之间"}
     try:
-        samples = _record_segments(cfg, float(seconds), cfg.get("audio.input_device", ""))
-    except Exception as exc:                       # 无麦克风/无权限
+        samples = capture() if capture else _record_segments(
+            cfg, float(seconds), cfg.get("audio.input_device", ""))
+    except Exception as exc:                       # 无麦克风/无权限/某句两次没读好
         return {"ok": False, "error": f"录音失败：{exc}"}
     if not samples:
         return {"ok": False, "error": "没有采集到音频"}
@@ -413,6 +416,57 @@ def _enroll_now(cfg: Config, lock: dsp.SpeakerLock, seconds: float,
     return {"ok": True, "consistency": round(float(consistency), 3),
             "holdout": None if holdout is None else round(holdout, 3),
             "usable": not warning, "samples": len(samples), "warning": warning}
+
+
+def _enroll_from_ui(runtime: Runtime, lock: dsp.SpeakerLock,
+                    done: threading.Event | None) -> dict[str, object]:
+    """胶囊里的录入：和 `voxos enroll` 一样一句一录，期间暂停监听。
+
+    以前这里是「一次录 10 秒再按停顿切段」：逗号处的停顿把一句切成碎片，
+    10 秒又常截掉第 3 句，同样三句话留出验证只有 0.18（逐句录 0.94）。
+    监听不停的话，念的句子还会被当成指令同时识别一遍。
+    """
+    was_muted = _MUTED.is_set()
+    _MUTED.set()
+    try:
+        result = _enroll_now(runtime.cfg, lock, 0.0, done,
+                             capture=lambda: _ui_samples(runtime, lock))
+    finally:
+        if not was_muted:
+            reset = _RESET_HOOK.get("reset")
+            if callable(reset):
+                reset()                   # 录入期间攒的半句话不能当指令
+            _MUTED.clear()
+    print(f"[enroll/ui] {json.dumps(result, ensure_ascii=False)}", flush=True)
+    runtime.bus.emit("idle" if result.get("ok") else "warn", "声纹录入",
+                     str(result.get("warning") or result.get("error") or "完成"))
+    return result
+
+
+def _ui_samples(runtime: Runtime, lock: dsp.SpeakerLock) -> list[object]:
+    """逐句录：每句最多两次，状态栏实时显示该念哪句。"""
+    from . import dsp
+
+    device = runtime.cfg.get("audio.input_device", "")
+    samples: list[object] = []
+    vectors: list[object] = []
+    for index, line in enumerate(enroll.SCRIPT, 1):
+        why = ""
+        for attempt in (1, 2):
+            tip = f"请念第 {index}/{len(enroll.SCRIPT)} 句" + ("（重读）" if attempt == 2 else "")
+            runtime.bus.emit("listening", tip, line)
+            wave, speech_s = _capture_one(runtime.cfg, device)
+            why = enroll.check(wave, speech_s) or enroll.outlier(
+                lock.embedder(dsp.as_float(wave)), vectors)
+            print(f"[enroll/ui] 第 {index} 句第 {attempt} 次：{speech_s:.1f}s "
+                  f"峰值 {enroll.peak_of(wave):.3f} {why or '合格'}", flush=True)
+            if not why:
+                break
+        if why:
+            raise ValueError(f"第 {index} 句两次都没读好：{why}")
+        samples.append(wave)
+        vectors.append(lock.embedder(dsp.as_float(wave)))
+    return samples
 
 
 def _commit_voiceprint(cfg: Config, lock: dsp.SpeakerLock, previous: dict[str, object],
@@ -458,7 +512,7 @@ def _ui_context(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
         settings_undo=undo,
         settings_can_undo=lambda: settings.can_undo(runtime.cfg),
         status=lambda: _status(runtime, lock),
-        on_enroll=(lambda seconds: _enroll_now(runtime.cfg, lock, seconds, enrolled)) if lock else None,
+        on_enroll=(lambda seconds: _enroll_from_ui(runtime, lock, enrolled)) if lock else None,
         on_confirm=runtime.gate.resolve,
         # 读**落盘的时间线**，不是内存里那 8 条：用户问「昨天为什么没反应」，
         # 内存那份早就没了。而且时间线里有被丢弃的回合——那才是「没反应」的答案。

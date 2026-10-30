@@ -11,6 +11,7 @@ import io
 import subprocess
 import sys
 import tomllib
+import types
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -670,3 +671,50 @@ def test_pill_window_reports_failure_when_no_window_appears(monkeypatch):
     monkeypatch.setattr(main.subprocess, "Popen", lambda *a, **k: None)
     monkeypatch.setattr(main.Path, "exists", lambda self: True)
     assert main._open_app_window("http://127.0.0.1:1/") is False
+
+
+def test_ui_enroll_records_sentence_by_sentence_and_pauses_listening(monkeypatch):
+    """胶囊录入走逐句录：一次录 10 秒再切段，同样三句话留出验证只有 0.18。
+
+    录入期间暂停监听，否则念的句子会被同时当指令识别；结束后恢复。
+    """
+    import numpy as np
+
+    waves = iter([np.full(32000, 0.1 * k, dtype="float32") for k in (1, 2, 3)])
+    seen_muted: list[bool] = []
+
+    def capture_one(cfg, device, max_s=6.0):
+        seen_muted.append(main._MUTED.is_set())
+        return next(waves), 2.0
+
+    monkeypatch.setattr(main, "_capture_one", capture_one)
+    monkeypatch.setattr(main, "_record_segments",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该走整段录")))
+    monkeypatch.setattr(main.enroll, "check", lambda wave, speech_s: "")
+    monkeypatch.setattr(main.enroll, "outlier", lambda vec, vectors: "")
+    events: list[tuple[str, str]] = []
+
+    class Bus:
+        def emit(self, state, label="", detail="", request=""):
+            events.append((label, detail))
+
+    class Lock:
+        threshold = 0.75
+        profiles: dict = {}
+
+        def embedder(self, wave):
+            return np.ones(4, dtype="float32")
+
+        def enroll(self, samples):
+            self.profiles["normal"] = np.ones(4, dtype="float32")
+            return 0.95
+
+        def save(self, path):
+            return None
+
+    runtime = types.SimpleNamespace(cfg=config.Config({"audio": {}}), bus=Bus())
+    main._MUTED.clear()
+    main._enroll_from_ui(runtime, Lock(), None)  # type: ignore[arg-type]
+    assert seen_muted == [True, True, True]
+    assert main._MUTED.is_set() is False
+    assert [d for label, d in events if label.startswith("请念")] == list(main.enroll.SCRIPT)
