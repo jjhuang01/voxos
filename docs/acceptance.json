@@ -1,15 +1,15 @@
 {
   "report": {
     "fast_path": {
-      "p50": 0.0008,
-      "p95": 0.001,
-      "p99": 0.0016,
+      "p50": 0.0007,
+      "p95": 0.0008,
+      "p99": 0.0008,
       "rounds": 2000
     },
     "dispatch": {
-      "p50": 0.175,
-      "p95": 0.762,
-      "context_p95": 0.004,
+      "p50": 0.458,
+      "p95": 1.325,
+      "context_p95": 0.01,
       "rounds": 30
     },
     "voiceprint": {
@@ -91,11 +91,11 @@
       "backend": "sherpa-cam++",
       "threshold": 0.75,
       "dispatch_ms": [
-        0.48,
-        216.14
+        0.6,
+        197.2
       ],
-      "wall_ms": 438.3,
-      "realtime_factor": 0.024
+      "wall_ms": 592.3,
+      "realtime_factor": 0.033
     },
     "redlines": {
       "forbidden_cases": 8,
@@ -108,7 +108,7 @@
       "seconds": 30,
       "segments": 0,
       "vad": "SileroVad",
-      "cpu_percent": 0.42,
+      "cpu_percent": 0.34,
       "realtime_factor": 0.004
     },
     "security": {
@@ -217,8 +217,8 @@
         },
         {
           "file": "scripts/enroll_voice.py",
-          "lines": 43,
-          "code_lines": 32
+          "lines": 32,
+          "code_lines": 21
         },
         {
           "file": "scripts/fetch_models.py",
@@ -262,18 +262,18 @@
         },
         {
           "file": "src/voxos/audio.py",
-          "lines": 848,
-          "code_lines": 676
+          "lines": 1104,
+          "code_lines": 908
         },
         {
           "file": "src/voxos/config.py",
-          "lines": 270,
-          "code_lines": 217
+          "lines": 271,
+          "code_lines": 218
         },
         {
           "file": "src/voxos/core.py",
-          "lines": 580,
-          "code_lines": 450
+          "lines": 849,
+          "code_lines": 686
         },
         {
           "file": "src/voxos/corpus.py",
@@ -281,14 +281,39 @@
           "code_lines": 183
         },
         {
+          "file": "src/voxos/cue.py",
+          "lines": 110,
+          "code_lines": 87
+        },
+        {
+          "file": "src/voxos/cuebox.py",
+          "lines": 88,
+          "code_lines": 69
+        },
+        {
+          "file": "src/voxos/dialogue.py",
+          "lines": 123,
+          "code_lines": 93
+        },
+        {
           "file": "src/voxos/dsp.py",
-          "lines": 337,
-          "code_lines": 264
+          "lines": 495,
+          "code_lines": 387
+        },
+        {
+          "file": "src/voxos/enroll.py",
+          "lines": 118,
+          "code_lines": 88
+        },
+        {
+          "file": "src/voxos/lessons.py",
+          "lines": 135,
+          "code_lines": 105
         },
         {
           "file": "src/voxos/main.py",
-          "lines": 1263,
-          "code_lines": 1022
+          "lines": 2359,
+          "code_lines": 1954
         },
         {
           "file": "src/voxos/mel.py",
@@ -302,13 +327,13 @@
         },
         {
           "file": "src/voxos/models.py",
-          "lines": 209,
-          "code_lines": 179
+          "lines": 275,
+          "code_lines": 236
         },
         {
           "file": "src/voxos/prompts.py",
-          "lines": 123,
-          "code_lines": 94
+          "lines": 132,
+          "code_lines": 102
         },
         {
           "file": "src/voxos/registry.py",
@@ -317,8 +342,8 @@
         },
         {
           "file": "src/voxos/safety.py",
-          "lines": 351,
-          "code_lines": 287
+          "lines": 363,
+          "code_lines": 299
         },
         {
           "file": "src/voxos/sandbox.py",
@@ -332,13 +357,18 @@
         },
         {
           "file": "src/voxos/settings.py",
-          "lines": 368,
-          "code_lines": 303
+          "lines": 377,
+          "code_lines": 312
         },
         {
           "file": "src/voxos/stream.py",
-          "lines": 261,
-          "code_lines": 203
+          "lines": 266,
+          "code_lines": 206
+        },
+        {
+          "file": "src/voxos/timeline.py",
+          "lines": 133,
+          "code_lines": 104
         },
         {
           "file": "src/voxos/tools.py",
@@ -347,36 +377,36 @@
         },
         {
           "file": "src/voxos/tts.py",
-          "lines": 178,
-          "code_lines": 145
+          "lines": 308,
+          "code_lines": 260
         },
         {
           "file": "src/voxos/turn.py",
-          "lines": 122,
-          "code_lines": 93
+          "lines": 125,
+          "code_lines": 96
         },
         {
           "file": "src/voxos/ui.py",
-          "lines": 488,
-          "code_lines": 410
+          "lines": 527,
+          "code_lines": 445
         }
       ],
-      "total_lines": 9420,
+      "total_lines": 12169,
       "max_function": {
-        "name": "src/voxos/core.py:dispatch",
+        "name": "src/voxos/audio.py:run",
         "lines": 40
       },
-      "classes": 40,
+      "classes": 51,
       "tools": 18,
       "fast_routes": 10,
-      "test_files": 20
+      "test_files": 31
     },
     "tests": {
       "returncode": 0,
-      "summary": "372 passed, 2 skipped, 2 warnings in 27.81s",
-      "seconds": 28.3
+      "summary": "690 passed, 1 skipped, 2 warnings in 39.45s",
+      "seconds": 40.2
     },
-    "generated_at": "2026-10-29T12:50:15",
+    "generated_at": "2026-10-30T23:18:36",
     "env": {
       "python": "3.13.12",
       "numpy": "2.5.4",
@@ -387,17 +417,17 @@
   "verdicts": [
     {
       "item": "快通道决策延迟 p95 < 5ms",
-      "measured": "0.001ms",
+      "measured": "0.0008ms",
       "pass": true
     },
     {
       "item": "端到端触发 p95 < 500ms",
-      "measured": "0.762ms",
+      "measured": "1.325ms",
       "pass": true
     },
     {
       "item": "静音待机 CPU < 1.5%",
-      "measured": "0.42%/秒音频",
+      "measured": "0.34%/秒音频",
       "pass": true
     },
     {
@@ -453,12 +483,12 @@
     },
     {
       "item": "测试全绿",
-      "measured": "372 passed, 2 skipped, 2 warnings in 27.81s",
+      "measured": "690 passed, 1 skipped, 2 warnings in 39.45s",
       "pass": true
     },
     {
       "item": "上下文注入不阻塞派发",
-      "measured": "0.004ms",
+      "measured": "0.01ms",
       "pass": true
     },
     {

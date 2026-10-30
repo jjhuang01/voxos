@@ -133,7 +133,9 @@ def probe_mic(seconds: float = 0.5, device: object = None) -> tuple[str, float]:
 class MicSource:
     """真实麦克风（需 sounddevice）；缺依赖时抛出可读错误而不是静默失败。"""
 
-    def __init__(self, chunk: int = 512, sr: int = dsp.SR, device: object = None) -> None:
+    def __init__(self, chunk: int = 512, sr: int = dsp.SR, device: object = None,
+                 cancel: threading.Event | None = None) -> None:
+        self._cancel = cancel
         try:
             import sounddevice as sd  # noqa: PLC0415
         except ImportError as exc:  # pragma: no cover - 依赖缺失分支
@@ -153,6 +155,12 @@ class MicSource:
 
     def __iter__(self) -> Iterator[np.ndarray]:
         while True:
+            if self._cancel is not None:
+                while self._stream.read_available < self._stream.blocksize:
+                    if self._cancel.wait(0.01):
+                        raise InterruptedError("已停止录入")
+                if self._cancel.is_set():
+                    raise InterruptedError("已停止录入")
             block, overflowed = self._stream.read(self._stream.blocksize)
             if overflowed:
                 print("[voxos] 音频溢出（采集跟不上），已丢弃该块")
@@ -699,13 +707,21 @@ class AudioPipeline:
         self._during_tts = False
         self._await_restart, self._restart_silence_ms, self._restart_wait_ms = False, 0.0, 0.0
         self._raw_level_dbfs = -120.0
+        self._generation = 0
+        self._reset_requested = threading.Event()
 
     def feed_reference(self, piece: bytes, rate: int, stamp: float = 0.0) -> None:
         """接收扬声器播放流提交的 PCM 块。"""
         self.aec.feed_reference(piece, rate, stamp)
 
+    def request_reset(self) -> None:
+        """跨线程只提交重置请求，由识别线程清理模型与句子状态。"""
+        self._reset_requested.set()
+
     def reset(self) -> None:
-        """设备断流后清掉句级状态：旧缓冲、端点状态和 VAD 上下文都不能跨断流。"""
+        """设备断流后清掉句级状态，也废弃 run 持有的旧半句话。"""
+        self._generation += 1
+        self._reset_requested.clear()
         self._ep.reset()
         self.aec.reset()
         self._prefix, self._prefix_ms = [], 0.0
@@ -743,12 +759,19 @@ class AudioPipeline:
             self._prefix_ms -= head.size / dsp.SR * 1000.0
 
     def run(self, source: Iterable[np.ndarray]) -> Iterator[Utterance]:
+        """按代际识别完整句子；重置与混音停播都会废弃旧缓冲。"""
         buffer: list[np.ndarray] = []
-        last_partial_ms = 0.0
-        started = False
+        started, last_partial_ms = False, 0.0
+        generation = self._generation
         self._prefix, self._prefix_ms = [], 0.0
         self._clear_sentence()
         for raw in source:
+            if self._reset_requested.is_set():
+                self.reset()
+            if generation != self._generation:
+                buffer.clear()
+                started, last_partial_ms = False, 0.0
+                generation = self._generation
             chunk = self._preprocess(raw)
             for c in self._gate_playback(chunk):
                 state = self._ep.push(bool(self.vad.is_speech(c)), c.size)  # type: ignore[attr-defined]
@@ -769,12 +792,20 @@ class AudioPipeline:
                 # 先清缓冲再 yield：消费者暂停期间不该继续持有整段 PCM。
                 buffer.clear()
                 self._ep.reset()
-                last_partial_ms = 0.0
-                started = False
+                started, last_partial_ms = False, 0.0
                 yield result
-        if buffer:
-            yield self._finalize(buffer)             # 收尾必产一段，缓冲随之清空
-            self._clear_sentence()
+        result = self._finish_source(buffer, generation)
+        if result is not None:
+            yield result
+        self._clear_sentence()
+
+    def _finish_source(self, buffer: list[np.ndarray], generation: int) -> Utterance | None:
+        """源结束也执行取消检查，不把尾部的旧半句补成一条新指令。"""
+        if self._reset_requested.is_set():
+            self.reset()
+        if buffer and generation == self._generation:
+            return self._finalize(buffer)
+        return None
 
     # -- 内部 -------------------------------------------------------------
     def _absorb(self, chunk: np.ndarray) -> None:
@@ -854,14 +885,14 @@ class AudioPipeline:
         return audio
 
     def _gate_playback(self, chunk: np.ndarray) -> list[np.ndarray]:
-        """播放重叠段用于打断；打断后直接把已攒音频作为开头继续收音。"""
+        """未完成真实双讲验收前，播放混音只停播，不进入指令识别。"""
+        if self._await_restart:
+            return self._handle_restart(chunk)
         if self.echo.muted:
             cleaned = self.aec.process(chunk)
             return self._during_playback(cleaned)
         self._barge, self._barge_ms = [], 0.0
-        if not self._await_restart:
-            return [chunk]
-        return self._handle_restart(chunk)
+        return [chunk]
 
     def _handle_restart(self, chunk: np.ndarray) -> list[np.ndarray]:
         self._restart_wait_ms += chunk.size / dsp.SR * 1000.0
@@ -887,7 +918,7 @@ class AudioPipeline:
         self.on_event("idle", title, detail)
 
     def _during_playback(self, chunk: np.ndarray) -> list[np.ndarray]:
-        """连续越过能量门才做声纹验证；打断确认后释放已攒音频继续收音。"""
+        """连续越过能量门才验证停播；混音候选永不回灌可执行指令。"""
         if not self.echo.speaking or dsp.dbfs(chunk) <= self.echo.gate_dbfs:
             self._barge, self._barge_ms, self._bc_seen = [], 0.0, (-1.0, False)
             return [np.zeros_like(chunk)]
@@ -895,9 +926,7 @@ class AudioPipeline:
         self._barge_ms += chunk.size / dsp.SR * 1000.0
         if self._barge_ms >= self.echo.interrupt_ms and not self._just_backchannel():
             if self._fire_barge_in():
-                released = list(self._barge)
                 self._barge, self._barge_ms = [], 0.0
-                return released
         return [np.zeros_like(chunk)]
 
     def _just_backchannel(self) -> bool:
@@ -921,7 +950,7 @@ class AudioPipeline:
         return verdict
 
     def _fire_barge_in(self) -> bool:
-        """声纹确认是本人打断：停播报并标记状态，保留已攒音频送入本句开头。"""
+        """声纹仅批准停播请求；先执行控制，再提示停顿后完整重说。"""
         if not self.echo.speaking:
             return False
         audio = np.concatenate(self._barge) if self._barge else np.zeros(0, dtype=np.float32)
@@ -930,11 +959,15 @@ class AudioPipeline:
             self._barge, self._barge_ms = [], 0.0
             return False
         self.echo.interrupt()
-        self._during_tts = True
         self._prefix, self._prefix_ms = [], 0.0
-        self.on_event("warn", "打断", f"已请求停止播报（声纹 {score:.2f}）")
+        self._await_restart = True
+        self._restart_silence_ms, self._restart_wait_ms = 0.0, 0.0
+        self._generation += 1
+        self._ep.reset()
+        self._clear_sentence()
         if self.on_barge_in is not None:
             self.on_barge_in()
+        self.on_event("warn", "已请求停播", f"请停顿后完整重说；混音不执行（声纹 {score:.2f}）")
         return True
 
     def _maybe_finalize(self, buffer: list[np.ndarray], state: str,

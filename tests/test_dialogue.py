@@ -81,14 +81,14 @@ def test_slow_dispatch_acknowledges_once(cfg, monkeypatch):
     class Slow:
         calls = 0
 
-        def dispatch(self, text, context=None, mode="assistant"):
+        def dispatch(self, text, context=None, mode="assistant", on_sentence=None, should_stop=None):
             Slow.calls += 1
             time.sleep(0.15)
             return core.DispatchResult("llm", text, reply="好的")
 
     result = main._dispatch_with_ack(
         Slow(), "把 auth.py 的空值校验补上", object(),
-        _cfg(cfg, **{"dialogue.ack_after_ms": 30}))
+        _cfg(cfg, **{"dialogue.ack_after_ms": 30, "llm.stream": False}))
     assert result.reply == "好的" and Slow.calls == 1
     assert len(spoke) == 1 and "写" in spoke[0]
 
@@ -100,7 +100,7 @@ def test_fast_dispatch_says_nothing_extra(cfg, monkeypatch):
                         lambda piece, pipeline, config: spoke.append(piece))
 
     class Fast:
-        def dispatch(self, text, context=None, mode="assistant"):
+        def dispatch(self, text, context=None, mode="assistant", on_sentence=None, should_stop=None):
             return core.DispatchResult("fast", text, reply="现在 19:30")
 
     main._dispatch_with_ack(Fast(), "现在几点", object(),

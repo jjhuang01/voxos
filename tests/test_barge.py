@@ -154,37 +154,35 @@ def test_separate_bursts_are_not_accumulated_into_one_interruption(cfg):
     assert not fired
 
 
-def test_barge_in_preserves_audio_and_feeds_stt(cfg):
-    """打断不丢话：打断触发后把已攒的插话音频作为开头继续收音，整句送 ASR。"""
+def test_overlap_during_playback_stops_speech_but_never_executes(cfg):
+    """播报中的大声人声只能请求停播：混音不是分离，不能被当成一条指令执行。
+
+    旧契约是「把攒下的插话音频接在开头继续识别」，那是拿自己的回声当用户的话；
+    未验收 AEC 之前，唯一安全的结果是停播 + 要求停顿后完整重说。
+    """
     from unittest.mock import Mock
 
-    events = []
-    pipeline = _pipeline(cfg)
+    events, stopped = [], []
+    pipeline = _pipeline(cfg, on_barge_in=lambda: stopped.append(True))
     pipeline.on_event = lambda *args: events.append(args)
     pipeline.stt = Mock()
     pipeline.stt.transcribe.return_value = "打开微信"
     pipeline.streamer = None
     pipeline.echo.tts_start()
 
-    barge_head = _loud(ms=300, amplitude=0.8)
-    continuation = _loud(ms=500, amplitude=0.5)
-    silence = np.zeros(int(SR * 0.8), dtype=np.float32)
-    samples = np.concatenate([barge_head, continuation, silence])
+    samples = np.concatenate([_loud(ms=300, amplitude=0.8),
+                              _loud(ms=500, amplitude=0.5),
+                              np.zeros(int(SR * 0.8), dtype=np.float32)])
 
     out = list(pipeline.run(audio.ArraySource(samples)))
-    assert len(out) == 1 and out[0].accepted
-    assert out[0].during_tts is True
-    assert not any("重说" in item[2] for item in events), "应当删除请重说提示"
-
-    final_calls = [c.args[0] for c in pipeline.stt.transcribe.call_args_list if c.kwargs.get("final")]
-    assert final_calls, "必须向 STT 发起 final 转写"
-    received_audio = final_calls[0]
-    head_len = len(barge_head)
-    assert np.array_equal(received_audio[:head_len], barge_head), "最终送入识别的音频必须包含插话开头"
+    assert stopped, "声纹通过就该请求停播"
+    assert not pipeline.echo.speaking
+    assert any("重说" in item[2] for item in events), "要告诉用户停顿后完整重说"
+    assert not any(u.accepted and not u.during_tts for u in out), "混音不得变成可执行指令"
 
 
-def test_full_restatement_after_silence_is_accepted_without_mixed_prefix(cfg):
-    """打断后安静间隔过去后，前句与后句均能正常识别。"""
+def test_full_restatement_after_silence_is_the_only_thing_executed(cfg):
+    """打断后安静下来重说的那一句才是指令；混音那段只用于停播。"""
     from unittest.mock import Mock
 
     pipeline = _pipeline(cfg)
@@ -196,7 +194,9 @@ def test_full_restatement_after_silence_is_accepted_without_mixed_prefix(cfg):
     fresh = _loud(900, amplitude=0.1)
     samples = np.concatenate([overlap, np.zeros(SR * 2), fresh, np.zeros(SR)])
     out = list(pipeline.run(audio.ArraySource(samples)))
-    assert len(out) == 2 and all(item.accepted for item in out)
+    executable = [item for item in out if item.accepted and not item.during_tts]
+    assert len(executable) == 1, "重说那一句必须能执行，且只有它"
+    assert executable[0].text == "现在几点了"
 
 
 def test_restart_silence_uses_pre_agc_level_in_mask_mode(cfg):

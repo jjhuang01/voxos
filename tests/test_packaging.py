@@ -671,7 +671,7 @@ def test_ui_enroll_records_sentence_by_sentence_and_pauses_listening(monkeypatch
     waves = iter([np.full(32000, 0.1 * k, dtype="float32") for k in (1, 2, 3)])
     seen_muted: list[bool] = []
 
-    def capture_one(cfg, device, max_s=6.0):
+    def capture_one(cfg, device, max_s=6.0, cancel=None):
         seen_muted.append(main._MUTED.is_set())
         return next(waves), 2.0
 

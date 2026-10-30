@@ -256,11 +256,13 @@ def test_confirm_and_enroll_are_wired(server):
     instance, _ = server
     ctx = ui.UiContext(bus=ui.StatusBus(None), token=TOKEN,
                        on_enroll=lambda seconds: {"ok": True, "seconds": seconds},
+                       on_enroll_cancel=lambda: {"ok": True},
                        on_confirm=lambda allow: None)
     other = ui.serve(ctx, "127.0.0.1", 0, block=False)
     try:
         assert _post(other, "/api/enroll", {"seconds": 3})[1] == {"ok": True, "seconds": 3.0}
         assert _post(other, "/api/confirm", {"allow": True})[1] == {"ok": True}
+        assert _post(other, "/api/enroll/cancel", {})[1] == {"ok": True}
     finally:
         other.shutdown()
         other.server_close()

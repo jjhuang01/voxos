@@ -464,3 +464,57 @@ def test_live_identity_is_published_only_after_profile_save(tmp_path, monkeypatc
         assert main._enroll_now(cfg, lock, 0.0, capture=lambda: samples)["ok"] is True
     np.testing.assert_allclose(lock.profiles["normal"], [1.0, 0.0], atol=1e-6)
     np.testing.assert_allclose(dsp.SpeakerLock().load(path).profiles["normal"], [1.0, 0.0], atol=1e-6)
+
+
+def test_ui_enroll_can_be_stopped_midway(monkeypatch, tmp_path):
+    """胶囊录入点「停止」：下一块音频就退出，原声纹不动，锁释放后能再录。"""
+    from types import SimpleNamespace
+
+    from voxos import audio, main, ui
+    from voxos.config import Config
+
+    class Mic:
+        def __init__(self, **_):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def __iter__(self):
+            for index in range(1000):
+                if index == 3:
+                    main._cancel_enroll()          # 模拟用户在第 3 块时点停止
+                yield np.zeros(512, dtype=np.float32)
+
+    monkeypatch.setattr(audio, "MicSource", Mic)
+    monkeypatch.setattr(audio, "make_vad", lambda cfg: SimpleNamespace(is_speech=lambda c: False))
+    original = {"normal": np.ones(4, dtype=np.float32)}
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=lambda x: np.ones(4, dtype=np.float32))
+    lock.profiles = dict(original)
+    runtime = SimpleNamespace(cfg=Config({}, data_root=tmp_path), bus=ui.StatusBus(None))
+
+    result = main._enroll_from_ui(runtime, lock, None)
+
+    assert result["cancelled"] is True and result["ok"] is False
+    assert lock.profiles.keys() == original.keys()
+    assert not main._MUTED.is_set()
+    assert main._ENROLL_BUSY.acquire(blocking=False)
+    main._ENROLL_BUSY.release()
+
+
+def test_ui_enroll_rejects_a_second_concurrent_start(tmp_path):
+    from types import SimpleNamespace
+
+    from voxos import main, ui
+    from voxos.config import Config
+
+    runtime = SimpleNamespace(cfg=Config({}, data_root=tmp_path), bus=ui.StatusBus(None))
+    lock = dsp.SpeakerLock(threshold=0.75, embedder=lambda x: np.ones(4, dtype=np.float32))
+    assert main._ENROLL_BUSY.acquire(blocking=False)
+    try:
+        assert main._enroll_from_ui(runtime, lock, None)["error"] == "已经在录入了"
+    finally:
+        main._ENROLL_BUSY.release()

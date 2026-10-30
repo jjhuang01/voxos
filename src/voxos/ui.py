@@ -59,6 +59,7 @@ class StatusBus:
         self._subs: list[queue.Queue[Event]] = []
         self._lock = threading.Lock()
         self._seq = 0
+        self._confirmation: Event | None = None
 
     def emit(self, state: str, label: str = "", detail: str = "", request: str = "") -> Event:
         with self._lock:
@@ -66,6 +67,11 @@ class StatusBus:
             event = Event(state, label, detail, datetime.now().isoformat(timespec="milliseconds"),
                           self._seq, request)
             self._events.append(event)
+            if state == "confirm" and request:
+                self._confirmation = event
+            elif (state == "confirmation_end" and self._confirmation is not None
+                  and self._confirmation.request == request):
+                self._confirmation = None
             subscribers = list(self._subs)
         for subscriber in subscribers:
             _offer(subscriber, event)
@@ -113,7 +119,8 @@ class StatusBus:
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             last = self._events[-1] if self._events else None
-            return {"last": asdict(last) if last else None, "count": self._seq}
+            return {"last": asdict(last) if last else None, "count": self._seq,
+                    "confirmation": asdict(self._confirmation) if self._confirmation else None}
 
     def history(self) -> list[dict[str, object]]:
         with self._lock:
@@ -190,17 +197,19 @@ class UiContext:
     token: str = ""
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "::1")
     pill_file: Path | None = None
-    on_command: Callable[[str], str] | None = None
+    on_command: Callable[[str], str | dict[str, object]] | None = None
     settings_get: Callable[[], list[dict[str, object]]] | None = None
     settings_set: Callable[[dict[str, object]], dict[str, object]] | None = None
     settings_undo: Callable[[], dict[str, object]] | None = None
     settings_can_undo: Callable[[], bool] | None = None
     status: Callable[[], dict[str, object]] | None = None
     on_enroll: Callable[[float], dict[str, object]] | None = None
+    on_enroll_cancel: Callable[[], dict[str, object]] | None = None
     on_confirm: Callable[[bool], None] | None = None
     history: Callable[[], list[dict[str, object]]] | None = None
     on_listen: Callable[[bool], dict[str, object]] | None = None
     on_cue: Callable[[dict[str, object]], dict[str, object]] | None = None
+    on_stop: Callable[[], dict[str, object]] | None = None
 
 
 _PAGE_CACHE: dict[Path, tuple[float, bytes]] = {}
@@ -353,9 +362,11 @@ class _PillHandler(BaseHTTPRequestHandler):
             "/api/settings": self._save_settings,
             "/api/settings/undo": self._undo_settings,
             "/api/enroll": self._enroll,
+            "/api/enroll/cancel": self._enroll_cancel,
             "/api/confirm": self._confirm,
             "/api/listen": self._listen,
             "/api/cue": self._cue,
+            "/api/stop": self._stop,
         }
         route = routes.get(path)
         return route() if route else self._json({"ok": False, "error": "没有这个接口"}, 404)
@@ -368,8 +379,8 @@ class _PillHandler(BaseHTTPRequestHandler):
         try:
             reply = self.ctx.on_command(str(body.get("text", "")))
         except Exception as exc:  # 回调异常也要回一个可读响应，不能让胶囊转圈
-            return self._json({"ok": False, "reply": f"执行异常：{exc}"})
-        return self._json({"ok": True, "reply": reply})
+            return self._json({"ok": False, "error": f"执行异常：{exc}"}, 500)
+        return self._json(reply if isinstance(reply, dict) else {"ok": True, "reply": reply})
 
     def _read_settings(self) -> dict[str, object]:
         """设置 + 还有没有一步可退。只返回数据，发送由路由层统一做一次。
@@ -402,7 +413,19 @@ class _PillHandler(BaseHTTPRequestHandler):
             result = self.ctx.on_enroll(float(body.get("seconds", 3.0)))
         except (TypeError, ValueError):
             return self._json({"ok": False, "error": "秒数不合法"}, 400)
-        return self._json(result, 200 if result.get("ok") else 400)
+        return self._json(result, 200 if result.get("ok") or result.get("cancelled") else 400)
+
+    def _enroll_cancel(self) -> None:
+        if self.ctx.on_enroll_cancel is None:
+            return self._json({"ok": False, "error": "未启用录入"}, 400)
+        result = self.ctx.on_enroll_cancel()
+        return self._json(result, 200 if result.get("ok") else 409)
+
+    def _stop(self) -> None:
+        """停止当前回合，不把暂停麦克风误作停止生成或取消后续动作。"""
+        if self.ctx.on_stop is None:
+            return self._json({"ok": False, "error": "未启用停止控制"}, 400)
+        return self._json(self.ctx.on_stop())
 
     def _listen(self) -> None:
         """开/关持续监听。关掉之后麦克风照常读（否则设备缓冲会溢出），

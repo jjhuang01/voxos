@@ -25,6 +25,7 @@ import webbrowser
 from collections import deque
 from copy import copy
 from pathlib import Path
+from typing import Any, Callable
 
 from . import (__version__, core, cue, cuebox, dialogue, enroll, lessons, prompts, sandbox,
                scheduler, settings, timeline, tools, ui)
@@ -76,6 +77,7 @@ class ConfirmGate:
             self._waiters.pop(request_id, None)
             if self._current == request_id:
                 self._current = ""
+        self.bus.emit("confirmation_end", "确认结束", "允许" if allow else "拒绝", request=request_id)
         if not answered:
             self.bus.emit("blocked", "确认超时", "按拒绝处理")
         return allow
@@ -113,6 +115,9 @@ class Runtime:
         self.recent: deque[dict[str, object]] = deque(maxlen=8)
         self.started = time.time()
         self._last_text = ""           # 上一句说的是什么（给「接续句」当上下文）
+        self._turn_lock = threading.Lock()
+        self._turn_guard = threading.Lock()
+        self._active_cancel: threading.Event | None = None
 
     def _build(self, lock: threading.Lock | None = None) -> core.Executor:
         executor = core.Executor(cfg=self.cfg, on_event=self.bus, confirm=self.gate.ask)
@@ -133,25 +138,47 @@ class Runtime:
         加语义判停模型（LiveKit 的 min/max_endpointing_delay、pipecat 的
         smart-turn），模型我们暂时缺，先补一层上下文，让第二句至少能被读懂。
         """
-        if self._is_withdrawal(text):          # 先判撤回：这句不需要任何上下文
+        if self._is_withdrawal(text):
             return self._withdraw(text)
-        ctx: dict[str, object] = dict(context) if context is not None else _context()
-        if self._last_text:
-            ctx["previous"] = self._last_text
-        return core.dispatch(text, executor=self.executor, cfg=self.cfg, context=ctx, mode=mode,
-                             on_sentence=on_sentence, should_stop=should_stop)
+        with self._turn_lock:
+            cancel = threading.Event()
+            with self._turn_guard:
+                self._active_cancel = cancel
+            stopped = lambda: cancel.is_set() or bool(should_stop and should_stop())
+            executor = copy(self.executor)
+            executor.should_stop = stopped
+            try:
+                ctx = dict(context) if context is not None else _context()
+                if self._last_text:
+                    ctx["previous"] = self._last_text
+                return core.dispatch(text, executor=executor, cfg=self.cfg, context=ctx, mode=mode,
+                                     on_sentence=on_sentence, should_stop=stopped)
+            finally:
+                with self._turn_guard:
+                    if self._active_cancel is cancel:
+                        self._active_cancel = None
+
+    def cancel(self) -> dict[str, object]:
+        """优先停止生成、后续工具与待确认；已经开始的副作用不假装撤销。"""
+        with self._turn_guard:
+            active = self._active_cancel is not None
+            if self._active_cancel is not None:
+                self._active_cancel.set()
+        denied = self.gate.resolve(False)
+        spoken = stop_speaking()
+        _invalidate_audio()
+        detail = ("已请求停止；已开始的动作不会撤销，后续动作不再启动"
+                  if active else "已停止回答" if spoken else "当前没有回答或任务在运行")
+        self.bus.emit("idle", "已请求停止" if active else "已停止", detail)
+        return {"ok": True, "stopped": active or denied or spoken, "pending": active,
+                "detail": detail}
 
     def _is_withdrawal(self, text: str) -> bool:
-        """整句就是「算了 / 取消 / 不用了」，而且此刻没有播报可停。
+        """完整撤回词优先于回合锁；等待首句或正在播报时也不能排队。
 
-        有播报时由音频层直接停（`stop_speaking`），轮不到这里。能走到这里的
-        只有「答案早就念完了，人现在改主意」——以前这句会掉进「还没学会这句」
-        加一整段能力清单：用户想收回，收到的是一篇功能介绍。
-
-        先卡长度再导 dsp：dsp 会把 numpy 一起拖进来（实测 59ms），而
-        「算了」这种短句才可能是撤回，长句一律直接放行，不为它付这笔钱。
+        先卡长度再导 dsp，普通长句不为取消词判定加载音频依赖。
         """
-        if len(text) > 12 or _TTS.get("owner") is not None:
+        if len(text) > 12:
             return False
         from . import dsp  # 局部导入：见上
 
@@ -164,7 +191,14 @@ class Runtime:
         下屋里闲聊太多，逐句念「还没学会这句」会变噪音），但「好」是回话，
         用户需要听见一声确认；胶囊上也会显示「回话」而不是「没听懂」。
         """
+        with self._turn_guard:
+            active = self._active_cancel is not None
+        if active:
+            result = self.cancel()
+            return core.DispatchResult(route="cancelled", text=text, reply=str(result["detail"]))
         denied = self.gate.resolve(False)
+        stop_speaking()
+        _invalidate_audio()
         return core.DispatchResult(route="chat", text=text,
                                    reply="好，不做了" if denied else "好")
 
@@ -208,7 +242,7 @@ class Runtime:
         self.cues.cfg = new_cfg          # 只换门限，已发的记录留着（见 __init__ 说明）
 
 
-_FAIL_WORDS = ("失败", "没能", "出错", "拒绝", "不允许", "不在允许")
+_FAIL_WORDS = ("失败", "没能", "出错", "拒绝", "不允许", "不在允许", "不存在")
 
 
 def _turn_of(text: str, result: core.DispatchResult, utterance: object = None) -> timeline.Turn:
@@ -220,7 +254,11 @@ def _turn_of(text: str, result: core.DispatchResult, utterance: object = None) -
     判「闲聊」看的是 `tool` 空不空，不是 `route`：闲聊和带工具的回答**都走
     `route="llm"`**，只看 route 会把「随便聊两句」记成「执行了某个动作」。
     """
-    if result.route == "ignore":
+    if result.route == "cancelled":
+        outcome = "cancelled"
+    elif result.route == "error":
+        outcome = "failed"
+    elif result.route == "ignore":
         outcome = "missed"
     elif not result.tool and result.route in ("chat", "llm"):
         outcome = "chatting"
@@ -360,6 +398,7 @@ def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]
         # 这里把段数、留出分数、录的时候用的设备一起发出去，界面才有话可说。
         "voiceprint": _voiceprint_state(cfg, lock),
         "enroll_script": list(enroll.SCRIPT),     # 界面上照着念的句子，与终端同一份
+        "enrollment": _enrollment_state(),
         "role": cfg.get("workspace.role"),
         "dry_run": cfg.flag("workspace.dry_run"),
         "listening": not _MUTED.is_set(),
@@ -379,31 +418,48 @@ def _status(runtime: Runtime, lock: dsp.SpeakerLock | None) -> dict[str, object]
 
 def _enroll_now(cfg: Config, lock: dsp.SpeakerLock, seconds: float,
                 done: threading.Event | None = None,
-                capture: Callable[[], list[object]] | None = None) -> dict[str, object]:
+                capture: Callable[[], list[object]] | None = None,
+                cancel: threading.Event | None = None) -> dict[str, object]:
     """检查录音与最差留一质量，在副本上注册，保存成功后才发布运行态身份。"""
     if capture is None and (not isinstance(seconds, (int, float)) or not math.isfinite(seconds)
                             or not 1 <= seconds <= 15):
         return {"ok": False, "error": "录音时长需在 1~15 秒之间"}
     try:
+        _check_enroll_cancel(cancel)
         samples = capture() if capture else _record_segments(
             cfg, float(seconds), cfg.get("audio.input_device", ""))
+        _check_enroll_cancel(cancel)
+    except InterruptedError:
+        return _enroll_cancelled()
     except Exception as exc:                       # 无麦克风/无权限/某句两次没读好
         return {"ok": False, "error": f"录音失败：{exc}"}
     if not samples:
         return {"ok": False, "error": "没有采集到音频"}
+    return _finalize_enroll(cfg, lock, samples, done, cancel)
+
+
+def _finalize_enroll(cfg: Config, lock: dsp.SpeakerLock, samples: list[object],
+                     done: threading.Event | None,
+                     cancel: threading.Event | None) -> dict[str, object]:
+    """在副本上校验，取消获准后不进入原子保存阶段。"""
     previous = dict(lock.profiles)
     candidate = copy(lock)
     candidate.profiles = dict(previous)
     try:
         warning = _enroll_quality(cfg, samples)
+        _check_enroll_cancel(cancel)
         if warning:
             return _commit_voiceprint(cfg, candidate, previous, warning)
         holdout = _holdout_score(candidate, samples)
+        _check_enroll_cancel(cancel)
         consistency = candidate.enroll(samples)    # type: ignore[arg-type]
+        _check_enroll_cancel(cancel)
+    except InterruptedError:
+        return _enroll_cancelled()
     except Exception as exc:
         return {"ok": False, "error": f"声纹录入失败：{exc}"}
     warning = _enroll_verdict(samples, float(consistency), lock.threshold, holdout)
-    failed = _commit_voiceprint(cfg, candidate, previous, warning)
+    failed = _commit_enroll_ready(cfg, candidate, previous, warning, cancel)
     if failed:
         return failed
     lock.profiles = candidate.profiles
@@ -424,21 +480,92 @@ def _enroll_from_ui(runtime: Runtime, lock: dsp.SpeakerLock,
     10 秒又常截掉第 3 句，同样三句话留出验证只有 0.18（逐句录 0.94）。
     监听不停的话，念的句子还会被当成指令同时识别一遍。
     """
-    was_muted = _MUTED.is_set()
-    _MUTED.set()
+    if not _ENROLL_BUSY.acquire(blocking=False):
+        return {"ok": False, "error": "已经在录入了"}
+    with _ENROLL_GUARD:
+        _ENROLL_CANCEL.clear()
+        _ENROLL_STATE.update(phase="recording", index=0, line="", result=None)
+        was_muted = _MUTED.is_set()
+        _ENROLL_STATE["resume_listening"] = not was_muted
+        _MUTED.set()
+    result: dict[str, object] = {"ok": False, "error": "录入中断，可重新录入"}
     try:
+        _invalidate_audio()
+        stop_speaking()
         result = _enroll_now(runtime.cfg, lock, 0.0, done,
-                             capture=lambda: _ui_samples(runtime, lock))
+                             capture=lambda: _ui_samples(runtime, lock), cancel=_ENROLL_CANCEL)
     finally:
-        if not was_muted:
-            reset = _RESET_HOOK.get("reset")
-            if callable(reset):
-                reset()                   # 录入期间攒的半句话不能当指令
-            _MUTED.clear()
-    print(f"[enroll/ui] {json.dumps(result, ensure_ascii=False)}", flush=True)
-    runtime.bus.emit("idle" if result.get("ok") else "warn", "声纹录入",
-                     str(result.get("warning") or result.get("error") or "完成"))
+        try:
+            warning = _restore_enroll_listening(was_muted)
+            if warning:
+                result["warning"] = warning
+            with _ENROLL_GUARD:
+                _ENROLL_STATE.update(phase="idle", result=result)
+            _enroll_feedback(runtime, result)
+        finally:
+            _ENROLL_BUSY.release()
     return result
+
+
+def _cancel_enroll() -> dict[str, object]:
+    """取消获准才置位；原子保存已开始时明确拒绝，绝不谎报已经停止。"""
+    with _ENROLL_GUARD:
+        if _ENROLL_STATE["phase"] == "saving":
+            return {"ok": False, "error": "正在保存声纹，请等保存结果"}
+        _ENROLL_CANCEL.set()
+        if _ENROLL_BUSY.locked():
+            _ENROLL_STATE["phase"] = "stopping"
+        return {"ok": True, "accepted": _ENROLL_BUSY.locked()}
+
+
+def _enrollment_state() -> dict[str, object]:
+    """线程安全的录入快照，重开页面不必猜麦克风正在做什么。"""
+    with _ENROLL_GUARD:
+        return dict(_ENROLL_STATE)
+
+
+def _check_enroll_cancel(cancel: threading.Event | None) -> None:
+    """录音、校验和保存边界都检查同一个取消信号。"""
+    if cancel is not None and cancel.is_set():
+        raise EnrollCancelled()
+
+
+def _enroll_cancelled() -> dict[str, object]:
+    """停止不改变身份，与采集失败分开供界面恢复流程。"""
+    return {"ok": False, "cancelled": True, "error": "已停止录入（原声纹未改动）"}
+
+
+def _commit_enroll_ready(cfg: Config, candidate: dsp.SpeakerLock,
+                         previous: dict[str, object], warning: str,
+                         cancel: threading.Event | None) -> dict[str, object] | None:
+    """取消检查与进入保存使用同一把短锁；保存期间不接受新的取消。"""
+    with _ENROLL_GUARD:
+        if cancel is not None and cancel.is_set():
+            return _enroll_cancelled()
+        if cancel is _ENROLL_CANCEL:
+            _ENROLL_STATE["phase"] = "saving"
+    return _commit_voiceprint(cfg, candidate, previous, warning)
+
+
+def _restore_enroll_listening(was_muted: bool) -> str:
+    """按最新监听意图恢复；恢复失败保留暂停，录入锁由调用方最后释放。"""
+    with _ENROLL_GUARD:
+        if not _ENROLL_STATE.get("resume_listening", not was_muted):
+            return ""
+        try:
+            _invalidate_audio()
+        except Exception as exc:
+            return f"监听恢复失败：{exc}。请点麦克风继续监听"
+        _MUTED.clear()
+    return ""
+
+
+def _enroll_feedback(runtime: Runtime, result: dict[str, object]) -> None:
+    """结束状态与结果一起发布，重新打开页面也能恢复停止按钮与原因。"""
+    print(f"[enroll/ui] {json.dumps(result, ensure_ascii=False)}", flush=True)
+    label = "已停止录入" if result.get("cancelled") else "录入完成" if result.get("ok") else "录入失败"
+    runtime.bus.emit("idle" if result.get("ok") or result.get("cancelled") else "warn", label,
+                     str(result.get("warning") or result.get("error") or "声纹已保存"))
 
 
 def _ui_samples(runtime: Runtime, lock: dsp.SpeakerLock) -> list[object]:
@@ -452,8 +579,12 @@ def _ui_samples(runtime: Runtime, lock: dsp.SpeakerLock) -> list[object]:
         why = ""
         for attempt in (1, 2):
             tip = f"请念第 {index}/{len(enroll.SCRIPT)} 句" + ("（重读）" if attempt == 2 else "")
-            runtime.bus.emit("listening", tip, line)
-            wave, speech_s = _capture_one(runtime.cfg, device)
+            _check_enroll_cancel(_ENROLL_CANCEL)
+            with _ENROLL_GUARD:
+                _ENROLL_STATE.update(phase="recording", index=index, line=line)
+            runtime.bus.emit("enrolling", tip, line)
+            wave, speech_s = _capture_one(runtime.cfg, device, cancel=_ENROLL_CANCEL)
+            _check_enroll_cancel(_ENROLL_CANCEL)
             why = enroll.check(wave, speech_s) or enroll.outlier(
                 lock.embedder(dsp.as_float(wave)), vectors)
             print(f"[enroll/ui] 第 {index} 句第 {attempt} 次：{speech_s:.1f}s "
@@ -464,6 +595,10 @@ def _ui_samples(runtime: Runtime, lock: dsp.SpeakerLock) -> list[object]:
             raise ValueError(f"第 {index} 句两次都没读好：{why}")
         samples.append(wave)
         vectors.append(lock.embedder(dsp.as_float(wave)))
+    _check_enroll_cancel(_ENROLL_CANCEL)
+    with _ENROLL_GUARD:
+        _ENROLL_STATE["phase"] = "checking"
+    runtime.bus.emit("enrolling", "正在校验声纹", "检查三句话是否属于同一个人，仍可停止")
     return samples
 
 
@@ -505,26 +640,36 @@ def _ui_context(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
     return ui.UiContext(
         bus=runtime.bus,
         pill_file=runtime.cfg.res_path("ui.pill_file", "web/pill.html"),
-        on_command=lambda text: _run_text(runtime, text),
+        on_command=lambda text: _run_command(runtime, text),
         settings_get=lambda: settings.describe(runtime.cfg),
         settings_set=save,
         settings_undo=undo,
         settings_can_undo=lambda: settings.can_undo(runtime.cfg),
         status=lambda: _status(runtime, lock),
         on_enroll=(lambda seconds: _enroll_from_ui(runtime, lock, enrolled)) if lock else None,
+        on_enroll_cancel=_cancel_enroll,
         on_confirm=runtime.gate.resolve,
         # 读**落盘的时间线**，不是内存里那 8 条：用户问「昨天为什么没反应」，
         # 内存那份早就没了。而且时间线里有被丢弃的回合——那才是「没反应」的答案。
         history=lambda: timeline.recent(cfg=runtime.cfg, limit=60),
         on_listen=lambda on: _set_listening(runtime, on),
         on_cue=lambda body: _deliver_cue(runtime, body),
+        on_stop=runtime.cancel,
     )
 
 
-def _run_text(runtime: Runtime, text: str) -> str:
+def _run_command(runtime: Runtime, text: str) -> dict[str, object]:
+    """HTTP 返回真实业务结局；正常返回不等于工具成功或用户未取消。"""
     result = runtime.dispatch(text, mode=dialogue.mode(runtime.cfg))
     runtime.record(text, result)
-    return result.reply or NO_ACTION
+    turn = _turn_of(text, result)
+    return {"ok": turn.ok, "outcome": turn.outcome, "route": result.route,
+            "cancelled": result.route == "cancelled", "reply": result.reply or NO_ACTION}
+
+
+def _run_text(runtime: Runtime, text: str) -> str:
+    """终端仍返回同一份回执字符串，不另起一条派发路径。"""
+    return str(_run_command(runtime, text)["reply"])
 
 
 def _serve(runtime: Runtime, lock: dsp.SpeakerLock | None = None,
@@ -805,23 +950,57 @@ def cmd_port(_: argparse.Namespace, cfg: Config) -> int:
 # 持续监听的总开关。关掉之后**仍然继续读设备**——只是不往识别队列里放：
 # 停止读会让 CoreAudio 的缓冲堆起来，恢复时一次性吐出几十秒旧音频。
 _MUTED = threading.Event()
-_RESET_HOOK: dict[str, object] = {"reset": None}
+_RESET_HOOK: dict[str, object] = {"reset": None, "generation": 0, "epoch": 0}
+_AUDIO_GUARD = threading.Lock()
+# 录入只有一个持有者；取消可唤醒无帧等待，后处理与保存边界也检查它。
+_ENROLL_BUSY = threading.Lock()
+_ENROLL_CANCEL = threading.Event()
+_ENROLL_GUARD = threading.Lock()
+_ENROLL_STATE: dict[str, object] = {"phase": "idle", "index": 0, "total": len(enroll.SCRIPT),
+                                   "line": "", "result": None}
+
+
+class EnrollCancelled(InterruptedError):
+    """用户中途停止录入。不是失败：原声纹原样保留，不弹错误。"""
+
+
 # 定时任务比监听线程先起来（要能报「首次录入」），但那会儿还没有 pipeline。
 # 所以出声走一个后填的钩子：拿不到就只上屏，不假装念过。
 _SPEAK_HOOK: dict[str, object] = {"speak": None}
 
 
-def _set_listening(runtime: Runtime, on: bool) -> dict[str, object]:
-    """像智能音箱上的静音键：一按就停，再按就继续。"""
-    if on:
+def _invalidate_audio(drop_commands: bool = True) -> None:
+    """废弃排队音频和整句，由识别线程处理句子重置，不跨线程改模型状态。
+
+    `drop_commands` 分开两件事：音频换代是「别把缺口两边拼成一句」；
+    排队中的完整指令还算不算数是另一件事。采集端丢块只影响前者——丢块前
+    已经定稿的整句与缺口无关；暂停 / 取消 / 换设备则是用户的意思变了，两者都要作废。
+    """
+    with _AUDIO_GUARD:
+        _RESET_HOOK["generation"] = int(_RESET_HOOK.get("generation", 0)) + 1
+        if drop_commands:
+            _RESET_HOOK["epoch"] = int(_RESET_HOOK.get("epoch", 0)) + 1
         reset = _RESET_HOOK.get("reset")
-        if callable(reset):
-            reset()                       # 丢掉暂停前攒的半句话
-        _MUTED.clear()
-        runtime.bus.emit("idle", "待机", "")
-    else:
+    if callable(reset):
+        reset()
+
+
+def _set_listening(runtime: Runtime, on: bool) -> dict[str, object]:
+    """记录监听意图；录入期间仍禁止普通识别，结束后恢复最新选择。"""
+    with _ENROLL_GUARD:
+        if _ENROLL_BUSY.locked() and _ENROLL_STATE["phase"] != "idle":
+            _ENROLL_STATE["resume_listening"] = on
+            return {"ok": True, "listening": False, "requested": on,
+                    "detail": "录入期间暂停普通监听，结束后应用你的选择"}
         _MUTED.set()
-        runtime.bus.emit("paused", "已暂停监听", "点胶囊 → 状态 → 继续监听")
+        try:
+            _invalidate_audio()
+        except Exception as exc:
+            return {"ok": False, "listening": False, "error": f"监听恢复失败：{exc}"}
+        if on:
+            _MUTED.clear()
+    runtime.bus.emit("idle" if on else "paused", "待机" if on else "已暂停监听",
+                     "" if on else "点麦克风继续监听；暂停不会撤销已开始的动作")
     return {"ok": True, "listening": on}
 
 
@@ -849,16 +1028,16 @@ def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[s
     chunk = int(cfg.get("audio.chunk_size", 512))
     device = cfg.get("audio.input_device", "")
     source = audio.SelfHealingSource(lambda: audio.MicSource(chunk, device=device),
-                                     on_event=runtime.bus, on_reset=pipeline.reset)
+                                     on_event=runtime.bus, on_reset=_invalidate_audio)
     _context()                             # 预热：把首次线程启动的开销挪到进循环之前
-    _RESET_HOOK["reset"] = pipeline.reset
+    _RESET_HOOK["reset"] = pipeline.request_reset
     _SPEAK_HOOK["speak"] = lambda piece: _speak_async(piece, pipeline, cfg)
     runtime.bus.emit("idle", "待机", "")
     chunks: queue.Queue[object] = queue.Queue(maxsize=64)
     utterances: queue.Queue[object] = queue.Queue(maxsize=4)
     stop = threading.Event()
     threading.Thread(target=_capture_loop, args=(source, chunks, stop), daemon=True).start()
-    threading.Thread(target=_recognize_loop, args=(pipeline, chunks, utterances, stop), daemon=True).start()
+    threading.Thread(target=_recognize_loop, args=(pipeline, chunks, utterances, stop, runtime), daemon=True).start()
     try:
         return _dispatch_loop(runtime, pipeline, utterances, sounds, stop)
     finally:
@@ -866,24 +1045,20 @@ def _listen(runtime: Runtime, cfg: Config, lock: dsp.SpeakerLock, sounds: dict[s
 
 
 def _capture_loop(source: object, chunks: queue.Queue[object], stop: threading.Event) -> None:
-    """只做采集：队列满时丢最旧的块，绝不阻塞设备读取。
-
-    暂停时继续读、但不入队——见 `_MUTED` 的说明。
-    """
+    """采集不阻塞：暂停或丢块会废弃旧代，防止缺音频的半句执行。"""
+    iterator = iter(source)  # type: ignore[call-overload]
     try:
-        for chunk in source:  # type: ignore[union-attr]
-            if stop.is_set():
-                break
-            if _MUTED.is_set():
+        while not stop.is_set():
+            generation = int(_RESET_HOOK.get("generation", 0))
+            chunk = next(iterator)
+            if _MUTED.is_set() or generation != _RESET_HOOK.get("generation", 0):
                 continue
             try:
-                chunks.put_nowait(chunk)
+                chunks.put_nowait((generation, chunk))
             except queue.Full:
-                try:
-                    chunks.get_nowait()
-                    chunks.put_nowait(chunk)
-                except (queue.Empty, queue.Full):
-                    pass
+                _invalidate_audio(drop_commands=False)  # 丢块只断句，不作废已定稿的指令
+    except StopIteration:
+        return
     except Exception as exc:
         _put_latest(chunks, exc)
     finally:
@@ -891,29 +1066,54 @@ def _capture_loop(source: object, chunks: queue.Queue[object], stop: threading.E
 
 
 def _recognize_loop(pipeline: audio.AudioPipeline, chunks: queue.Queue[object],
-                    utterances: queue.Queue[object], stop: threading.Event) -> None:
-    """只做 VAD/声纹/识别：把整句交给派发线程，自己继续处理下一块音频。"""
+                    utterances: queue.Queue[object], stop: threading.Event,
+                    runtime: Runtime) -> None:
+    """旧代音频不识别；本人完整取消不排队，普通指令积压不阻塞收音。"""
+    generation = int(_RESET_HOOK.get("generation", 0))
     def feed():
-        while True:
-            item = chunks.get()
+        nonlocal generation
+        while not stop.is_set():
+            try:
+                item = chunks.get(timeout=0.1)
+            except queue.Empty:
+                continue
             if item is None:
                 return
             if isinstance(item, Exception):
                 raise item
-            yield item
+            stamp, chunk = item
+            if _MUTED.is_set() or stamp != _RESET_HOOK.get("generation", 0):
+                continue
+            generation = stamp
+            yield chunk
 
     try:
         for utterance in pipeline.run(feed()):
-            while not stop.is_set():
-                try:
-                    utterances.put(utterance, timeout=0.2)
-                    break
-                except queue.Full:
-                    continue
+            if stop.is_set():
+                break
+            if _MUTED.is_set() or generation != _RESET_HOOK.get("generation", 0):
+                continue
+            _offer_recognized(runtime, pipeline, utterances, utterance)
     except Exception as exc:
         _put_latest(utterances, exc)
     finally:
         _put_latest(utterances, None)
+
+
+def _offer_recognized(runtime: Runtime, pipeline: audio.AudioPipeline,
+                      channel: queue.Queue[object],
+                      utterance: audio.Utterance) -> None:
+    """取消直接到达活动回合；普通指令积压时跳过，不拖住识别线程。"""
+    if (utterance.accepted and not utterance.during_tts
+            and _stale_age(utterance) <= _STALE_S
+            and pipeline.echo.is_interrupt(utterance.text)):
+        runtime.cancel()
+        return
+    try:
+        # 用 epoch 而不是音频代际排队：这两件事的作废条件不同（见 `_invalidate_audio`）。
+        channel.put_nowait((_RESET_HOOK.get("epoch", 0), utterance))
+    except queue.Full:
+        runtime.bus.emit("warn", "忙碌，已跳过", "指令队列已满；请稍后完整重说")
 
 
 def _put_latest(channel: queue.Queue[object], item: object) -> None:
@@ -940,7 +1140,22 @@ def _dispatch_loop(runtime: Runtime, pipeline: audio.AudioPipeline,
         if isinstance(item, Exception):
             runtime.bus.emit("blocked", "音频处理异常", str(item))
             return 1
+        if isinstance(item, tuple):
+            epoch, item = item
+            if epoch != _RESET_HOOK.get("epoch", 0):
+                _note_stale_command(runtime, item)
+                continue
         _dispatch_one(runtime, pipeline, item, sounds)
+
+
+def _note_stale_command(runtime: Runtime, utterance: object) -> None:
+    """暂停/取消后作废的指令也要留一条：否则用户只看到「说了没反应」。"""
+    if not getattr(utterance, "reason", ""):
+        try:
+            utterance.reason = "暂停或取消之后，这一句不再执行"
+        except AttributeError:
+            pass
+    runtime.note_dropped(utterance)
 
 
 def _dispatch_one(runtime: Runtime, pipeline: audio.AudioPipeline,
@@ -965,9 +1180,14 @@ def _dispatch_one(runtime: Runtime, pipeline: audio.AudioPipeline,
     if is_bc(utterance.text) and (getattr(utterance, "during_tts", False) or speaking):
         runtime.bus.emit("idle", "反馈音", utterance.text)
         return
-    if pipeline.echo.is_interrupt(utterance.text):
+    if getattr(utterance, "during_tts", False):
         stop_speaking()
-        runtime.bus.emit("idle", "已停止", utterance.text)
+        runtime.bus.emit("warn", "请完整重说", "播放混音不能执行，请停顿后完整重说")
+        return
+    if _MUTED.is_set():
+        return
+    if pipeline.echo.is_interrupt(utterance.text):
+        runtime.cancel()
         return
     # 读 runtime.cfg 而不是启动时的快照：设置页改了开关，下一句就该生效。
     if runtime.cfg.flag("ui.earcons", True):
@@ -975,12 +1195,19 @@ def _dispatch_one(runtime: Runtime, pipeline: audio.AudioPipeline,
     runtime.bus.emit("executing", "处理中…", utterance.text)
     result = _dispatch_with_ack(runtime, utterance.text, pipeline, runtime.cfg)
     runtime.record(utterance.text, result, utterance)
+    _present_result(runtime, pipeline, utterance.text, result)
+
+
+def _present_result(runtime: Runtime, pipeline: audio.AudioPipeline, text: str,
+                    result: core.DispatchResult) -> None:
+    """展示真实结局；未识别或已取消的回合不补播，流式回合不重复朗读。"""
     state, word = _RESULT_WORD.get(result.route, ("done", "完成"))
+    if _turn_of(text, result).ok is False:
+        state, word = "blocked", "执行失败"
     runtime.bus.emit(state, word, result.reply)
-    # 听不懂的时候只显示、不朗读：常驻监听会把屋里所有闲聊都收进来，
-    # 每句都念一遍「还没学会这句」，很快就变成噪音了。
     spoken = dialogue.shape(result.reply, runtime.cfg) if result.reply else ""
-    if spoken and result.route != "ignore" and runtime.cfg.flag("ui.speak", True) and not getattr(result, "streamed", False):
+    if (spoken and result.route not in ("ignore", "cancelled")
+            and runtime.cfg.flag("ui.speak", True) and not result.streamed):
         _speak_async(spoken, pipeline, runtime.cfg)
 
 
@@ -992,27 +1219,40 @@ class _StreamSpeaker:
         self.cfg = cfg
         self.queue: queue.Queue[str | None] = queue.Queue()
         self.owner = object()
+        with _TTS_LOCK:
+            _signal_say(_TTS.get("proc"))
+            _TTS.update(owner=self.owner, stopped=False, proc=None)
         self.heard: list[str] = []
         self.started = False
         self.thread: threading.Thread | None = None
 
     def enqueue(self, sentence: str) -> None:
+        """锁内复核归属；迟到的首句不能重新领取已经取消的播放权。"""
         if _is_stale(self.owner):
             return
-        if not self.started:
-            self.started = True
-            with _TTS_LOCK:
-                _signal_say(_TTS.get("proc"))
-                _TTS.update(owner=self.owner, stopped=False, proc=None)
+        with _TTS_LOCK:
+            if _TTS.get("stopped") or _TTS.get("owner") is not self.owner:
+                return
+            if not self.started:
+                self.started = True
                 self.pipeline.echo.tts_start()
-            self.thread = threading.Thread(target=self._run, daemon=True)
-            self.thread.start()
-        self.queue.put(sentence)
+                self.thread = threading.Thread(target=self._run, daemon=True)
+                self.thread.start()
+            self.queue.put_nowait(sentence)
 
     def finish(self, text: str = "") -> None:
+        self.full_text = text
         if self.started:
-            self.full_text = text
             self.queue.put(None)
+        else:
+            with _TTS_LOCK:
+                if _TTS.get("owner") is self.owner:
+                    _TTS.update(proc=None, owner=None, stopped=False)
+                    # 抢占时上一轮已因归属变更而放弃 tts_end；这一轮又一句没播，
+                    # 不在这里补一次，回声门就永远开着——之后每块麦克风音频都会被门成静音。
+                    echo = getattr(self.pipeline, "echo", None)
+                    if echo is not None:
+                        echo.tts_end()
 
     def should_stop(self) -> bool:
         return _is_stale(self.owner)
@@ -1049,11 +1289,8 @@ def _run_dispatch_worker(
     on_s = speaker.enqueue if speaker else None
     stop_s = speaker.should_stop if speaker else None
     try:
-        try:
-            box["result"] = runtime.dispatch(
-                text, mode=dialogue.mode(cfg), on_sentence=on_s, should_stop=stop_s)
-        except TypeError:
-            box["result"] = runtime.dispatch(text, mode=dialogue.mode(cfg))
+        box["result"] = runtime.dispatch(
+            text, mode=dialogue.mode(cfg), on_sentence=on_s, should_stop=stop_s)
     except BaseException as exc:  # noqa: BLE001
         box["error"] = exc
     finally:
@@ -1069,15 +1306,19 @@ def _dispatch_with_ack(runtime: Runtime, text: str, pipeline: audio.AudioPipelin
     speaker = _StreamSpeaker(pipeline, cfg) if (can_speak and cfg.flag("llm.stream", True)) else None
     threading.Thread(target=_run_dispatch_worker, args=(runtime, text, cfg, box, done, speaker), daemon=True).start()
     wait = dialogue.ack_after_s(cfg)
-    if wait > 0 and not done.wait(wait) and can_speak and (speaker is None or not speaker.started):
-        _speak_async(dialogue.ack(text, cfg), pipeline, cfg)
-    done.wait()
-    if box.get("error") is not None:
-        raise box["error"]  # type: ignore[misc]
-    res: core.DispatchResult = box["result"]  # type: ignore[assignment]
-    if speaker is not None:
-        speaker.finish(res.reply)
-    return res
+    try:
+        if wait > 0 and not done.wait(wait) and can_speak and (speaker is None or not speaker.started):
+            if speaker is not None:
+                speaker.enqueue(dialogue.ack(text, cfg))
+            else:
+                _speak_async(dialogue.ack(text, cfg), pipeline, cfg)
+        done.wait()
+        if box.get("error") is not None:
+            raise box["error"]  # type: ignore[misc]
+        return box["result"]  # type: ignore[return-value]
+    finally:
+        if speaker is not None:
+            speaker.finish(getattr(box.get("result"), "reply", ""))
 
 
 # 胶囊上那行字要说清「它到底做了什么」：一律写「完成」的话，
@@ -1085,6 +1326,8 @@ def _dispatch_with_ack(runtime: Runtime, text: str, pipeline: audio.AudioPipelin
 _RESULT_WORD: dict[str, tuple[str, str]] = {
     "ignore": ("miss", "没听懂"),
     "chat": ("done", "回话"),
+    "error": ("blocked", "执行失败"),
+    "cancelled": ("idle", "已停止"),
 }
 
 
@@ -1327,8 +1570,12 @@ def _read_one(cfg: Config, lock: dsp.SpeakerLock, device: object, index: int,
     return None
 
 
-def _capture_one(cfg: Config, device: object, max_s: float = 6.0) -> tuple[object, float]:
-    """录一句：VAD 判到句尾就停，最多 `max_s` 秒。返回 (波形, 人声秒数)。"""
+def _capture_one(cfg: Config, device: object, max_s: float = 6.0,
+                 cancel: threading.Event | None = None) -> tuple[object, float]:
+    """录一句：VAD 判到句尾就停，最多 `max_s` 秒。返回 (波形, 人声秒数)。
+
+    `cancel` 置位时下一块（32ms）就抛 EnrollCancelled，录入可以随时停。
+    """
     from . import audio, dsp
 
     import numpy as np
@@ -1340,13 +1587,16 @@ def _capture_one(cfg: Config, device: object, max_s: float = 6.0) -> tuple[objec
         min_speech_ms=float(cfg.get("audio.min_speech_ms", 200)),
     )
     buffer: list[object] = []
-    with audio.MicSource(device=device) as source:
-        started = time.time()
+    _check_enroll_cancel(cancel)
+    with audio.MicSource(device=device, cancel=cancel) as source:
+        started = time.monotonic()
         for chunk in source:
+            if cancel is not None and cancel.is_set():
+                raise EnrollCancelled()
             state = detector.push(bool(vad.is_speech(chunk)), chunk.size)  # type: ignore[attr-defined]
             if state != "idle":
                 buffer.append(chunk)
-            if state in ("candidate", "force_end") or time.time() - started > max_s + 1.0:
+            if state in ("candidate", "force_end") or time.monotonic() - started > max_s + 1.0:
                 break
     wave = np.concatenate(buffer) if buffer else np.zeros(0, dtype=np.float32)
     return wave, detector.speech_ms / 1000.0

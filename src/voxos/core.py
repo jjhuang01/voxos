@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from concurrent.futures import CancelledError
 from datetime import datetime
 from typing import Any, Callable
 
@@ -342,23 +343,45 @@ def dispatch(
     ensure_tools()
     cfg = cfg or (executor.cfg if executor else load())
     executor = executor or Executor(cfg)
+    executor.completed = []
     started = time.perf_counter()
     raw = (text or "").strip()
     if not raw:
         return DispatchResult(route="ignore", text=raw, reply="")
 
-    quick = _quick_route(raw, cfg, executor, started)
-    if quick is not None:
-        return quick
+    try:
+        _check_cancel(should_stop)
+        quick = _quick_route(raw, cfg, executor, started)
+        if quick is not None:
+            _check_cancel(should_stop)
+            return quick
+        if (chat := _small_talk(raw)):
+            return _remember(DispatchResult("chat", raw, reply=chat, latency_ms=_ms(started)))
+        llm = _try_llm(raw, executor, cfg, dict(context or {}, mode=mode), started, on_sentence, should_stop)
+        _check_cancel(should_stop)
+        if llm is not None:
+            return _remember(llm)
+        return _offline_route(raw, cfg, executor, started)
+    except CancelledError:
+        return _cancelled_result(raw, executor, started)
 
-    if (chat := _small_talk(raw)):
-        return _remember(DispatchResult("chat", raw, reply=chat, latency_ms=_ms(started)))
 
-    llm = _try_llm(raw, executor, cfg, dict(context or {}, mode=mode), started, on_sentence, should_stop)
-    if llm is not None:
-        return _remember(llm)
+def _cancelled_result(text: str, executor: Executor, started: float) -> DispatchResult:
+    """取消保留已完成工具的真实结果，不把部分执行误报成全部未执行。"""
+    completed = executor.completed or []
+    name, args = completed[0][:2] if completed else ("", {})
+    results = [result for _, _, result in completed]
+    detail = "；".join(results)
+    reply = "已停止；已开始的动作不会撤销"
+    if detail:
+        reply += f"。已返回结果：{detail}"
+    return DispatchResult("cancelled", text, name, args, reply, _ms(started), results)
 
-    return _offline_route(raw, cfg, executor, started)
+
+def _check_cancel(should_stop: Callable[[], bool] | None) -> None:
+    """取消不是网络故障，不能回落另一条路继续执行。"""
+    if should_stop and should_stop():
+        raise CancelledError()
 
 
 def _offline_route(raw: str, cfg: Config, executor: Executor, started: float) -> DispatchResult:
@@ -409,7 +432,10 @@ def _try_llm(
     state: dict[str, Any] = {"executed": False, "results": []}
     try:
         return _llm_route(text, executor, cfg, context, started, state, on_sentence, should_stop)
+    except CancelledError:
+        raise
     except Exception as exc:
+        _check_cancel(should_stop)
         executor.on_event("blocked", "模型不可用", str(exc))
         if not state["executed"]:
             return None
@@ -588,13 +614,15 @@ def _consume_stream(
         text = (chunks.get("content") or "").strip()
         if on_sentence and text:
             for s in stream_sentences([text], should_stop):
-                on_sentence(s)
-        return text, bool(on_sentence and text)
+                if not _is_ignore(s):
+                    on_sentence(s)
+        return text, bool(on_sentence and text and not _is_ignore(text))
     all_deltas: list[str] = []
     spoken_any = False
     try:
         for sentence in stream_sentences((all_deltas.append(d) or d for d in chunks), should_stop):
-            if on_sentence:
+            # 哨兵是路由信号，不是话；念出来会让「不是对我说的」变成一句英文噪音
+            if on_sentence and not _is_ignore(sentence):
                 on_sentence(sentence)
                 spoken_any = True
     except _ToolCallDetected:
@@ -633,16 +661,32 @@ def _speak_first(on_sentence: Callable[[str], None] | None, text: str, cfg: Conf
     return False
 
 
+def _is_ignore(content: str) -> bool:
+    """整句只有一个 IGNORE 时才是「不是对我说的」；正文里出现这词不算。"""
+    return content.strip().strip("。.!！,，；;").upper() == "IGNORE"
+
+
 def _emit_summary(
     content: str, on_sentence: Callable[[str], None] | None,
     should_stop: Callable[[], bool] | None,
 ) -> bool:
     spoken = False
-    if on_sentence and content:
+    if on_sentence and content and not _is_ignore(content):
         for s in stream_sentences([content], should_stop):
             on_sentence(s)
             spoken = True
     return spoken
+
+
+def _fetch_tool_message(messages: list[dict[str, Any]], schemas: list[dict[str, Any]],
+                        cfg: Config) -> dict[str, Any]:
+    """工具回合只负责请求；取消边界与执行策略仍由派发循环掌管。"""
+    return chat(
+        base_url=str(cfg.get("llm.base_url")), api_key=str(cfg.get("llm.api_key", "")),
+        model=str(cfg.get("llm.model")), messages=messages, tools=schemas,
+        temperature=float(cfg.get("llm.temperature", 0.1)),
+        timeout=float(cfg.get("llm.timeout_s", 20)), extra=llm_extra(cfg),
+    )
 
 
 def _agent_rounds(
@@ -658,15 +702,12 @@ def _agent_rounds(
     first_tool, first_args = "", {}
     pending, streamed = initial, spoken_first
     for _ in range(int(cfg.get("llm.max_tool_rounds", 3))):
+        _check_cancel(should_stop)
         if pending is not None:
             message, pending = pending, None
         else:
-            message = chat(
-                base_url=str(cfg.get("llm.base_url")), api_key=str(cfg.get("llm.api_key", "")),
-                model=str(cfg.get("llm.model")), messages=messages, tools=schemas,
-                temperature=float(cfg.get("llm.temperature", 0.1)),
-                timeout=float(cfg.get("llm.timeout_s", 20)), extra=llm_extra(cfg),
-            )
+            message = _fetch_tool_message(messages, schemas, cfg)
+        _check_cancel(should_stop)
         calls = message.get("tool_calls") or []
         if not calls:
             content = (message.get("content") or "").strip()

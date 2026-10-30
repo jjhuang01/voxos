@@ -13,6 +13,7 @@ import shutil
 import threading
 import time
 from contextlib import contextmanager, nullcontext
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -181,6 +182,8 @@ class Executor:
     on_event: Callable[[str, str, str], None] = lambda state, label, detail: None
     confirm: Callable[[str, dict[str, Any], Verdict], bool] | None = None
     lock_timeout_s: float = 5.0
+    should_stop: Callable[[], bool] | None = None
+    completed: list[tuple[str, dict[str, Any], str]] | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def __post_init__(self) -> None:
@@ -197,6 +200,8 @@ class Executor:
         raw_args = {} if args is None else args
         if not isinstance(raw_args, dict):
             raw_args = {}
+        if self.should_stop and self.should_stop():
+            raise CancelledError()
         started = time.perf_counter()
         meta = REGISTRY.get(name)
         if meta is None:
@@ -239,8 +244,12 @@ class Executor:
         gate = nullcontext() if meta.risk is RiskLevel.GREEN else self._single_flight()
         try:
             with gate:
+                if self.should_stop and self.should_stop():
+                    raise CancelledError()
                 self._snapshot(meta, args)
                 return str(meta.fn(**args))
+        except CancelledError:
+            raise
         except TimeoutError:
             return "上一条修改类指令还在执行，请稍后再说一次"
         except PermissionError as exc:
@@ -299,7 +308,10 @@ class Executor:
             "result": _shorten(result),
             "backup": backup_arg,
         })
-        self.on_event("done", "完成" if not result.startswith("⛔") else "已拦截", result)
+        if self.completed is not None:
+            self.completed.append((name, dict(args), result))
+        ok = _ok_text(result)
+        self.on_event("done" if ok else "blocked", "完成" if ok else "未执行或失败", result)
         return result
 
     def _audit(self, record: dict[str, Any]) -> None:
@@ -333,7 +345,7 @@ def _label(name: str) -> str:
 
 
 _FAILURE_PREFIXES = ("⛔", "执行异常", "参数不匹配", "已取消", "错误：", "没有可回滚",
-                     "快照", "上一条修改类指令还在执行", "未找到", "文件不存在")
+                     "快照", "上一条修改类指令还在执行", "未找到", "文件不存在", "路径不存在")
 
 
 def _ok_text(result: str) -> bool:

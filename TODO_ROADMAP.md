@@ -148,10 +148,10 @@
 
 ### Task 1.8 工程化
 
-- [x] 当前收集 650 项测试，0.1.46 冻结全量 649 passed + 1 skipped（缺依赖互补分支），真模型用例已执行；工程 17/19，沿用两项显式豁免至 2027-03-31，`demo` 通过。真人 FRR/FAR 未标定。
+- [x] 当前收集 691 项测试，全量 690 passed + 1 skipped（缺依赖互补分支），真模型用例已执行；工程 17/19，沿用两项显式豁免至 2027-03-31，`demo` 通过。真人 FRR/FAR 未标定。
       `scripts/verify.py` 19 项验收指标（`make verify`），
       `scripts/audit_ui.py` 12 项界面回归（`make audit-ui`），`scripts/soak.py` 长稳（`make soak`）。
-- [x] 全模块单函数 ≤ 40 行（最长 40 行，`src/voxos/core.py` 的 `_agent_rounds`）、核心五模块共 8 个类、核心零第三方依赖。
+- [x] 全模块单函数 ≤ 40 行（最长 40 行，`src/voxos/audio.py` 的 `run`）、核心五模块共 8 个类、核心零第三方依赖。
 - [x] 文档：AGENTS / CODING_PHILOSOPHY / PRD / REDLINES / PROMPTS_AND_ROUTING / DESIGN_SYSTEM / README。
       （`BUSINESS.md` 是商业文档，只留在本地，不进仓库。）
 

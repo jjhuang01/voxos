@@ -267,8 +267,8 @@ def test_a_fresh_utterance_still_runs(cfg):
     runtime.bus.emit = lambda state, label, detail="": None
     executed: list[tuple[str, str]] = []
 
-    def fake_dispatch(text, context=None, mode="assistant"):
-        """替身也要守契约：派发循环现在会带上对话模式。"""
+    def fake_dispatch(text, context=None, mode="assistant", on_sentence=None, should_stop=None):
+        """替身遵循真实派发签名，内部 TypeError 不触发第二次副作用。"""
         executed.append((text, mode))
         return core.DispatchResult(route="fast", text=text, reply="日志已记录")
 

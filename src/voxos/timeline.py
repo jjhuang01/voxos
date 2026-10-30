@@ -41,7 +41,7 @@ from typing import Any
 
 __all__ = ["Turn", "record", "recent", "path_of", "OUTCOMES"]
 
-OUTCOMES = ("dropped", "missed", "acted", "failed", "chatting")
+OUTCOMES = ("dropped", "missed", "acted", "failed", "chatting", "cancelled")
 
 _LOCK = threading.Lock()
 """同一进程内串行写。跨进程（守护进程 + CLI）靠 `O_APPEND` 的单行原子性——
@@ -73,7 +73,7 @@ class Turn:
         `声纹0.00 / 0ms` 只会让人以为「声纹坏了」。
         """
         head = {"dropped": "丢弃", "missed": "没懂", "acted": "执行",
-                "failed": "失败", "chatting": "回话"}.get(self.outcome, self.outcome)
+                "failed": "失败", "chatting": "回话", "cancelled": "已停止"}.get(self.outcome, self.outcome)
         what = self.tool or self.route or "-"
         detail = self.reason or self.reply or ""
         voice = f" 声纹{self.score:.2f}" if self.score > 0 else ""
