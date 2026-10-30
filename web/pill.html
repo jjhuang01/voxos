@@ -565,9 +565,11 @@ function render(event) {
    被回答、被拒绝、或闸门超时后发来 confirmation_end。 */
 function showConfirm(event) {
   $('confirm-q').textContent = event.detail || '这个操作需要你确认';
-  pendingConfirmId = event.request || '';     // 回答必须带回这张卡的请求 ID
+  const request = event.request || '';
+  const fresh = request !== pendingConfirmId || $('confirm').hidden;
+  pendingConfirmId = request;                 // 回答必须带回这张卡的请求 ID
   $('confirm').hidden = false;
-  startCountdown();
+  if (fresh) startCountdown();                // 同一张卡被状态轮询重放时不重置倒计时
   open();
 }
 
