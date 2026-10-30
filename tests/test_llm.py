@@ -565,3 +565,40 @@ def test_dispatch_streams_sentences_to_callback(cfg, executor, monkeypatch):
     assert spoken_sentences == ["第一句。", "第二句！"]
     assert res.streamed is True
 
+
+def test_tool_calls_speaks_transition_phrase_before_execution(cfg, executor, monkeypatch):
+    """当模型选择调工具时，必须在工具真正执行前念过渡语，并在收尾时念出总结。"""
+    armed = _armed(cfg).with_overrides(**{"llm.stream": True})
+    spoken: list[str] = []
+    executed: list[str] = []
+
+    def fake_chat(*args, **kwargs):
+        if kwargs.get("stream"):
+            tool_data = {
+                "choices": [{
+                    "delta": {"tool_calls": [{"id": "c1", "function": {"name": "tell_time", "arguments": "{}"}}]}
+                }]
+            }
+            return _FakeSSEResponse([f"data: {json.dumps(tool_data)}\n\n", "data: [DONE]\n\n"])
+        if not executed:
+            return {"role": "assistant", "content": None,
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                    "function": {"name": "tell_time", "arguments": "{}"}}]}
+        return {"role": "assistant", "content": "今天是星期五。"}
+
+    monkeypatch.setattr(core, "chat", fake_chat)
+    monkeypatch.setattr(core, "_fast_route", lambda *_: None)
+
+    real_execute = executor.execute_safely
+    def tracking_execute(name, args, text=""):
+        executed.append(name)
+        assert len(spoken) > 0, "工具执行前必须已念过过渡语"
+        return real_execute(name, args, text=text)
+
+    monkeypatch.setattr(executor, "execute_safely", tracking_execute)
+    res = core.dispatch("今天适合做点什么", cfg=armed, executor=executor, on_sentence=spoken.append)
+    assert len(spoken) >= 2
+    assert "星期五" in res.reply
+    assert res.streamed is True
+
+

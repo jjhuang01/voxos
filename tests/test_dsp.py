@@ -283,3 +283,62 @@ def test_segmented_verification_falls_back_for_short_audio():
 
     assert ok is True
     assert ratio == 1.0
+
+
+def _simulate_aec_signals():
+    sr = dsp.SR
+    duration = 2.0
+    n = int(sr * duration)
+    t = np.linspace(0, duration, n, endpoint=False)
+    np.random.seed(42)
+    tts = (0.4 * np.sin(2 * np.pi * 220 * t) + 0.3 * np.sin(2 * np.pi * 440 * t)
+           + 0.1 * np.random.randn(n)).astype(np.float32)
+    delay = 800
+    rir = np.zeros(64, dtype=np.float32)
+    rir[0], rir[16], rir[40] = 0.6, 0.2, 0.1
+    echo = np.zeros_like(tts)
+    filtered = np.convolve(tts, rir)[:n - delay]
+    echo[delay:delay + len(filtered)] = filtered
+    voice = np.zeros(n, dtype=np.float32)
+    v_start, v_end = int(0.8 * sr), int(1.8 * sr)
+    vt = t[v_start:v_end]
+    voice[v_start:v_end] = (0.35 * np.sin(2 * np.pi * 180 * vt) + 0.2 * np.sin(2 * np.pi * 360 * vt))
+    return tts, echo, voice, delay, v_start, v_end
+
+
+def _run_blocks(filter_inst: dsp.AECFilter, mic: np.ndarray, tts: np.ndarray, delay: int) -> np.ndarray:
+    block_size = 320
+    cleaned = []
+    for i in range(0, len(mic), block_size):
+        ref_idx = i - delay
+        ref_b = tts[ref_idx:ref_idx + block_size] if ref_idx >= 0 else np.zeros(block_size, dtype=np.float32)
+        if len(ref_b) < block_size:
+            ref_b = np.pad(ref_b, (0, block_size - len(ref_b)))
+        cleaned.append(filter_inst.filter_block(mic[i:i + block_size], ref_b))
+    return np.concatenate(cleaned)
+
+
+def test_aec_nlms_cancels_echo_and_restores_user_voice():
+    """合成信号验证 AEC：只有 TTS 时残余能量显著下降，双讲时与本人语音相关性显著上升。"""
+    tts, echo, voice, delay, v_start, v_end = _simulate_aec_signals()
+    mic_double, mic_single = echo + voice, echo.copy()
+
+    # 延迟估计验证
+    est_delay = dsp.estimate_delay(echo[delay:delay + 480], tts[:delay + 480])
+    assert abs(est_delay - delay) <= 1
+
+    # 单讲：残余能量显著下降
+    clean_s = _run_blocks(dsp.AECFilter(taps=64), mic_single, tts, delay)
+    p_orig = float(np.mean(mic_single[v_start:v_end] ** 2))
+    p_clean = float(np.mean(clean_s[v_start:v_end] ** 2))
+    erle = 10.0 * np.log10(p_orig / max(p_clean, 1e-12))
+    assert erle > 30.0
+
+    # 双讲：与本人语音相关性显著高于消除前
+    clean_d = _run_blocks(dsp.AECFilter(taps=64), mic_double, tts, delay)
+    c_before = float(np.corrcoef(mic_double[v_start:v_end], voice[v_start:v_end])[0, 1])
+    c_after = float(np.corrcoef(clean_d[v_start:v_end], voice[v_start:v_end])[0, 1])
+    assert c_before < 0.82
+    assert c_after > 0.85
+    assert c_after > c_before + 0.04
+

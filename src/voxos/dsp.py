@@ -437,3 +437,59 @@ def sentences(text: str, max_chars: int = 40, limit: int = 160) -> list[str]:
         if used >= limit:
             break
     return out
+
+
+def estimate_delay(mic: np.ndarray, ref: np.ndarray, max_delay: int = 4000) -> int:
+    """互相关估计麦克风相对于参考信号的延迟样点数。"""
+    if len(mic) < 160 or len(ref) < len(mic):
+        return 0
+    search_ref = ref[-min(len(ref), len(mic) + max_delay):]
+    target = mic[:min(len(mic), 1600)]
+    corr = np.correlate(search_ref, target, mode="valid")
+    if len(corr) == 0:
+        return 0
+    peak = int(np.argmax(corr))
+    delay = len(search_ref) - len(target) - peak
+    return max(0, min(delay, max_delay))
+
+
+@dataclass
+class AECFilter:
+    """自适应回声消除器（NLMS 归一化最小均方 + 双讲挂起保护）。"""
+
+    taps: int = 64
+    mu: float = 0.25
+    eps: float = 1e-6
+    hangover: int = 2400
+    weights: np.ndarray = field(default_factory=lambda: np.zeros(64, dtype=np.float32))
+    _history: np.ndarray = field(default_factory=lambda: np.zeros(63, dtype=np.float32))
+    _hold: int = 0
+
+    def reset(self) -> None:
+        self.weights.fill(0.0)
+        self._history.fill(0.0)
+        self._hold = 0
+
+    def filter_block(self, mic: np.ndarray, ref: np.ndarray) -> np.ndarray:
+        n = len(mic)
+        if n == 0 or len(ref) < n:
+            return mic.copy()
+        full_ref = np.concatenate([self._history, ref])
+        self._history = full_ref[-len(self._history):]
+        cleaned = np.zeros(n, dtype=np.float32)
+        for i in range(n):
+            x_vec = full_ref[i:i + self.taps][::-1]
+            y_hat = float(np.dot(self.weights, x_vec))
+            d = float(mic[i])
+            e = d - y_hat
+            cleaned[i] = e
+            x_max = float(np.max(np.abs(x_vec)))
+            if x_max > 0.05 and abs(d) > 0.95 * x_max:
+                self._hold = self.hangover
+            elif self._hold > 0:
+                self._hold -= 1
+            x_power = float(np.dot(x_vec, x_vec)) + self.eps
+            if self._hold == 0 and x_power > 1e-4:
+                self.weights += (self.mu / x_power) * e * x_vec
+        return cleaned
+

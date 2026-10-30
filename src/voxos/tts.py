@@ -288,9 +288,10 @@ def play_wav(path: Path, cfg: Config,
         return play(_wav_chunks(source), actual, should_stop, reference)
 
 
-def speak(text: str, cfg: Config, should_stop: Callable[[], bool] | None = None) -> bool:
+def speak(text: str, cfg: Config, should_stop: Callable[[], bool] | None = None,
+          reference: Callable[[bytes, int, float], None] | None = None) -> bool:
     """一句到底：合成 + 播放。失败会抛异常，由调用方决定退回哪条路。"""
-    return play(synthesize(text, cfg, should_stop), cfg, should_stop)
+    return play(synthesize(text, cfg, should_stop), cfg, should_stop, reference=reference)
 
 
 def probe(cfg: Config) -> tuple[bool, str]:

@@ -48,6 +48,7 @@ voiceprint_profiles = ".voxos/voiceprint_profiles.npz"
 mask_mode = false             # 静音面罩/低语补偿
 agc_target_dbfs = -3.0
 echo_decay_ms = 300           # TTS 结束后的混响消退期
+aec = true                    # 外放回声消除：将正在播放的 TTS PCM 作为参考信号消除混音中的回声
 interrupt_ms = 250            # 播报中「人声持续多久」才算打断（默认 250ms，对齐豆包/ChatGPT
                               # 交互体验）。不要求用户喊特定词，打断触发后已攒音频作为
                               # 本句开头继续收音并送入识别，无需重说。

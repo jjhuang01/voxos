@@ -6,7 +6,7 @@
 // 一个几十行的 WKWebView 宿主把这两笔账一次划掉：进程启动 ~60ms、常驻 ~60MB。
 //
 // 只做三件事：开一个窗口、把 URL 装进去、窗口关了就把进程退掉。
-// 不做托盘、不做菜单栏常驻、不做自动更新——那些是「用完即走」的反面。
+// 占 Dock 图标（用户要能在 Dock / ⌘Tab 里找到并激活它），不做托盘和自动更新。
 //
 // 编译（见 scripts/build_app.sh）：
 //   swiftc -O -o build/VoxOSWindow native/VoxOSWindow.swift \
@@ -44,6 +44,25 @@ struct Options {
     }
 }
 
+/// 页面占满整个窗口，WKWebView 会吞掉 mouseDown，`isMovableByWindowBackground`
+/// 因此失效。顶部这一条交给窗口拖动，其余照常给页面（按钮、输入框）。
+final class DraggableWebView: WKWebView {
+    static let dragStrip: CGFloat = 40
+
+    /// 窗口不在前台时第一下就能拖，不用先点一下激活。
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let fromTop = isFlipped ? point.y : bounds.height - point.y
+        if fromTop <= DraggableWebView.dragStrip, let window = window {
+            window.performDrag(with: event)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+}
+
 final class PillWindow: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
     private var window: NSWindow!
     private var web: WKWebView!
@@ -73,6 +92,14 @@ final class PillWindow: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         return true
     }
 
+    /// 点 Dock 图标：窗口被最小化或藏到后面时拉回前台。
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        return true
+    }
+
     private func loadWithRetry() {
         attempts += 1
         web.load(URLRequest(url: options.url, cachePolicy: .reloadIgnoringLocalCacheData))
@@ -92,7 +119,7 @@ final class PillWindow: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
         web.loadHTMLString(html, baseURL: nil)
     }
 
-    /// 最小菜单。没有它 ⌘Q / ⌘W 都不响应——accessory 应用不会自动获得标准菜单。
+    /// 最小菜单。代码创建的应用不会自动获得标准菜单，没有它 ⌘Q / ⌘W 都不响应。
     private func buildMenu() {
         let main = NSMenu()
         let appItem = NSMenuItem()
@@ -129,7 +156,7 @@ final class PillWindow: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
 
         let configuration = WKWebViewConfiguration()
         configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
-        web = WKWebView(frame: frame, configuration: configuration)
+        web = DraggableWebView(frame: frame, configuration: configuration)
         web.navigationDelegate = self
         web.uiDelegate = self
         web.setValue(false, forKey: "drawsBackground")   // 让页面自己的圆角透出来
@@ -167,8 +194,8 @@ final class PillWindow: NSObject, NSApplicationDelegate, WKNavigationDelegate, W
 
 let options = Options.parse(CommandLine.arguments)
 let app = NSApplication.shared
-// accessory：不占 Dock、不抢菜单栏。语音胶囊是「用完即走」的，不是第二个常驻 App。
-app.setActivationPolicy(.accessory)
+// regular：出现在 Dock 和 ⌘Tab 里。accessory 会让窗口被盖住后无处可找。
+app.setActivationPolicy(.regular)
 let delegate = PillWindow(options: options)
 app.delegate = delegate
 app.run()

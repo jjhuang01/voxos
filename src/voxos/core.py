@@ -581,10 +581,10 @@ def _fetch_stream_chunks(
 def _consume_stream(
     chunks: Any, on_sentence: Callable[[str], None] | None,
     should_stop: Callable[[], bool] | None,
-) -> tuple[str, bool] | None:
+) -> tuple[str | None, bool]:
     if isinstance(chunks, dict):
         if chunks.get("tool_calls"):
-            return None
+            return None, False
         text = (chunks.get("content") or "").strip()
         if on_sentence and text:
             for s in stream_sentences([text], should_stop):
@@ -597,8 +597,10 @@ def _consume_stream(
             if on_sentence:
                 on_sentence(sentence)
                 spoken_any = True
-    except (_ToolCallDetected, Exception):
-        return None
+    except _ToolCallDetected:
+        return None, spoken_any
+    except Exception:
+        return None, False
     return "".join(all_deltas).strip(), spoken_any
 
 
@@ -606,19 +608,41 @@ def _try_stream_route(
     messages: list[dict[str, Any]], schemas: list[dict[str, Any]], cfg: Config,
     started: float, text: str, on_sentence: Callable[[str], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
-) -> DispatchResult | dict[str, Any] | None:
-    """尝试流式纯文本生成；若模型意图为工具调用，返回 None 交回给非流式。"""
+) -> DispatchResult | tuple[dict[str, Any] | None, bool] | None:
+    """尝试流式纯文本生成；若模型意图为工具调用，返回工具调用状态与已播报标记。"""
     chunks = _fetch_stream_chunks(messages, schemas, cfg, should_stop)
     if chunks is None:
         return None
     if isinstance(chunks, dict) and chunks.get("tool_calls"):
-        return chunks
+        return chunks, _speak_first(on_sentence, text, cfg)
     res = _consume_stream(chunks, on_sentence, should_stop)
-    if res is None:
-        return None
-    content, spoken = res
+    if res[0] is None:
+        spoken = res[1] or _speak_first(on_sentence, text, cfg)
+        return None, spoken
+    content, spoken = str(res[0]), res[1]
     route = "ignore" if "IGNORE" in content else "llm"
     return DispatchResult(route, text, reply=content, latency_ms=_ms(started), streamed=spoken)
+
+
+def _speak_first(on_sentence: Callable[[str], None] | None, text: str, cfg: Config) -> bool:
+    from . import dialogue
+    ack = dialogue.ack(text, cfg)
+    if on_sentence and ack:
+        on_sentence(ack)
+        return True
+    return False
+
+
+def _emit_summary(
+    content: str, on_sentence: Callable[[str], None] | None,
+    should_stop: Callable[[], bool] | None,
+) -> bool:
+    spoken = False
+    if on_sentence and content:
+        for s in stream_sentences([content], should_stop):
+            on_sentence(s)
+            spoken = True
+    return spoken
 
 
 def _agent_rounds(
@@ -626,10 +650,13 @@ def _agent_rounds(
     executor: Executor, cfg: Config, text: str, started: float,
     state: dict[str, Any] | None = None,
     initial: dict[str, Any] | None = None,
+    on_sentence: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    spoken_first: bool = False,
 ) -> DispatchResult:
     results: list[str] = []
     first_tool, first_args = "", {}
-    pending = initial
+    pending, streamed = initial, spoken_first
     for _ in range(int(cfg.get("llm.max_tool_rounds", 3))):
         if pending is not None:
             message, pending = pending, None
@@ -643,11 +670,13 @@ def _agent_rounds(
         calls = message.get("tool_calls") or []
         if not calls:
             content = (message.get("content") or "").strip()
-            if not results:
-                return DispatchResult("ignore" if "IGNORE" in content else "llm", text,
-                                      reply=content, latency_ms=_ms(started))
-            return DispatchResult("llm", text, first_tool, first_args,
-                                  content or "；".join(results), _ms(started), results)
+            if _emit_summary(content, on_sentence, should_stop):
+                streamed = True
+            reply = content if not results else (content or "；".join(results))
+            route = "ignore" if (not results and "IGNORE" in content) else "llm"
+            return DispatchResult(route, text, first_tool, first_args, reply, _ms(started), results, streamed=streamed)
+        if not streamed:
+            streamed = _speak_first(on_sentence, text, cfg)
         messages.append(_replayable(message))
         if state is not None:
             state["executed"] = True
@@ -655,7 +684,7 @@ def _agent_rounds(
         first_tool, first_args = first_tool or name, first_args or args
         if state is not None:
             state["results"] = list(results)
-    return DispatchResult("llm", text, first_tool, first_args, "；".join(results), _ms(started), results)
+    return DispatchResult("llm", text, first_tool, first_args, "；".join(results), _ms(started), results, streamed=streamed)
 
 
 def _llm_route(
@@ -671,14 +700,16 @@ def _llm_route(
     messages: list[dict[str, Any]] = _seed_messages(cfg, context, text)
     schemas = [meta.schema for meta in REGISTRY.values()]
     initial: dict[str, Any] | None = None
+    spoken_first = False
     if cfg.flag("llm.stream", True):
         stream_res = _try_stream_route(
             messages, schemas, cfg, started, text, on_sentence, should_stop)
         if isinstance(stream_res, DispatchResult):
             return stream_res
-        if isinstance(stream_res, dict):
-            initial = stream_res
-    return _agent_rounds(messages, schemas, executor, cfg, text, started, state, initial)
+        if isinstance(stream_res, tuple):
+            initial, spoken_first = stream_res
+    return _agent_rounds(messages, schemas, executor, cfg, text, started, state, initial,
+                         on_sentence, should_stop, spoken_first)
 
 
 _SPLIT = re.compile(

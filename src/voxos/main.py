@@ -1029,7 +1029,7 @@ class _StreamSpeaker:
                     break
                 spoken = dialogue.shape(piece, self.cfg)
                 if spoken and not _is_stale(self.owner):
-                    if not _say_one(spoken, self.cfg, self.owner):
+                    if not _say_one(spoken, self.cfg, self.owner, self.pipeline):
                         break
                     self.heard.append(spoken)
         except Exception as exc:  # noqa: BLE001
@@ -1163,7 +1163,8 @@ def _run_say(piece: str, cfg: Config, owner: object, path: Path | None = None) -
                         _TTS["proc"] = None
 
 
-def _say_locally(piece: str, cfg: Config, owner: object) -> bool:
+def _say_locally(piece: str, cfg: Config, owner: object,
+                 reference: Callable[[bytes, int, float], None] | None = None) -> bool:
     """say 先合成临时 WAV，再走公共 PCM 播放；缺设备依赖才直播。"""
     from . import tts
     if _is_stale(owner):
@@ -1174,7 +1175,9 @@ def _say_locally(piece: str, cfg: Config, owner: object) -> bool:
             path = Path(directory) / "speech.wav"
             if not _run_say(piece, cfg, owner, path) or _is_stale(owner):
                 return False
-            completed = tts.play_wav(path, cfg, lambda: _is_stale(owner))
+            completed = (tts.play_wav(path, cfg, lambda: _is_stale(owner), reference)
+                         if reference is not None else
+                         tts.play_wav(path, cfg, lambda: _is_stale(owner)))
         return completed
     except OSError:
         if completed is None:
@@ -1188,14 +1191,18 @@ def _say_locally(piece: str, cfg: Config, owner: object) -> bool:
         return _run_say(piece, cfg, owner)
 
 
-def _say_one(piece: str, cfg: Config, owner: object) -> bool:
+def _say_one(piece: str, cfg: Config, owner: object,
+             pipeline: Any = None) -> bool:
     """云端优先；仅未开始播放且仍属当前会话时允许整句降级。"""
     from . import tts
     if _is_stale(owner):
         return False
+    ref = getattr(pipeline, "feed_reference", None) if pipeline is not None else None
     if tts.available(cfg):
         try:
-            return tts.speak(piece, cfg, lambda: _is_stale(owner))
+            return (tts.speak(piece, cfg, lambda: _is_stale(owner), ref)
+                    if ref is not None else
+                    tts.speak(piece, cfg, lambda: _is_stale(owner)))
         except tts.PlaybackStartedError as exc:
             core.note_tts_failure(str(exc))
             return False
@@ -1203,7 +1210,9 @@ def _say_one(piece: str, cfg: Config, owner: object) -> bool:
             core.note_tts_failure(str(exc))
     if _is_stale(owner):
         return False
-    return _say_locally(piece, cfg, owner)
+    return (_say_locally(piece, cfg, owner, ref)
+            if ref is not None else
+            _say_locally(piece, cfg, owner))
 
 
 def _is_stale(owner: object) -> bool:
@@ -1227,7 +1236,7 @@ def _speak(text: str, pipeline: audio.AudioPipeline, cfg: Config) -> None:
         for piece in dsp.sentences(text):
             if _is_stale(owner):
                 break
-            if not _say_one(piece, cfg, owner):
+            if not _say_one(piece, cfg, owner, pipeline):
                 break
             heard.append(piece)
     except Exception as exc:  # noqa: BLE001 - 后台播报失败不影响采集
@@ -1659,6 +1668,12 @@ def cmd_log(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def _aec_note(cfg: Config) -> str:
+    if not cfg.flag("audio.aec", True):
+        return "已禁用（audio.aec=false）"
+    return "已启用（NLMS 自适应滤波，TTS 参考对齐）"
+
+
 def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
     checks = [
         ("python", sys.version.split()[0]),
@@ -1671,6 +1686,7 @@ def cmd_doctor(_: argparse.Namespace, cfg: Config) -> int:
         ("声纹档案", _voiceprint_note(cfg)),
         ("LLM", _llm_note(cfg)),
         ("语音合成", _tts_note(cfg)),
+        ("回声消除", _aec_note(cfg)),
         ("识别后端", _hotword_note(cfg, [])),
         ("实时字幕", _subtitle_note(cfg)),
         ("判停", _turn_note(cfg)),

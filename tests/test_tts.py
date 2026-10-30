@@ -726,3 +726,24 @@ def test_say_communicate_retry_does_not_resend_text(cfg, session):
     assert main._wait_say(proc, "-f 只是文本", owner, 15)
     assert [call.kwargs["input"] for call in proc.communicate.call_args_list] == [
         "-f 只是文本".encode(), None]
+
+
+def test_real_playback_feeds_audio_pipeline_aec_reference(cfg, device):
+    """真实代码路径：tts.play 写入声卡时通过 reference 回调驱动 AudioPipeline 的 AEC 缓冲区。"""
+    import numpy as np
+    from voxos import audio, dsp
+    _, stream = device
+    pipeline = audio.AudioPipeline(cfg=cfg, stt=audio.ScriptedStt(["停"]),
+                                   lock=dsp.SpeakerLock(), vad=dsp.EnergyVad())
+    assert pipeline.aec.ref_count == 0
+
+    raw_pcm = (np.sin(np.linspace(0, 10, 480)) * 10000).astype(np.int16).tobytes()
+    success = tts.play(iter([raw_pcm]), cfg, reference=pipeline.feed_reference)
+    assert success is True
+    assert pipeline.aec.ref_count > 0
+
+    pipeline.echo.tts_start()
+    mic_chunk = np.full(320, 0.1, dtype=np.float32)
+    out = pipeline._gate_playback(mic_chunk)
+    assert len(out) == 1
+

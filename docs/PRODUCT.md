@@ -20,7 +20,7 @@
 | 沙箱没起来时，命令照样跑成功了 | 照样执行，但返回文本第一句就是「（沙箱没能应用，这次是直接执行的）」 | 用户以为有沙箱、实际没有，比一开始就说清楚危险得多 | 结果文本多一行；`tools._shell` |
 | 发消息失败只说「执行失败」 | 直接说「系统设置 → 隐私与安全性 → 辅助功能」 | iOS 的权限范式：告诉用户去哪个开关，而不是解释错误码 | 认 5 种错误串；`messaging._HINTS` |
 | 定时任务到点时弹确认卡，没人看，超时按拒绝 | 创建任务时确认一次，到点直接执行 | 「一次授权，长期生效」。半夜弹卡等于这条任务永远不会执行 | `approved` 字段跟着任务落盘；`scheduler.add` |
-| 窗口占 Dock、抢焦点、关掉进程还在 | `NSApplication.setActivationPolicy(.accessory)`，右上角，`canJoinAllSpaces`，关窗即退 | 它是个家电，不是个 App。用完即走，不留看不见的常驻 | 没有菜单栏图标；`native/VoxOSWindow.swift` |
+| 窗口被盖住后找不到、拖不动、关掉进程还在 | `setActivationPolicy(.regular)` 进 Dock 与 ⌘Tab，点 Dock 图标拉回窗口；顶部 40px 可拖动；`canJoinAllSpaces`，关窗即退 | 能随时找到并激活，用完即走，不留看不见的常驻 | 没有菜单栏图标；`native/VoxOSWindow.swift` |
 | 「打开浏览器」会命中 `wechatwebdevtools` | 应用名匹配按「完全相同 > 前缀 > 包含」排序，找不到就**列出真实存在的名字** | Apple HIG：不要猜。猜错的代价比说「没找到」大 | 多写 15 行匹配逻辑；`tools._find_app` |
 | 一句话要等 1 秒才动 | 正则快通道 <2ms 先跑，命中就不叫模型 | 张小龙：即时反馈。能 2ms 答完的事不该等 4 秒 | 快通道只认十来种说法，复杂句子仍要慢通道 |
 | 打开窗口要 2.9 秒 | 换掉 Chrome，用 79 行 Swift + WKWebView | 用户感知的「快」只有一件事：**窗口出现**。为此值得写一门新语言 | 多一个编译步骤、多一份 plist；见 `docs/PERFORMANCE.md §1.1` |

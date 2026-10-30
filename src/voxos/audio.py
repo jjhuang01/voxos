@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import threading
 import time
 import wave
 from dataclasses import dataclass, field
@@ -565,6 +566,59 @@ class Utterance:
     during_tts: bool = False
 
 
+class EchoCanceller:
+    """外放回声消除器：管理 TTS PCM 参考信号缓冲，在麦克风进入判停前自适应滤波消除回声。"""
+
+    def __init__(self, cfg: Config | None = None) -> None:
+        self.enabled = bool(cfg.flag("audio.aec", True)) if cfg else True
+        self.filter = dsp.AECFilter()
+        self.lock = threading.Lock()
+        self.ref_buf = np.zeros(dsp.SR * 3, dtype=np.float32)
+        self.ref_count = 0
+        self.delay = 0
+        self.delay_locked = False
+
+    def reset(self) -> None:
+        with self.lock:
+            self.ref_count = 0
+            self.delay_locked = False
+            self.filter.reset()
+
+    def feed_reference(self, piece: bytes, rate: int, stamp: float = 0.0) -> None:
+        """接收扬声器播放流提交的 PCM 块，重采样至 16kHz 并写入参考缓冲区。"""
+        if not self.enabled or not piece:
+            return
+        pcm = np.frombuffer(piece, dtype=np.int16).astype(np.float32) / 32768.0
+        if rate != dsp.SR and len(pcm) > 0:
+            target_len = int(len(pcm) * dsp.SR / rate)
+            pcm = np.interp(np.linspace(0, len(pcm), target_len, endpoint=False),
+                            np.arange(len(pcm)), pcm).astype(np.float32)
+        with self.lock:
+            n = len(pcm)
+            if n >= len(self.ref_buf):
+                self.ref_buf[:] = pcm[-len(self.ref_buf):]
+                self.ref_count = len(self.ref_buf)
+            else:
+                self.ref_buf = np.roll(self.ref_buf, -n)
+                self.ref_buf[-n:] = pcm
+                self.ref_count = min(len(self.ref_buf), self.ref_count + n)
+
+    def process(self, chunk: np.ndarray) -> np.ndarray:
+        """对麦克风输入块进行回声消除。"""
+        if not self.enabled or self.ref_count < len(chunk):
+            return chunk
+        with self.lock:
+            if not self.delay_locked and self.ref_count >= 1600:
+                est = dsp.estimate_delay(chunk, self.ref_buf[-self.ref_count:])
+                if est > 0:
+                    self.delay, self.delay_locked = est, True
+            ref_idx = len(self.ref_buf) - self.delay - len(chunk)
+            if ref_idx < 0:
+                return chunk
+            ref_block = self.ref_buf[ref_idx:ref_idx + len(chunk)]
+            return self.filter.filter_block(chunk, ref_block)
+
+
 @dataclass
 class AudioPipeline:
     """把「设备流 → 滤波 → VAD → 端点 → 声纹 → STT」串成一条可测试的流水线。"""
@@ -577,6 +631,7 @@ class AudioPipeline:
     on_partial: Callable[[str], None] | None = None
     on_barge_in: Callable[[], None] | None = None
     echo: dsp.EchoGate = field(default_factory=dsp.EchoGate)
+    aec: EchoCanceller = field(default_factory=EchoCanceller)
     partial_interval_ms: float = 400.0
     turn_detector: Any = None        # 显式注入（测试用）；None 时按配置造
     stats: dict[str, int] = field(default_factory=lambda: {"chunks": 0, "utterances": 0, "rejected": 0})
@@ -588,43 +643,38 @@ class AudioPipeline:
             max_ms=float(self.cfg.get("audio.max_utterance_ms", 12000)),
             min_speech_ms=float(self.cfg.get("audio.min_speech_ms", 200)),
         )
-        # 必须 reset 一次：`deadline_ms` 是 dataclass 默认值，只有 `reset()` 才把它
-        # 设成上面那个 `silence_ms`。不调的话，**第一句话**用的是 800 而不是配置值——
-        # 这个 bug 靠读代码看不出来，是靠 `scripts/voice_bench.py` 量出来的。
         self._ep.reset()
-        # 判停器：有 smart-turn 模型就用音频判停，没有就退回文本判停。
-        # 这一步**不加载模型**（`turn.make` 里才建 session），所以构造管道仍然是毫秒级。
         self.smart_turn = self.turn_detector if self.turn_detector is not None else turn.make(self.cfg)
         self.turn_threshold = turn.threshold(self.cfg)
-        # 三态下界：低于它延长等待，中间地带才交给文本判据。
         self.turn_veto = float(self.cfg.get("audio.turn_veto", 0.2))
         self.mask_mode = self.cfg.flag("audio.mask_mode", False)
         self.prefix_ms = float(self.cfg.get("audio.prefix_padding_ms", 300))
         self.window_ms = float(self.cfg.get("audio.partial_window_ms", 3000))
-        self._prefix: list[np.ndarray] = []
-        self._prefix_ms = 0.0
-        # 实时字幕：`stream.make_streamer` 自己决定要不要（远端引擎一律不给，
-        # 因为字幕必须在声纹校验之前出字，等于把没验身份的音频提前传上云）。
         self.streamer = stream.make_streamer(self.cfg, self.stt)
         self.subtitle_interval_ms = float(self.cfg.get("audio.subtitle_interval_ms", 400))
         self.first_partial_ms = float(self.cfg.get("audio.first_partial_ms", 250))
-        self._text = ""            # 本句当前 partial（字幕 + 文本判停共用这一次解码）
-        self._text_ms = 0.0        # 上次解码时的句内时长
-        self._buf_ms = 0.0         # 本句已攒多长
-        self._shown = ""           # 上次推给界面的字幕，重复的不推
-        self._barge: list[np.ndarray] = []   # TTS 期间攒下的「可能是插话」的音频
+        self.aec = EchoCanceller(self.cfg)
+        self._init_runtime_state()
+
+    def _init_runtime_state(self) -> None:
+        self._prefix: list[np.ndarray] = []
+        self._prefix_ms = 0.0
+        self._text, self._text_ms, self._buf_ms, self._shown = "", 0.0, 0.0, ""
+        self._barge: list[np.ndarray] = []
         self._barge_ms = 0.0
-        self._bc_seen = (-1.0, False)            # 上次判附和时攒到多长、结论是什么
+        self._bc_seen = (-1.0, False)
         self._during_tts = False
-        # 声纹不是分离器：重叠音频仍含回声，不能作为可执行指令回灌。
-        self._await_restart = False
-        self._restart_silence_ms = 0.0
-        self._restart_wait_ms = 0.0
+        self._await_restart, self._restart_silence_ms, self._restart_wait_ms = False, 0.0, 0.0
         self._raw_level_dbfs = -120.0
+
+    def feed_reference(self, piece: bytes, rate: int, stamp: float = 0.0) -> None:
+        """接收扬声器播放流提交的 PCM 块。"""
+        self.aec.feed_reference(piece, rate, stamp)
 
     def reset(self) -> None:
         """设备断流后清掉句级状态：旧缓冲、端点状态和 VAD 上下文都不能跨断流。"""
         self._ep.reset()
+        self.aec.reset()
         self._prefix, self._prefix_ms = [], 0.0
         self._barge, self._barge_ms = [], 0.0
         self._during_tts = False
@@ -794,7 +844,8 @@ class AudioPipeline:
     def _gate_playback(self, chunk: np.ndarray) -> list[np.ndarray]:
         """播放重叠段用于打断；打断后直接把已攒音频作为开头继续收音。"""
         if self.echo.muted:
-            return self._during_playback(chunk)
+            cleaned = self.aec.process(chunk)
+            return self._during_playback(cleaned)
         self._barge, self._barge_ms = [], 0.0
         if not self._await_restart:
             return [chunk]
