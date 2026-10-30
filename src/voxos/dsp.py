@@ -453,6 +453,25 @@ def estimate_delay(mic: np.ndarray, ref: np.ndarray, max_delay: int = 4000) -> i
     return max(0, min(delay, max_delay))
 
 
+def locate_echo(mic: np.ndarray, ref: np.ndarray, max_delay: int = 8000) -> tuple[int, float]:
+    """在同一时刻结束的麦克风与参考里找回声延迟，返回 (延迟样点, 归一化相关峰)。
+
+    `estimate_delay` 只拿一块麦克风（32ms）去比，实时流式下块里多半只有半个音节，
+    峰值落在噪声上（实测真实延迟 2400 估成 241）。这里用整段（≥0.5s）做 FFT 互相关，
+    并给出峰值强度：峰太弱说明根本没听到外放（耳机、静音），调用方就不该锁定。
+    """
+    n = len(mic)
+    if n < 1600 or len(ref) < n + max_delay:
+        return 0, 0.0
+    seg = ref[-(n + max_delay):]
+    size = 1 << int(np.ceil(np.log2(len(seg) + n)))
+    corr = np.fft.irfft(np.fft.rfft(seg, size) * np.conj(np.fft.rfft(mic, size)), size)[:max_delay + 1]
+    lags = corr[::-1]                     # lags[d]：mic[t] 对 ref[t-d]
+    energy = np.sqrt(np.dot(mic, mic) * np.dot(seg, seg) * n / len(seg)) + 1e-9
+    delay = int(np.argmax(np.abs(lags)))
+    return delay, float(abs(lags[delay]) / energy)
+
+
 @dataclass
 class AECFilter:
     """自适应回声消除器（NLMS 归一化最小均方 + 双讲挂起保护）。"""

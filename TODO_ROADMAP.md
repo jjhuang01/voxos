@@ -148,7 +148,7 @@
 
 ### Task 1.8 工程化
 
-- [~] 当前收集 565 项测试（`make test`），全量受环境清理确认保护阻断；历史已发布基线见验收表。
+- [~] 当前收集 568 项测试（`make test`），全量受环境清理确认保护阻断；历史已发布基线见验收表。
       `scripts/verify.py` 19 项验收指标（`make verify`），
       `scripts/audit_ui.py` 12 项界面回归（`make audit-ui`），`scripts/soak.py` 长稳（`make soak`）。
 - [x] 全模块单函数 ≤ 40 行（最长 40 行，`src/voxos/core.py` 的 `_agent_rounds`）、核心五模块共 8 个类、核心零第三方依赖。

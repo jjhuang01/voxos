@@ -571,16 +571,26 @@ class EchoCanceller:
 
     def __init__(self, cfg: Config | None = None) -> None:
         self.enabled = bool(cfg.flag("audio.aec", True)) if cfg else True
-        self.filter = dsp.AECFilter()
+        self.filter = self._new_filter()
         self.lock = threading.Lock()
         self.ref_buf = np.zeros(dsp.SR * 3, dtype=np.float32)
         self.ref_count = 0
+        self.mic_buf = np.zeros(dsp.SR, dtype=np.float32)
+        self.mic_count = 0
         self.delay = 0
         self.delay_locked = False
+
+    @staticmethod
+    def _new_filter() -> dsp.AECFilter:
+        """256 抽头 = 16ms：盖住直达声后的近场反射，64 抽头只剩直达声。"""
+        taps = 256
+        return dsp.AECFilter(taps=taps, weights=np.zeros(taps, dtype=np.float32),
+                             _history=np.zeros(taps - 1, dtype=np.float32))
 
     def reset(self) -> None:
         with self.lock:
             self.ref_count = 0
+            self.mic_count = 0
             self.delay_locked = False
             self.filter.reset()
 
@@ -604,19 +614,42 @@ class EchoCanceller:
                 self.ref_count = min(len(self.ref_buf), self.ref_count + n)
 
     def process(self, chunk: np.ndarray) -> np.ndarray:
-        """对麦克风输入块进行回声消除。"""
+        """对麦克风输入块进行回声消除；没把握时原样放行，绝不让信号变响。"""
         if not self.enabled or self.ref_count < len(chunk):
             return chunk
         with self.lock:
-            if not self.delay_locked and self.ref_count >= 1600:
-                est = dsp.estimate_delay(chunk, self.ref_buf[-self.ref_count:])
-                if est > 0:
-                    self.delay, self.delay_locked = est, True
+            self._remember_mic(chunk)
+            if not self.delay_locked:
+                self._try_lock()
+                if not self.delay_locked:
+                    return chunk
             ref_idx = len(self.ref_buf) - self.delay - len(chunk)
             if ref_idx < 0:
                 return chunk
-            ref_block = self.ref_buf[ref_idx:ref_idx + len(chunk)]
-            return self.filter.filter_block(chunk, ref_block)
+            cleaned = self.filter.filter_block(chunk, self.ref_buf[ref_idx:ref_idx + len(chunk)])
+            # 发散保护：输出比输入还响，说明对齐错了或滤波器跑飞，重来并放行原声，
+            # 否则打断判定拿到的是放大后的回声，比不做消除更糟。
+            if float(np.dot(cleaned, cleaned)) > float(np.dot(chunk, chunk)) * 1.05:
+                self.filter = self._new_filter()
+                self.delay_locked, self.mic_count = False, 0
+                return chunk
+            return cleaned
+
+    def _remember_mic(self, chunk: np.ndarray) -> None:
+        n = min(len(chunk), len(self.mic_buf))
+        self.mic_buf = np.roll(self.mic_buf, -n)
+        self.mic_buf[-n:] = chunk[-n:]
+        self.mic_count = min(len(self.mic_buf), self.mic_count + n)
+
+    def _try_lock(self) -> None:
+        """攒够 0.5 秒麦克风再整段互相关；峰值不够强（没听到外放）就不锁。"""
+        window = min(self.mic_count, dsp.SR // 2)
+        max_delay = min(dsp.SR // 2, self.ref_count - window)
+        if window < dsp.SR // 2 or max_delay <= 0:
+            return
+        delay, peak = dsp.locate_echo(self.mic_buf[-window:], self.ref_buf[-self.ref_count:], max_delay)
+        if peak >= 0.3:
+            self.delay, self.delay_locked = max(0, delay - 16), True   # 留 16 样点给峰前的抽头
 
 
 @dataclass
